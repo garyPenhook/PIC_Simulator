@@ -1,0 +1,9 @@
+[package]
+name = "devdesc"
+version = "0.1.0"
+edition = "2024"
+description = "Device description schema, loader and validator shared by basicc and devgen"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+toml = "1"

@@ -1,0 +1,29 @@
+# Numbers read BY HAND from the PIC18F27/47Q10 data sheet, used by `devgen check` to cross-check the
+# description generated from the Microchip pack. Do not generate this file.
+
+[source]
+datasheet = "DS40002043F"
+reference = "Table 1 (p.4), Fig. 11-1 (p.108), Interrupts (p.193)"
+
+[memory]
+program_bytes = 131072    # 128K bytes program flash          (Table 1, p.4)
+sram_bytes    = 3615      # data SRAM                         (Table 1, p.4)
+eeprom_bytes  = 1024      # data EEPROM                       (Table 1, p.4)
+config_bytes  = 12        # 6 configuration words, 30 0000h-30 000Bh (Fig. 11-1, p.108)
+user_id_bytes = 256       # 128 words user IDs, 20 0000h-20 00FFh    (Fig. 11-1, p.108)
+
+[vectors]
+reset          = 0        # 0000h  (Fig. 11-1, p.108)
+interrupt_high = 8        # 0008h  (p.108, p.193)
+interrupt_low  = 24       # 0018h  (p.108, p.193)
+
+# Peripheral counts from Table 1 (p.4), checked by counting SFRs whose name matches the pattern
+# ('#' = one digit). Adjust a pattern only after confirming the register naming in the pack.
+[counts]
+"TX#STA"    = 2   # EUSART                   (Table 1: EUSART 2)
+"SSP#CON1"  = 2   # I2C/SPI (MSSP)           (Table 1: I2C/SPI 2)
+"CCP#CON"   = 2   # CCP                      (Table 1: CCP/10-bit PWM 2/2)
+"PWM#CON"   = 2   # 10-bit PWM               (Table 1: CCP/10-bit PWM 2/2)
+"CM#CON0"   = 2   # comparators              (Table 1: Comparators 2)
+"CWG#CON0"  = 1   # complementary waveform generator (Table 1: CWG 1)
+"CLC#CON"   = 8   # configurable logic cells (Table 1: CLC 8)
