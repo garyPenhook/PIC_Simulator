@@ -226,8 +226,20 @@ impl Device {
         if m.program.size == 0 {
             errs.push("program memory size is zero".into());
         }
-        if self.vectors.interrupt_high <= self.vectors.reset || self.vectors.interrupt_low <= self.vectors.interrupt_high {
-            errs.push("vectors are not in increasing order (reset < high < low)".into());
+        // Parts with two interrupt priorities have reset < high < low; the enhanced mid-range
+        // core has a single interrupt vector, recorded as high == low.
+        let single_vector = self.device.family == "pic16e";
+        let low_bad = if single_vector {
+            self.vectors.interrupt_low != self.vectors.interrupt_high
+        } else {
+            self.vectors.interrupt_low <= self.vectors.interrupt_high
+        };
+        if self.vectors.interrupt_high <= self.vectors.reset || low_bad {
+            errs.push(if single_vector {
+                "vectors are not reset < interrupt, with high == low (single interrupt vector)".into()
+            } else {
+                "vectors are not in increasing order (reset < high < low)".into()
+            });
         }
         // GPR ranges: sorted, non-empty, non-overlapping; totals agree.
         let mut total = 0u32;

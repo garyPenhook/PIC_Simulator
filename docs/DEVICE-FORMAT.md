@@ -85,6 +85,16 @@ consistent; vectors increasing; every SFR inside an SFR range with unique names;
 the register width and not overlapping; joined members consecutive and present; config registers
 inside the config region and every setting value fitting its field.
 
+## Family differences
+
+* `pic16e` (enhanced mid-range, arch `16Exxx`): one interrupt vector, so `interrupt_high` and
+  `interrupt_low` are equal (0004h); there is no Access Bank, so `access_ram` / `access_sfr` are
+  empty ranges (`start = end = 0`); program, user-ID and configuration sizes and addresses count
+  14-bit **words**, not bytes; GPR sectors that only shadow common RAM are skipped so `total_gpr`
+  matches the data sheet.
+* Descriptions exist for `PIC16F17126` and `PIC16F17146` (DS40002343F), but there is no `pic16e` code
+  generator yet: the compiler refuses these parts with an `E-DEVICE` error (PLAN §9.3 step 3).
+
 ## Adding a device (checklist)
 
 1. Get the pack, data sheet and errata (via the `microchip-docs` / `pic-docs` tools) and note the
