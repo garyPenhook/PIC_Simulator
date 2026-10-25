@@ -110,3 +110,11 @@ inside the config region and every setting value fitting its field.
    `docs/FACTS-18F27Q10.md`.
 7. Compile the standard test programs for the part; only then list it as supported in
    `docs/DEVICES.md`.
+8. **Review every library module for the new part** (`docs/LIBRARY.md`, "Device support"). The modules
+   in `lib/` were written for the PIC18F27/47Q10; each one names registers, bit fields, interrupt flags,
+   pins and channel numbers that may differ or not exist on the new part. Add the part's column to that
+   table, port or `#error` each module, and do not call a module supported until it is. A new *family*
+   (not just a new part in a known one) also needs the intrinsics and any inline assembly in the modules
+   (`Asm` blocks, table reads) checked against the new instruction set.
+9. **Update `docs/MANUAL.md`, "Supported device"**: add the part, its core, memory sizes and its status
+   (supported, or described but not compilable and why), and keep the library table in step.
