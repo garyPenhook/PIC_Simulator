@@ -14,7 +14,10 @@ datasheet = "DS40002043"
 reset = 0
 interrupt_high = 8
 interrupt_low = 24
-source = "PIC18F27/47Q10 data sheet DS40002043F p.108 and p.193 (fixed vectors: reset 0000h, high 0008h, low 0018h)"
+source = "PIC18F27/47Q10 data sheet DS40002043F p.108 and p.193 (fixed vectors: reset 0000h, high 0008h, low 0018h); PIC18F0x/1xQ41 data sheet DS40002214G p.57 and p.114 (reset 000000h; with MVECEN = 0 the IVTBASE default 000008h is the high vector and the low vector is eight words on, 000018h)"
+
+[memory]
+hw_stack = 31
 
 [memory.program]
 start = 0

@@ -105,6 +105,9 @@ pub struct Data {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Memory {
+    /// Levels of the hardware return stack (`hwstackdepth` in the pack); 0 when a file predates the field.
+    #[serde(default)]
+    pub hw_stack: u32,
     pub program: Region,
     pub eeprom: Region,
     pub user_id: Region,
@@ -347,6 +350,7 @@ mod tests {
             },
             vectors: Vectors { reset: 0, interrupt_high: 8, interrupt_low: 0x18, source: "t".into() },
             memory: Memory {
+                hw_stack: 31,
                 program: Region { start: 0, size: 1024 },
                 eeprom: Region { start: 0x31_0000, size: 256 },
                 user_id: Region { start: 0x20_0000, size: 16 },

@@ -1,0 +1,47 @@
+# Numbers read BY HAND from the PIC18F04/05/14/15Q41 data sheet, used by `devgen check` to cross-check the
+# description generated from the Microchip pack. Do not generate this file.
+
+[source]
+datasheet = "DS40002242F"
+reference = "Table 1 (p.1), Fig. 9-1 (p.58), Table 10-2 (p.92), Table 3-1 / 3-2 pin allocation (p.13 ff.), VIC (p.113-114)"
+
+[memory]
+program_bytes  = 16384    # program flash                       (Table 1, p.1; Fig. 9-1, p.58)
+sram_bytes     = 1024     # data SRAM                           (Table 1, p.1)
+system_ram_bytes = 256     # GPR bank 9 is the NVM page buffer, not user RAM (Table 10-2, p.92)
+eeprom_bytes   = 512       # data EEPROM, 380000h-3801FFh        (Table 1, p.1; Fig. 9-1, p.58)
+hw_stack_levels = 127     # return address stack: up to 127 calls and interrupts (9.1.3, p.60-61)
+config_bytes   = 10        # configuration bytes 300000h-300009h (Fig. 9-1, p.58; 8.1, p.43)
+user_id_bytes  = 64        # 32 words of user ID, 200000h-20003Fh (Fig. 9-1, p.58; 8.3, p.43)
+
+# The pack's configuration sector runs to 300012h; the data sheet implements 300000h-300009h and
+# lists the rest as reserved (Fig. 9-1, p.58). Every configuration register the pack defines lies in
+# 300000h-300008h, which `Device::validate` checks, so the compiler is not affected.
+[accepted."configuration bytes"]
+pack   = 18
+reason = "pack sector is longer than the implemented 300000h-300009h; the extra bytes hold no configuration register"
+
+[vectors]
+reset          = 0        # 000000h                            (9.1, p.57)
+interrupt_high = 8        # IVTBASE default 000008h, MVECEN = 0 (11.3.3, p.114)
+interrupt_low  = 24       # eight words on: 000018h             (11.3.3, p.114)
+
+# Peripheral counts from Table 1 (p.1), checked by counting SFRs whose name matches the pattern
+# ('#' = one digit). Adjust a pattern only after confirming the register naming in the pack.
+[counts]
+"PWM#CON"   = 3   # 16-bit dual PWM modules                       (Table 1: 16-Bit Dual PWM/CCP 3/1)
+"CCP#CON"   = 1   # CCP                                           (Table 1: 3/1)
+"T#HLT"     = 2   # 8-bit timers with HLT (Timer2, Timer4)         (Table 1: 8-Bit Timer with HLT/16-Bit Timers 2/3)
+"SMT#CON0"  = 1   # signal measurement timer                      (Table 1: SMT 1)
+"CWG#CON0"  = 1   # complementary waveform generator              (Table 1: CWG 1)
+"NCO#CON"   = 1   # numerically controlled oscillator             (Table 1: NCO 1)
+"DAC#CON"   = 2   # 8-bit DACs                                    (Table 1: 8-Bit DAC 2)
+"OPA#CON0"  = 1   # operational amplifier                         (Table 1: Operational Amplifier 1)
+"CM#CON0"   = 2   # comparators                                   (Table 1: Comparator/ZCD 2/1)
+"ZCDCON"    = 1   # zero-cross detect                             (Table 1: 2/1)
+"HLVDCON0"  = 1   # high/low-voltage detect                       (Table 1: HLVD 1)
+"U#CON0"    = 3   # UARTs, two plain and one with protocol support (Table 1: UART/UART with Protocol Support 2/1)
+"SPI#CON0"  = 2   # SPI                                           (Table 1: SPI/I2C 2/1)
+"I#C#CON0"  = 1   # I2C                                           (Table 1: SPI/I2C 2/1)
+"DMA#PR"    = 4   # DMA channels                                  (Table 1: DMA 4)
+"PORTB"     = 0   # 14-pin package: 12 I/O pins (ports A and C) (Table 1; pin allocation table)

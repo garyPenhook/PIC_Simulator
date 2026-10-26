@@ -16,6 +16,9 @@ interrupt_high = 4
 interrupt_low = 4
 source = "PIC16F17126/46 data sheet DS40002343F p.36 and Fig. 9-1 p.37 (Reset vector 0000h, interrupt vector 0004h)"
 
+[memory]
+hw_stack = 16
+
 [memory.program]
 start = 0
 size = 16384

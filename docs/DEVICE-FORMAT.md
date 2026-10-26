@@ -33,6 +33,8 @@ interrupt_high = 8
 interrupt_low = 24
 source = "…DS40002043F p.108 and p.193…"
 
+[memory]                    # plain values first, then the tables below
+hw_stack = 31               # levels of the hardware return stack (pack: hwstackdepth); 0 = not given
 [memory.program]  start = 0        size = 131072      # bytes
 [memory.eeprom]   start = 3211264  size = 1024
 [memory.user_id]  start = 2097152  size = 256
@@ -79,6 +81,13 @@ scripts/check-devices.sh                                       # both, for every
   guess.
 * `check` compares sizes, vectors and peripheral counts (found by counting SFR names such as
   `TX#STA`) with the hand-entered expect file, so a pack/data-sheet disagreement is caught.
+* The expect file may also hold `hw_stack_levels` (compared with `memory.hw_stack`), `system_ram_bytes`
+  (RAM the pack lists beyond the data sheet's `sram_bytes`, such as the PIC18-Q41 NVM page-buffer bank, so
+  that `total_gpr = sram_bytes + system_ram_bytes` and `usable_gpr = sram_bytes`), and `[accepted."<what>"]`
+  tables (`pack = <value>`, `reason = "…"`) for a difference between the pack and the data sheet that has
+  been looked at and does not matter; `check` prints it as a note and fails on any other difference.
+* A joined register the pack declares with one byte member (`DAC1DAT` on the PIC18-Q41) is an ordinary
+  SFR; `gen` skips it rather than stopping (DS40002214G p.765: `DAC1DATL` is 8 bits).
 
 `Device::validate()` checks: GPR ranges sorted, non-overlapping, and `total_gpr` / `usable_gpr`
 consistent; vectors increasing; every SFR inside an SFR range with unique names; fields within
@@ -87,6 +96,11 @@ inside the config region and every setting value fitting its field.
 
 ## Family differences
 
+* `pic18` parts with the vectored interrupt controller (PIC18-Q41, recognised by the `SHADCON` register): the
+  vectors in the file are those of `MVECEN = 0`, the mode the compiler uses; see `docs/FACTS-18F-Q41.md`
+  for what else differs (14-bit data addresses, an Access Bank made of two ranges, `INTCON0`, 127-level stack,
+  hardware context save). `family_facts()` in `devgen` is keyed by the pack's `arch` (`18xxxx` for both the Q10
+  and the Q41), so its vector source cites both data sheets.
 * `pic16e` (enhanced mid-range, arch `16Exxx`): one interrupt vector, so `interrupt_high` and
   `interrupt_low` are equal (0004h); there is no Access Bank, so `access_ram` / `access_sfr` are
   empty ranges (`start = end = 0`); program, user-ID and configuration sizes and addresses count

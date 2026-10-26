@@ -9,6 +9,7 @@ reference = "Table 1 (p.4), Fig. 11-1 (p.108), Interrupts (p.193)"
 program_bytes = 131072    # 128K bytes program flash          (Table 1, p.4)
 sram_bytes    = 3615      # data SRAM                         (Table 1, p.4)
 eeprom_bytes  = 1024      # data EEPROM                       (Table 1, p.4)
+hw_stack_levels = 31      # 31-level return address stack          (Return Address Stack, p.110)
 config_bytes  = 12        # 6 configuration words, 30 0000h-30 000Bh (Fig. 11-1, p.108)
 user_id_bytes = 256       # 128 words user IDs, 20 0000h-20 00FFh    (Fig. 11-1, p.108)
 
