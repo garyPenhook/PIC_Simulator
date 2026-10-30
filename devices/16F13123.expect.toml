@@ -1,0 +1,29 @@
+# Numbers read BY HAND from the PIC16F13145 family data sheet (DS40002519D), used by `devgen check` to
+# cross-check the description generated from the Microchip pack. Do not generate this file.
+# Program memory, user IDs and configuration are counted in 14-bit WORDS for this family (one address per
+# word), not bytes as on PIC18.
+
+[source]
+datasheet = "DS40002519D"
+reference = "Table 1 (p.1), Table 9-1 (p.34), Device Configuration (p.22), 7.2 stack (p.20)"
+
+[memory]
+program_bytes = 2048     # 2048 words, last address 07FFh  (Table 1 p.1; Table 9-1 p.34)
+sram_bytes    = 256      # data SRAM                         (Table 1, p.1)
+eeprom_bytes  = 0         # no data EEPROM: Table 1 lists none (the DIA/DCI regions are not data EEPROM)
+hw_stack_levels = 16      # 16-level hardware stack            (7.2, p.20)
+config_bytes  = 5         # 5 configuration words, 8007h-800Bh (Sec. 8.1, p.22)
+user_id_bytes = 4         # 4 user ID words, 8000h-8003h       (Sec. 8.4, p.22)
+
+[vectors]
+reset          = 0        # 0000h  (Sec. 9.1, p.34)
+interrupt_high = 4        # 0004h  (single interrupt vector)
+interrupt_low  = 4        # same vector
+
+# Peripheral counts from Table 1 (p.1), checked by counting SFRs whose name matches the pattern.
+[counts]
+"TX#STA"    = 1   # EUSART                   (Table 1: EUSART 1)
+"SSP#CON1"  = 1   # I2C/SPI (MSSP)           (Table 1: I2C/SPI 1)
+"CCP#CON"   = 2   # CCP                      (Table 1: CCP 2)
+"PWM#CON"   = 2   # 10-bit PWM               (Table 1: PWM 2)
+"CM#CON0"   = 2   # comparators              (Table 1: CMP 2)

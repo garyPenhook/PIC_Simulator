@@ -14,7 +14,7 @@ datasheet = "40002343"
 reset = 0
 interrupt_high = 4
 interrupt_low = 4
-source = "PIC16F17126/46 data sheet DS40002343F p.36 and Fig. 9-1 p.37 (Reset vector 0000h, interrupt vector 0004h)"
+source = "PIC16F17126/46 data sheet DS40002343F p.36 and Fig. 9-1 p.37; PIC16F13145 family data sheet DS40002519D p.34 (Reset vector 0000h, interrupt vector 0004h)"
 
 [memory]
 hw_stack = 16

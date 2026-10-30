@@ -106,8 +106,8 @@ inside the config region and every setting value fitting its field.
   empty ranges (`start = end = 0`); program, user-ID and configuration sizes and addresses count
   14-bit **words**, not bytes; GPR sectors that only shadow common RAM are skipped so `total_gpr`
   matches the data sheet.
-* Descriptions exist for `PIC16F17126` and `PIC16F17146` (DS40002343F), but there is no `pic16e` code
-  generator yet: the compiler refuses these parts with an `E-DEVICE` error (PLAN §9.3 step 3).
+* Descriptions exist for `PIC16F17126` and `PIC16F17146` (DS40002343F) and for the nine parts of the PIC16F13145 family (DS40002519D); all compile with the `pic16e` code
+  generator. A part with no data EEPROM (the PIC16F13145 family) has `[memory.eeprom] size = 0`; `devgen` writes that only for `pic16e` when the pack has no `EEDataSector`.
 
 ## Adding a device (checklist)
 
