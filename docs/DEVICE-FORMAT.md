@@ -106,8 +106,10 @@ inside the config region and every setting value fitting its field.
   empty ranges (`start = end = 0`); program, user-ID and configuration sizes and addresses count
   14-bit **words**, not bytes; GPR sectors that only shadow common RAM are skipped so `total_gpr`
   matches the data sheet.
-* Descriptions exist for `PIC16F17126` and `PIC16F17146` (DS40002343F) and for the nine parts of the PIC16F13145 family (DS40002519D); all compile with the `pic16e` code
-  generator. A part with no data EEPROM (the PIC16F13145 family) has `[memory.eeprom] size = 0`; `devgen` writes that only for `pic16e` when the pack has no `EEDataSector`.
+* Descriptions exist for `PIC16F17126` and `PIC16F17146` (DS40002343F), for the nine parts of the PIC16F13145 family (DS40002519D) and for the eight parts PIC16F18313, 18323, 18324, 18325, 18326, 18344,
+  18345 and 18346 (DS40001799F, DS40001800E, DS40001795K, DS40001839E); all compile with the `pic16e` code
+  generator. A part with no data EEPROM (the PIC16F13145 family) has `[memory.eeprom] size = 0`; `devgen` writes that only for `pic16e` when the pack has no `EEDataSector`. The PIC16F183xx parts have
+  256 bytes of EEPROM at F000h (the data sheets call the region EEPROM; the pack lists it as `EEDataSector`) and four configuration words (8007h-800Ah).
 
 ## Adding a device (checklist)
 
