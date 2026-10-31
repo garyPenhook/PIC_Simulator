@@ -1,0 +1,29 @@
+# Numbers read BY HAND from the PIC16F15213/14/23/24/43/44 data sheet DS40002195E (PIC16F15224), used by `devgen check` to
+# cross-check the description generated from the Microchip pack. Do not generate this file.
+# Program memory, user IDs and configuration are counted in 14-bit WORDS for this family (one address per
+# word), not bytes as on PIC18. The family has no data EEPROM (Table 1 lists none; the DIA and DCI regions are not data EEPROM).
+# Device ID read from the data sheet (Register 8.7.1 p.30): 30E7h (12519); the description must carry 12519.
+
+[source]
+datasheet = "DS40002195E"
+reference = "Table 1 (p.1), Table 9-1 and Fig. 9-1 (p.32-33), Device Configuration (p.22), DEVICEID (p.30), 7.2 stack (p.21)"
+
+[memory]
+program_bytes = 4096     # 4096 words, last address 0FFFh  (Table 9-1 p.32; Table 1 p.1 gives 7K bytes of 14-bit words)
+sram_bytes    = 512      # data SRAM                         (Table 1, p.1)
+eeprom_bytes  = 0         # no data EEPROM: Table 1 lists none
+hw_stack_levels = 16      # 16-level hardware stack            (7.2 p.21, Fig. 9-1 p.33)
+config_bytes  = 5         # 5 configuration words, 8007h-800Bh (Sec. 8.1, p.22)
+user_id_bytes = 4         # 4 user ID words, 8000h-8003h       (Sec. 8.4, p.22)
+
+[vectors]
+reset          = 0        # 0000h  (Sec. 9.1 and Fig. 9-1, p.32-33)
+interrupt_high = 4        # 0004h  (single interrupt vector)
+interrupt_low  = 4        # same vector
+
+# Peripheral counts from Table 1 (p.1), checked by counting SFRs whose name matches the pattern.
+[counts]
+"TX#STA"    = 1   # EUSART                   (Table 1: EUSART 1)
+"SSP#CON1"  = 1   # MSSP                     (Table 1: MSSP 1)
+"CCP#CON"   = 2   # CCP                      (Table 1: 10-bit PWM/CCP 2/2)
+"PWM#CON"   = 2   # 10-bit PWM               (Table 1: 10-bit PWM/CCP 2/2)
