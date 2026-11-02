@@ -4,6 +4,7 @@
 //! Interrupts, resets other than the first, SLEEP and the Q41 hardware context are later milestones (S3).
 
 use crate::mem::{DataMem, Special};
+use crate::periph::Periph;
 use devdesc::Device;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -32,11 +33,33 @@ pub struct Pic18 {
     pub depth: u32,
     pub stack: Vec<u32>,
     pub shadow: (u8, u8, u8),
+    pub p: Periph,
+    /// Interrupts being served, innermost last (`true` = high priority).
+    pub in_service: Vec<bool>,
+    /// Registers saved by the vectored controller's hardware context (Q41), innermost last.
+    ctx: Vec<Ctx>,
+    /// PIRn/PIEn/IPRn addresses per interrupt register group n.
+    irq: Vec<[usize; 3]>,
+    intcon: usize,
+    vic: bool,
+    vec_high: u32,
+    vec_low: u32,
     /// Messages about things the model does not do (undefined opcode, stray address), deduplicated.
     pub notes: BTreeSet<String>,
     wide_fsr: bool,
     stk_mask: u8,
     pc_mask: u32,
+}
+
+/// What the vectored interrupt controller saves on entry (DS40002214G 11.6 p.120-121).
+#[derive(Clone, Default)]
+struct Ctx {
+    w: u8,
+    status: u8,
+    bsr: u8,
+    fsr: [u8; 6],
+    prod: [u8; 2],
+    pclat: [u8; 2],
 }
 
 #[inline]
@@ -73,7 +96,29 @@ fn words(w: u16) -> u32 {
 
 impl Pic18 {
     pub fn new(dev: &Device) -> Result<Pic18, String> {
-        let m = DataMem::new(dev)?;
+        let mut m = DataMem::new(dev)?;
+        let p = Periph::bind(dev, &mut m);
+        let intcon = dev
+            .find_sfr("INTCON")
+            .or_else(|| dev.find_sfr("INTCON0"))
+            .map(|s| s.addr as usize)
+            .ok_or_else(|| format!("{}: no INTCON", dev.device.name))?;
+        let mut irq = Vec::new();
+        for n in 0..16 {
+            if let (Some(a), Some(b), Some(c)) =
+                (dev.find_sfr(&format!("PIR{n}")), dev.find_sfr(&format!("PIE{n}")), dev.find_sfr(&format!("IPR{n}")))
+            {
+                irq.push([a.addr as usize, b.addr as usize, c.addr as usize]);
+                for x in [a, b, c] {
+                    if m.special[x.addr as usize] == Special::None {
+                        m.special[x.addr as usize] = Special::Core;
+                    }
+                }
+            } else {
+                irq.push([0; 3]);
+            }
+        }
+        m.special[intcon] = Special::Core;
         let depth = dev.memory.hw_stack.max(1);
         let hi = m.regs.fsr[0] + 1;
         let wide_fsr = m.implemented[hi as usize] > 0x0F;
@@ -89,6 +134,14 @@ impl Pic18 {
             depth,
             stack: vec![0; depth as usize + 1],
             shadow: (0, 0, 0),
+            p,
+            in_service: Vec::new(),
+            ctx: Vec::new(),
+            irq,
+            intcon,
+            vic: dev.find_sfr("SHADCON").is_some(),
+            vec_high: dev.vectors.interrupt_high,
+            vec_low: dev.vectors.interrupt_low,
             notes: BTreeSet::new(),
             wide_fsr,
             stk_mask: (depth + 1).next_power_of_two() as u8 - 1,
@@ -146,7 +199,7 @@ impl Pic18 {
         self.m.mem[a] = self.m.mem[a] & !mask | v & mask;
     }
 
-    fn tos(&self) -> u32 {
+    pub fn tos(&self) -> u32 {
         let sp = (self.m.mem[self.m.regs.stkptr as usize] & self.stk_mask) as usize;
         self.stack[sp.min(self.depth as usize)]
     }
@@ -183,6 +236,9 @@ impl Pic18 {
         }
         match self.m.special[i] {
             Special::None | Special::Core => self.m.mem[i],
+            Special::Hook(k) => {
+                if Periph::is_stored(k) { self.m.mem[i] } else { self.p.read(k, &mut self.m) }
+            }
             Special::Pcl => {
                 let pc = self.pc;
                 self.m.mem[self.m.regs.pclath as usize] = (pc >> 8) as u8;
@@ -221,6 +277,11 @@ impl Pic18 {
         }
         match self.m.special[i] {
             Special::None | Special::Core => self.m.mem[i] = v & self.m.implemented[i],
+            Special::Hook(k) => {
+                let now = self.cycles;
+                self.p.sync(&mut self.m, now);
+                self.p.write(k, v & self.m.implemented[i], &mut self.m);
+            }
             Special::Pcl => {
                 self.m.mem[self.m.regs.pcl as usize] = v;
                 let hi = u32::from(self.m.mem[self.m.regs.pclatu as usize]) << 16
@@ -283,7 +344,7 @@ impl Pic18 {
     // ----- program memory ------------------------------------------------------------------------------------
 
     #[inline]
-    fn fetch(&self, at: u32) -> u16 {
+    pub fn fetch(&self, at: u32) -> u16 {
         let a = (at & self.pc_mask) as usize;
         if a + 1 < self.prog.len() { u16::from(self.prog[a]) | u16::from(self.prog[a + 1]) << 8 } else { 0xFFFF }
     }
@@ -312,6 +373,8 @@ impl Pic18 {
             self.cycles += 1;
             return 1;
         }
+        let ic0 = self.m.mem[self.intcon];
+        self.p.clear_event();
         let w = self.fetch(self.pc);
         let at = self.pc;
         self.pc = (self.pc + 2) & self.pc_mask;
@@ -523,7 +586,134 @@ impl Pic18 {
             _ => {} // 0xFxxx executed alone is a NOP
         }
         let _ = at;
+        let now = self.cycles;
+        self.p.sync(&mut self.m, now);
+        self.irq_check(ic0);
+        if !self.p.notes.is_empty() {
+            let n = std::mem::take(&mut self.p.notes);
+            self.notes.extend(n);
+        }
         (self.cycles - start) as u32
+    }
+
+    // ----- interrupts ----------------------------------------------------------------------------------------
+
+    /// Take an interrupt if one is enabled and pending after the instruction that just finished.
+    /// Rules: DS40002043F 15.1-15.3 p.193-194 (Q10), DS40002214G 11.5-11.8 p.118-124 (Q41, `MVECEN = 0`).
+    /// `[A4]` Entry costs two cycles (return address pushed, vector fetched), like a CALL.
+    fn irq_check(&mut self, ic0: u8) {
+        // A flag set in the last cycle of the instruction that clears GIE is still taken `[A6]` (MDB; the Q10 code
+        // that clears GIE re-checks it for exactly this reason).
+        let mut c = self.m.mem[self.intcon];
+        if c & 0x80 == 0 && ic0 & 0x80 != 0 && self.p.peek_event() == Some(self.cycles) {
+            c = ic0;
+        }
+        if c & 0x80 == 0 {
+            return;
+        }
+        let ipen = c & 0x20 != 0;
+        let giel = c & 0x40 != 0;
+        let (mut hi, mut lo) = (false, false);
+        for (n, g) in self.irq.iter().enumerate() {
+            if g[0] == 0 {
+                continue;
+            }
+            let f = self.m.mem[g[0]] & self.m.mem[g[1]];
+            if f == 0 {
+                continue;
+            }
+            if !ipen {
+                // Without priorities PEIE gates the peripheral groups (PIR1 and up) on the Q10, whose PIR0 sources
+                // are core interrupts `[A5]`; the Q41 has no PEIE (GIEL is reserved).
+                if self.vic || n == 0 || giel {
+                    hi = true;
+                }
+            } else {
+                let ip = self.m.mem[g[2]];
+                hi |= f & ip != 0;
+                lo |= f & !ip != 0;
+            }
+        }
+        if !hi && !lo {
+            return;
+        }
+        let blocked_hi = self.vic && if ipen { self.in_service.contains(&true) } else { !self.in_service.is_empty() };
+        let high = if hi && !blocked_hi {
+            true
+        } else if lo && giel && !(self.vic && !self.in_service.is_empty()) {
+            false
+        } else {
+            return;
+        };
+        let ret = self.pc;
+        self.push(ret);
+        self.pc = (if high { self.vec_high } else { self.vec_low }) & self.pc_mask;
+        // MDB reaches the vector three cycles after the flag was set, whichever cycle of a multi-cycle instruction
+        // that was; never less than two cycles after the instruction `[A4]`. A flag that was already pending
+        // (interrupts were enabled later) counts as set one cycle before the end of the instruction.
+        let end = self.cycles;
+        self.cycles = match self.p.take_event() {
+            Some(e) => (e + 3).max(end + 2),
+            // Already pending and enabled by this very instruction (BSF INTCON, GIE): MDB enters one cycle after it
+            // `[A7]`; otherwise (RETFIE re-enabling, PIE written) two.
+            None => end + 2,
+        };
+        if self.vic {
+            let r = &self.m.regs;
+            let mut fsr = [0u8; 6];
+            for n in 0..3 {
+                fsr[2 * n] = self.m.mem[r.fsr[n] as usize];
+                fsr[2 * n + 1] = self.m.mem[r.fsr[n] as usize + 1];
+            }
+            let ctx = Ctx {
+                w: self.w(),
+                status: self.st(),
+                bsr: self.m.mem[r.bsr as usize],
+                fsr,
+                prod: [self.m.mem[r.prodl as usize], self.m.mem[r.prodh as usize]],
+                pclat: [self.m.mem[r.pclath as usize], self.m.mem[r.pclatu as usize]],
+            };
+            self.ctx.push(ctx);
+        } else {
+            self.shadow_save();
+            let bit = if ipen && !high { 0x40 } else { 0x80 };
+            self.m.mem[self.intcon] &= !bit;
+        }
+        self.in_service.push(high);
+        let now = self.cycles;
+        self.p.sync(&mut self.m, now);
+    }
+
+    fn retfie(&mut self, s: bool) {
+        self.cycles += 1;
+        self.pc = self.pop();
+        let level = self.in_service.pop();
+        if self.vic {
+            // The controller tracks the level itself; GIE is not changed `DS40002214G 11.8.1 p.123`.
+            if let Some(c) = self.ctx.pop()
+                && s
+            {
+                let r = self.m.regs.clone();
+                self.set_w(c.w);
+                self.m.mem[r.status as usize] = c.status;
+                self.m.mem[r.bsr as usize] = c.bsr;
+                for n in 0..3 {
+                    self.m.mem[r.fsr[n] as usize] = c.fsr[2 * n];
+                    self.m.mem[r.fsr[n] as usize + 1] = c.fsr[2 * n + 1];
+                }
+                self.m.mem[r.prodl as usize] = c.prod[0];
+                self.m.mem[r.prodh as usize] = c.prod[1];
+                self.m.mem[r.pclath as usize] = c.pclat[0];
+                self.m.mem[r.pclatu as usize] = c.pclat[1];
+            }
+        } else {
+            if s {
+                self.shadow_restore();
+            }
+            let c = &mut self.m.mem[self.intcon];
+            // RETFIE sets GIE/GIEH, or GIEL when returning from a low-priority handler `DS40002043F p.194`.
+            *c |= if level == Some(false) && *c & 0x20 != 0 { 0x40 } else { 0x80 };
+        }
     }
 
     #[inline]
@@ -570,14 +760,7 @@ impl Pic18 {
                 0x07 => self.daw(),
                 0x08..=0x0B => self.tblrd((w & 3) as u8),
                 0x0C..=0x0F => self.cycles += 1, // TBLWT: holding latches arrive with the NVM model (S5)
-                0x10 | 0x11 => {
-                    // RETFIE: re-enabling the interrupt is S3
-                    self.cycles += 1;
-                    self.pc = self.pop();
-                    if w & 1 != 0 {
-                        self.shadow_restore();
-                    }
-                }
+                0x10 | 0x11 => self.retfie(w & 1 != 0),
                 0x12 | 0x13 => {
                     self.cycles += 1;
                     self.pc = self.pop();

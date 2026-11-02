@@ -4,6 +4,7 @@ pub mod disasm;
 pub mod hex;
 pub mod machine;
 pub mod mem;
+pub mod periph;
 pub mod pic18;
 
 pub use machine::{Machine, Stop};

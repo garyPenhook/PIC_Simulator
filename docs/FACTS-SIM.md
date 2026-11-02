@@ -17,16 +17,41 @@ Each rule the simulator relies on, with its source. Rules marked `[A#]` are assu
   (f - len)` (device file; matches the compiler's `Target`).
 * The pack's `access` letters (`n r w c s -`) are **not decoded yet**: their meaning is not recorded in a data sheet
   here. Only the `implemented` mask is applied (unimplemented bits read 0 and ignore writes).
-* Not modelled yet (milestone): interrupts and the Q41 hardware context (S3), reset values after MCLR/WDT (S3),
-  TBLWT / flash and EEPROM writes (S5), every peripheral (S3-S5). SFRs without a model act as latches and are listed
-  at the end of a run.
+* Not modelled yet (milestone): reset values after MCLR/WDT, configuration words (S3 remainder), TBLWT / flash and
+  EEPROM writes (S5), ports/UART/ADC (S4). SFRs without a model act as latches and are listed at the end of a run.
+
+## Interrupts and timers (S3)
+
+Code: `crates/picsim/src/pic18.rs` (`irq_check`, `retfie`), `periph.rs` (Timer0/1/2). Cites are in the module comments.
+
+* Sources are every PIRn/PIEn/IPRn triple of the part. `IPEN = 0`: GIE (and PEIE for PIR1 and up on the Q10; PIR0 is
+  ungated `[A5]`; the Q41 has no PEIE) enables all, vector 0008h. `IPEN = 1`: high needs GIEH, low needs GIEH and GIEL,
+  vectors 0008h/0018h. DS40002043F 15.1-15.3 p.193-194; DS40002214G 11.5-11.8.
+* Q10 entry clears GIE/GIEH (GIEL for low) and saves W/STATUS/BSR in the fast stack; `RETFIE` sets GIE/GIEH, or GIEL
+  when leaving a low handler (p.194). Q41 (`SHADCON` present) leaves GIE alone, tracks the level itself, saves
+  W, STATUS, BSR, FSR0-2, PROD, PCLATH/U per level and `RETFIE 1` restores them (FACTS-18F-Q41.md section 4).
+* Entry timing, measured against MDB: the vector is reached 3 cycles after the cycle the flag was set, never less
+  than 2 after the instruction `[A4]`. isr_single's first 27 entries and all `lib_timer*` cycle counts match MDB exactly.
+* Timer0 8-bit compares TMR0L with the *live* TMR0H (a write right after the flag applies to the period that has just
+  started; measured, MDB), period TMR0H+1 clocks; 16-bit buffers TMR0H. Timer1: FOSC/4 and FOSC, RD16 buffer.
+  Timer2: free-running and software one-shot (MODE 00000 / 01000). Other clock sources, gates and hardware reset
+  modes log a note and do not count/act (S4).
+* Flag time agrees with MDB for software polling in all 12 probe variants (`[A1]`, `[A2]`).
+
+### Known differences from MDB (the sim follows the data sheet)
+
+* D-SIM-1: MDB loses part of the Timer0 prescaler count on a TMR0L *read* and on `movf T0CON0,f`. The data sheet
+  clears the prescaler on writes only (DS40002043F 19.2.4 p.297), and `movf f,f` writes. Probe programs:
+  `tests/hw/t0_*_sim.bas` (sim gives 402 / 401 / 500 / 401 for nowrite / readw / movf / tmr0l). `isr_single` differs by
+  565 cycles because of it. Settle on silicon with the `_hw` flavours (results in EEPROM 0-1).
+* D-SIM-2 (open): interrupt entry racing a `bcf INTCON,7` critical section differs from MDB by 1-8 cycles over a run
+  (`bit_packed_isr` +4, `isr_dual` +2 total); MDB defers some requests the sim takes. Not yet understood.
+* TMR0L read right after a TMR0H change in 8-bit mode differs by 1-2 counts.
 
 ## Status (differential)
 
 `scripts/exec-test.py --engine sim` (no MDB involved; the `' expect:` lines are the oracle):
 
-* `tests/exec/*.bas`, 18F27Q10: 115 of 131 agree. The 16 that fail use interrupts, timers, UART, ADC, EEPROM/flash
-  write or PWM (S3-S5).
-* `tests/exec_q41/*.bas`, 18F16Q41: 10 pass, 5 fail (`lib_adc`, `lib_dma_abort`, `lib_eeprom`, `lib_flashwrite`,
-  `lib_timer`: ADC, DMA, NVM and timer models), 4 `lib_dma_*` are skipped (the DMA replay needs MDB until S5).
+* After S3, excluding the ADC/EEPROM/flash/serial/DMA programs (S4/S5): 130 pass, 1 fails (`lib_timer_hw`, Timer1
+  gate value bit GVAL, needs the pin model of S4).
 * Not yet run: `--engine both` (cycle counts against MDB), PIC16 parts (S2).

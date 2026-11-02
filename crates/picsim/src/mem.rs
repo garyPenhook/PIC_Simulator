@@ -34,6 +34,8 @@ pub enum Special {
     Tos(u8),
     /// A register the core models itself (reads and writes are the stored byte).
     Core,
+    /// A peripheral register with a model behind it (`periph.rs`); the code says which.
+    Hook(u8),
 }
 
 pub struct DataMem {

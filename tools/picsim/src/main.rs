@@ -1,4 +1,5 @@
-//! `basil-sim prog.hex --device 18F16Q41 [--asm prog.S] [--until __halt] [--dump T_R1:2,T_R2] [--cycles N] [--trace]`
+//! `basil-sim prog.hex --device 18F16Q41 [--asm prog.S] [--until __halt] [--dump T_R1:2,T_R2] [--bp SYM,SYM] [--bp-max N]`
+//! `--bp` prints the cycle count each time one of the symbols is reached (at most `--bp-max`, default 20).
 
 use picsim::{Machine, Stop};
 use std::path::PathBuf;
@@ -16,6 +17,8 @@ fn main() -> ExitCode {
 
 fn run() -> Result<ExitCode, String> {
     let mut args = std::env::args().skip(1);
+    let mut trace: Option<(u64, u64)> = None;
+    let (mut bps, mut bp_max) = (Vec::<String>::new(), 20usize);
     let (mut hex, mut device, mut asm, mut until, mut dump, mut max) =
         (None::<PathBuf>, String::from("18F27Q10"), None::<PathBuf>, Some(String::from("__halt")), Vec::new(), 2_000_000_000u64);
     let mut root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../devices");
@@ -27,6 +30,13 @@ fn run() -> Result<ExitCode, String> {
             "--asm" => asm = Some(PathBuf::from(val("--asm")?)),
             "--until" => until = Some(val("--until")?),
             "--dump" => dump = val("--dump")?.split(',').map(String::from).collect(),
+            "--trace" => {
+                let v = val("--trace")?;
+                let (a, b) = v.split_once('-').ok_or("--trace FROM-TO (cycles)")?;
+                trace = Some((a.parse().map_err(|_| "bad --trace")?, b.parse().map_err(|_| "bad --trace")?));
+            }
+            "--bp" => bps = val("--bp")?.split(',').map(String::from).collect(),
+            "--bp-max" => bp_max = val("--bp-max")?.parse().map_err(|_| "bad --bp-max")?,
             "--max-cycles" => max = val("--max-cycles")?.parse().map_err(|_| "bad --max-cycles")?,
             s if s.starts_with("--") => return Err(format!("unknown option {s}")),
             _ => hex = Some(PathBuf::from(a)),
@@ -44,7 +54,38 @@ fn run() -> Result<ExitCode, String> {
         Some(s) => Some(*m.syms.get(s).ok_or(format!("symbol {s} not found (no {})", asm.display()))?),
         None => None,
     };
-    let stop = m.run(stop_at, max);
+    if let Some((from, to)) = trace {
+        m.run(None, from);
+        while m.cpu.cycles < to {
+            let pc = m.cpu.pc;
+            let (w, w2, w3) = (m.cpu.fetch(pc), m.cpu.fetch(pc + 2), m.cpu.fetch(pc + 4));
+            let (text, _) = picsim::disasm::disasm(pc, w, w2, w3, true);
+            let c0 = m.cpu.cycles;
+            m.cpu.step();
+            println!("{:>8} {:06X}  {:<28} +{}  TMR0L={} PIR0={:02X} INTCON={:02X}", c0, pc, text, m.cpu.cycles - c0,
+                m.peek(m.dev.find_sfr("TMR0L").map_or(0, |x| x.addr), 1)[0],
+                m.peek(m.dev.find_sfr("PIR0").map_or(0, |x| x.addr), 1)[0],
+                m.peek(m.dev.find_sfr("INTCON").map_or(0, |x| x.addr), 1)[0]);
+        }
+        return Ok(ExitCode::SUCCESS);
+    }
+    for b in &bps {
+        let a = *m.syms.get(b).ok_or(format!("symbol {b} not found"))?;
+        m.breakpoints.push(a);
+    }
+    let mut stop = m.run(stop_at, max);
+    let mut n = 0;
+    while let Stop::Breakpoint(pc) = stop {
+        n += 1;
+        let name = m.syms.iter().find(|(_, v)| **v == pc).map_or("?", |(k, _)| k.as_str());
+        let r = |nm: &str| m.dev.find_sfr(nm).map_or(0, |x| m.cpu.m.mem[x.addr as usize]);
+        println!("bp {n} {name} cycles {} tos {:#06X} TMR0L {} TMR0H {}", m.cpu.cycles, m.cpu.tos(), r("TMR0L"), r("TMR0H"));
+        if n >= bp_max {
+            break;
+        }
+        let left = max.saturating_sub(m.cpu.cycles);
+        stop = m.run(stop_at, left);
+    }
     println!("stop: {stop:?}  cycles: {}  instructions: {}", m.cpu.cycles, m.cpu.icount);
     for d in &dump {
         let (name, len) = d.split_once(':').map_or((d.as_str(), 1), |(n, l)| (n, l.parse().unwrap_or(1)));
