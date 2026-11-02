@@ -140,7 +140,6 @@ yet), PIC16 single vector with automatic context save. Vector addresses from `[v
   `exec-test.py --engine sim|mdb|both` (DMA programs are skipped under `sim` until S5). Results and the rules
   relied on are in `FACTS-SIM.md`.
 * Open for S1's "done when": the `both` comparison of cycle counts with MDB.
-* S3 mostly done: interrupt controllers (Q10 legacy, Q41 `MVECEN = 0` with hardware context), Timer0/1/2. Open: configuration
-  words, reset values, two documented MDB differences (`FACTS-SIM.md`, D-SIM-1/2). Hardware probes in `tests/hw/` can
+* S3 mostly done: interrupt controllers (Q10 legacy, Q41 `MVECEN = 0` with hardware context), Timer0/1/2. Configuration words done (`config.rs`, FACTS-SIM.md). Open: reset values after MCLR/watchdog, two documented MDB differences (`FACTS-SIM.md`, D-SIM-1/2). Hardware probes in `tests/hw/` can
   settle them on a PIC18F27Q10 (PICkit 4 `ipecmd`, or the PIC-Programmer) when a programmer is at hand.
 * Next: S4 (ports, PPS, UART, ADC, stimulus file).

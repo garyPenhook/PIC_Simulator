@@ -33,6 +33,11 @@ pub struct Pic18 {
     pub depth: u32,
     pub stack: Vec<u32>,
     pub shadow: (u8, u8, u8),
+    /// Configuration fields as programmed by the loaded image.
+    pub cfg: crate::config::Config,
+    cfg_regs: Vec<devdesc::ConfigRegister>,
+    /// SFR addresses of the registers whose reset value depends on the configuration.
+    cfg_sfrs: BTreeMap<&'static str, usize>,
     pub p: Periph,
     /// Interrupts being served, innermost last (`true` = high priority).
     pub in_service: Vec<bool>,
@@ -134,6 +139,12 @@ impl Pic18 {
             depth,
             stack: vec![0; depth as usize + 1],
             shadow: (0, 0, 0),
+            cfg: crate::config::Config::decode(&dev.config, &BTreeMap::new()),
+            cfg_regs: dev.config.clone(),
+            cfg_sfrs: ["OSCCON1", "OSCCON2", "OSCFRQ", "WDTCON0", "WDTCON1"]
+                .into_iter()
+                .filter_map(|n| dev.find_sfr(n).map(|s| (n, s.addr as usize)))
+                .collect(),
             p,
             in_service: Vec::new(),
             ctx: Vec::new(),
@@ -159,6 +170,21 @@ impl Pic18 {
             } else {
                 self.aux.insert(a, b);
             }
+        }
+        self.apply_config();
+    }
+
+    /// Decode the configuration words and set the SFR reset values that depend on them. Called on every load, and
+    /// a reset builds a fresh core and loads again, so it runs after every power-on reset.
+    fn apply_config(&mut self) {
+        self.cfg = crate::config::Config::decode(&self.cfg_regs, &self.aux);
+        for (name, v) in crate::config::reset_sfrs(&self.cfg, self.vic) {
+            if let Some(&a) = self.cfg_sfrs.get(name) {
+                self.m.mem[a] = v & self.m.implemented[a];
+            }
+        }
+        if self.cfg.get("WDTE").is_some_and(|w| w != 0) {
+            self.notes.insert("watchdog enabled by WDTE: a timeout reset is not modelled (CLRWDT does nothing)".into());
         }
     }
 
@@ -645,6 +671,9 @@ impl Pic18 {
         } else {
             return;
         };
+        if self.vic && self.cfg.get("MVECEN") == Some(1) {
+            self.notes.insert("MVECEN = 1 (vector table) is not simulated: the interrupt went to the legacy vector".into());
+        }
         let ret = self.pc;
         self.push(ret);
         self.pc = (if high { self.vec_high } else { self.vec_low }) & self.pc_mask;

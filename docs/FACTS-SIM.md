@@ -48,6 +48,25 @@ Code: `crates/picsim/src/pic18.rs` (`irq_check`, `retfie`), `periph.rs` (Timer0/
   (`bit_packed_isr` +4, `isr_dual` +2 total); MDB defers some requests the sim takes. Not yet understood.
 * TMR0L read right after a TMR0H change in 8-bit mode differs by 1-2 counts.
 
+## Configuration words (S3)
+
+Decoded by `crates/picsim/src/config.rs` from the bytes the hex puts at the `[[config]]` addresses; a byte the image
+lacks keeps the register's unprogrammed default (0xFF). `basil-sim --config` prints the fields and the SFRs below.
+
+* `RSTOSC` sets the reset values of `OSCCON1` (NOSC, NDIV), `OSCCON2` (COSC, CDIV) and `OSCFRQ`. Q10: DS40002043F
+  Table 5-1 p.53; Q41: DS40002214G Table 12-1 p.175. 111 = EXTOSC, 110 = HFINTOSC 4 MHz / 4, 101 = LFINTOSC,
+  100 = SOSC, 010 = EXTOSC + 4xPLL (OSCFRQ 4 MHz). **At 000 the tables differ**: NOSC/COSC = 110 with OSCFRQ 64 MHz on the
+  Q10, NOSC/COSC = 000 with OSCFRQ 64 MHz on the Q41. 011 and 001 are reserved and change nothing.
+* `WDTCON0` resets to PS = `WDTCPS` (01011 when `WDTCPS` = 11111), SEN = 0: DS40002043F 10.8.1 p.102, DS40002214G
+  15.7.1 p.240. `WDTCON1` resets to WINDOW = `WDTCWS` and CS = `WDTCCS` (000 when `WDTCCS` = 111): DS40002043F 10.8.2
+  p.103, DS40002214G 15.7.2 p.241.
+* `MVECEN` = 1 on the Q41 (vector table, DS40002214G CONFIG3 p.46) is not simulated; the first interrupt taken adds a
+  note and goes to the legacy vector. The compiler refuses `MVECEN = ON` (`E-CONFIG`), so only a program that leaves
+  CONFIG3 out (default 0xFF = ON) and still takes an interrupt sees it.
+* `WDTE` <> 0 adds a note: the watchdog does not time out yet (`CLRWDT` is a no-op). Needs reset kinds (next item).
+* `LVP`, `STVREN`, `XINST`, code protection and write protection have no effect in the simulator.
+* Not yet applied: `FEXTOSC`/`CSWEN` (`OSCCON1` is writable regardless of `CSWEN`), the OSCSTAT ready bits.
+
 ## Status (differential)
 
 `scripts/exec-test.py --engine sim` (no MDB involved; the `' expect:` lines are the oracle):
