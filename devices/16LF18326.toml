@@ -676,6 +676,10 @@ value = 0
 name = "INDF0"
 addr = 0
 width = 8
+por = "xxxxxxxx"
+mclr = "xxxxxxxx"
+access = "nnnnnnnn"
+implemented = 255
 
 [[sfr.fields]]
 name = "INDF0"
@@ -686,6 +690,10 @@ width = 8
 name = "INDF1"
 addr = 1
 width = 8
+por = "xxxxxxxx"
+mclr = "xxxxxxxx"
+access = "nnnnnnnn"
+implemented = 255
 
 [[sfr.fields]]
 name = "INDF1"
@@ -696,6 +704,10 @@ width = 8
 name = "PCL"
 addr = 2
 width = 8
+por = "00000000"
+mclr = "00000000"
+access = "nnnnnnnn"
+implemented = 255
 
 [[sfr.fields]]
 name = "PCL"
@@ -706,6 +718,10 @@ width = 8
 name = "STATUS"
 addr = 3
 width = 8
+por = "00011000"
+mclr = "000qquuu"
+access = "---rrnnn"
+implemented = 31
 
 [[sfr.fields]]
 name = "C"
@@ -736,6 +752,10 @@ width = 1
 name = "FSR0L"
 addr = 4
 width = 8
+por = "00000000"
+mclr = "uuuuuuuu"
+access = "nnnnnnnn"
+implemented = 255
 
 [[sfr.fields]]
 name = "FSR0L"
@@ -746,6 +766,10 @@ width = 8
 name = "FSR0H"
 addr = 5
 width = 8
+por = "00000000"
+mclr = "00000000"
+access = "nnnnnnnn"
+implemented = 255
 
 [[sfr.fields]]
 name = "FSR0H"
@@ -756,6 +780,10 @@ width = 8
 name = "FSR1L"
 addr = 6
 width = 8
+por = "00000000"
+mclr = "uuuuuuuu"
+access = "nnnnnnnn"
+implemented = 255
 
 [[sfr.fields]]
 name = "FSR1L"
@@ -766,6 +794,10 @@ width = 8
 name = "FSR1H"
 addr = 7
 width = 8
+por = "00000000"
+mclr = "00000000"
+access = "nnnnnnnn"
+implemented = 255
 
 [[sfr.fields]]
 name = "FSR1H"
@@ -776,6 +808,10 @@ width = 8
 name = "BSR"
 addr = 8
 width = 8
+por = "---00000"
+mclr = "---00000"
+access = "---nnnnn"
+implemented = 31
 
 [[sfr.fields]]
 name = "BSR"
@@ -811,6 +847,10 @@ width = 1
 name = "WREG"
 addr = 9
 width = 8
+por = "00000000"
+mclr = "uuuuuuuu"
+access = "nnnnnnnn"
+implemented = 255
 
 [[sfr.fields]]
 name = "WREG0"
@@ -821,6 +861,10 @@ width = 8
 name = "PCLATH"
 addr = 10
 width = 8
+por = "-0000000"
+mclr = "-0000000"
+access = "-nnnnnnn"
+implemented = 127
 
 [[sfr.fields]]
 name = "PCLATH"
@@ -831,6 +875,10 @@ width = 7
 name = "INTCON"
 addr = 11
 width = 8
+por = "00000001"
+mclr = "00000001"
+access = "nn-----n"
+implemented = 193
 
 [[sfr.fields]]
 name = "INTEDG"
@@ -851,6 +899,10 @@ width = 1
 name = "PORTA"
 addr = 12
 width = 8
+por = "00xxxxxx"
+mclr = "00uuuuuu"
+access = "--nnrnnn"
+implemented = 63
 
 [[sfr.fields]]
 name = "RA0"
@@ -886,6 +938,10 @@ width = 1
 name = "PORTC"
 addr = 14
 width = 8
+por = "00xxxxxx"
+mclr = "00xxxxxx"
+access = "--nnnnnn"
+implemented = 63
 
 [[sfr.fields]]
 name = "RC0"
@@ -921,6 +977,10 @@ width = 1
 name = "PIR0"
 addr = 16
 width = 8
+por = "00000000"
+mclr = "00000000"
+access = "--nr---n"
+implemented = 49
 
 [[sfr.fields]]
 name = "INTF"
@@ -941,6 +1001,10 @@ width = 1
 name = "PIR1"
 addr = 17
 width = 8
+por = "00000000"
+mclr = "00000000"
+access = "nnrrnnnn"
+implemented = 255
 
 [[sfr.fields]]
 name = "TMR1IF"
@@ -986,6 +1050,10 @@ width = 1
 name = "PIR2"
 addr = 18
 width = 8
+por = "00000000"
+mclr = "00000000"
+access = "nnnnnnnn"
+implemented = 255
 
 [[sfr.fields]]
 name = "NCO1IF"
@@ -1031,6 +1099,10 @@ width = 1
 name = "PIR3"
 addr = 19
 width = 8
+por = "00000000"
+mclr = "00000000"
+access = "nnnnnnnn"
+implemented = 255
 
 [[sfr.fields]]
 name = "CLC1IF"
@@ -1076,6 +1148,10 @@ width = 1
 name = "PIR4"
 addr = 20
 width = 8
+por = "00000000"
+mclr = "00000000"
+access = "nnnnnnnn"
+implemented = 255
 
 [[sfr.fields]]
 name = "CCP1IF"
@@ -1121,6 +1197,10 @@ width = 1
 name = "TMR0L"
 addr = 21
 width = 8
+por = "00000000"
+mclr = "00000000"
+access = "nnnnnnnn"
+implemented = 255
 aliases = ["TMR0"]
 
 [[sfr.fields]]
@@ -1172,6 +1252,10 @@ width = 1
 name = "TMR0H"
 addr = 22
 width = 8
+por = "11111111"
+mclr = "11111111"
+access = "nnnnnnnn"
+implemented = 255
 aliases = ["PR0"]
 
 [[sfr.fields]]
@@ -1223,6 +1307,10 @@ width = 1
 name = "T0CON0"
 addr = 23
 width = 8
+por = "0-000000"
+mclr = "0-000000"
+access = "n-rnnnnn"
+implemented = 191
 
 [[sfr.fields]]
 name = "T0OUTPS"
@@ -1268,6 +1356,10 @@ width = 1
 name = "T0CON1"
 addr = 24
 width = 8
+por = "00000000"
+mclr = "00000000"
+access = "nnnnnnnn"
+implemented = 255
 
 [[sfr.fields]]
 name = "T0CKPS"
@@ -1323,6 +1415,10 @@ width = 1
 name = "TMR1L"
 addr = 25
 width = 8
+por = "xxxxxxxx"
+mclr = "uuuuuuuu"
+access = "nnnnnnnn"
+implemented = 255
 
 [[sfr.fields]]
 name = "TMR1L"
@@ -1333,6 +1429,10 @@ width = 8
 name = "TMR1H"
 addr = 26
 width = 8
+por = "xxxxxxxx"
+mclr = "uuuuuuuu"
+access = "nnnnnnnn"
+implemented = 255
 
 [[sfr.fields]]
 name = "TMR1H"
@@ -1343,6 +1443,10 @@ width = 8
 name = "T1CON"
 addr = 27
 width = 8
+por = "000000-0"
+mclr = "uuuuuu-u"
+access = "nnnnnn-n"
+implemented = 253
 
 [[sfr.fields]]
 name = "TMR1ON"
@@ -1393,6 +1497,10 @@ width = 1
 name = "T1GCON"
 addr = 28
 width = 8
+por = "00000x00"
+mclr = "uuuuuxuu"
+access = "nnnnnrnn"
+implemented = 255
 
 [[sfr.fields]]
 name = "T1GSS"
@@ -1443,6 +1551,11 @@ width = 1
 name = "TMR2"
 addr = 29
 width = 8
+por = "00000000"
+mclr = "00000000"
+access = "nnnnnnnn"
+implemented = 255
+module = "DOS-02401_tmr_Timer2_PIC16"
 
 [[sfr.fields]]
 name = "TMR2"
@@ -1453,6 +1566,11 @@ width = 8
 name = "PR2"
 addr = 30
 width = 8
+por = "11111111"
+mclr = "11111111"
+access = "nnnnnnnn"
+implemented = 255
+module = "DOS-02401_tmr_Timer2_PIC16"
 
 [[sfr.fields]]
 name = "PR2"
@@ -1463,6 +1581,11 @@ width = 8
 name = "T2CON"
 addr = 31
 width = 8
+por = "-0000000"
+mclr = "-0000000"
+access = "-nnnnnnn"
+implemented = 127
+module = "DOS-02401_tmr_Timer2_PIC16"
 
 [[sfr.fields]]
 name = "T2CKPS"
@@ -1513,6 +1636,10 @@ width = 1
 name = "TRISA"
 addr = 140
 width = 8
+por = "00111111"
+mclr = "00111111"
+access = "--nn-nnn"
+implemented = 55
 
 [[sfr.fields]]
 name = "TRISA0"
@@ -1543,6 +1670,10 @@ width = 1
 name = "TRISC"
 addr = 142
 width = 8
+por = "00111111"
+mclr = "00111111"
+access = "--nnnnnn"
+implemented = 63
 
 [[sfr.fields]]
 name = "TRISC0"
@@ -1578,6 +1709,10 @@ width = 1
 name = "PIE0"
 addr = 144
 width = 8
+por = "--00---0"
+mclr = "--00---0"
+access = "--nn---n"
+implemented = 49
 
 [[sfr.fields]]
 name = "INTE"
@@ -1598,6 +1733,10 @@ width = 1
 name = "PIE1"
 addr = 145
 width = 8
+por = "00000000"
+mclr = "00000000"
+access = "nnnnnnnn"
+implemented = 255
 
 [[sfr.fields]]
 name = "TMR1IE"
@@ -1643,6 +1782,10 @@ width = 1
 name = "PIE2"
 addr = 146
 width = 8
+por = "00000000"
+mclr = "00000000"
+access = "nnnnnnnn"
+implemented = 255
 
 [[sfr.fields]]
 name = "NCO1IE"
@@ -1688,6 +1831,10 @@ width = 1
 name = "PIE3"
 addr = 147
 width = 8
+por = "00000000"
+mclr = "00000000"
+access = "nnnnnnnn"
+implemented = 255
 
 [[sfr.fields]]
 name = "CLC1IE"
@@ -1733,6 +1880,10 @@ width = 1
 name = "PIE4"
 addr = 148
 width = 8
+por = "00000000"
+mclr = "00000000"
+access = "nnnnnnnn"
+implemented = 255
 
 [[sfr.fields]]
 name = "CCP1IE"
@@ -1778,6 +1929,10 @@ width = 1
 name = "WDTCON"
 addr = 151
 width = 8
+por = "00010110"
+mclr = "00010110"
+access = "--nnnnnn"
+implemented = 63
 
 [[sfr.fields]]
 name = "SWDTEN"
@@ -1818,6 +1973,10 @@ width = 1
 name = "ADRESL"
 addr = 155
 width = 8
+por = "xxxxxxxx"
+mclr = "uuuuuuuu"
+access = "nnnnnnnn"
+implemented = 255
 
 [[sfr.fields]]
 name = "ADRESL"
@@ -1828,6 +1987,10 @@ width = 8
 name = "ADRESH"
 addr = 156
 width = 8
+por = "xxxxxxxx"
+mclr = "uuuuuuuu"
+access = "nnnnnnnn"
+implemented = 255
 
 [[sfr.fields]]
 name = "ADRESH"
@@ -1838,6 +2001,10 @@ width = 8
 name = "ADCON0"
 addr = 157
 width = 8
+por = "xxxxxx00"
+mclr = "uuuuuu00"
+access = "nnnnnnnn"
+implemented = 255
 
 [[sfr.fields]]
 name = "ADON"
@@ -1893,6 +2060,10 @@ width = 1
 name = "ADCON1"
 addr = 158
 width = 8
+por = "00000000"
+mclr = "00000000"
+access = "nnnn-nnn"
+implemented = 247
 
 [[sfr.fields]]
 name = "ADPREF"
@@ -1943,6 +2114,10 @@ width = 1
 name = "ADACT"
 addr = 159
 width = 8
+por = "00000000"
+mclr = "00000000"
+access = "---nnnnn"
+implemented = 31
 
 [[sfr.fields]]
 name = "ADACT"
@@ -1978,6 +2153,10 @@ width = 1
 name = "LATA"
 addr = 268
 width = 8
+por = "00xx0xxx"
+mclr = "00uu0uuu"
+access = "--nn-nnn"
+implemented = 55
 
 [[sfr.fields]]
 name = "LATA0"
@@ -2008,6 +2187,10 @@ width = 1
 name = "LATC"
 addr = 270
 width = 8
+por = "00xxxxxx"
+mclr = "00uuuuuu"
+access = "--nnnnnn"
+implemented = 63
 
 [[sfr.fields]]
 name = "LATC0"
@@ -2043,6 +2226,11 @@ width = 1
 name = "CM1CON0"
 addr = 273
 width = 8
+por = "00-0-100"
+mclr = "00-0-100"
+access = "nr-n-nnn"
+implemented = 215
+module = "DOS-01295_cmp_rr_v6"
 
 [[sfr.fields]]
 name = "C1SYNC"
@@ -2078,6 +2266,11 @@ width = 1
 name = "CM1CON1"
 addr = 274
 width = 8
+por = "00000000"
+mclr = "00000000"
+access = "nnnnnnnn"
+implemented = 255
+module = "DOS-01295_cmp_rr_v6"
 
 [[sfr.fields]]
 name = "C1NCH"
@@ -2133,6 +2326,11 @@ width = 1
 name = "CM2CON0"
 addr = 275
 width = 8
+por = "00-0-100"
+mclr = "00-0-100"
+access = "nr-n-nnn"
+implemented = 215
+module = "DOS-01295_cmp_rr_v6"
 
 [[sfr.fields]]
 name = "C2SYNC"
@@ -2168,6 +2366,11 @@ width = 1
 name = "CM2CON1"
 addr = 276
 width = 8
+por = "00000000"
+mclr = "00000000"
+access = "nnnnnnnn"
+implemented = 255
+module = "DOS-01295_cmp_rr_v6"
 
 [[sfr.fields]]
 name = "C2NCH"
@@ -2223,6 +2426,10 @@ width = 1
 name = "CMOUT"
 addr = 277
 width = 8
+por = "00000000"
+mclr = "00000000"
+access = "------rr"
+implemented = 3
 
 [[sfr.fields]]
 name = "MC1OUT"
@@ -2238,6 +2445,10 @@ width = 1
 name = "BORCON"
 addr = 278
 width = 8
+por = "1-00000q"
+mclr = "u-00000u"
+access = "n------r"
+implemented = 129
 
 [[sfr.fields]]
 name = "BORRDY"
@@ -2253,6 +2464,10 @@ width = 1
 name = "FVRCON"
 addr = 279
 width = 8
+por = "0x000000"
+mclr = "0q000000"
+access = "nrnnnnnn"
+implemented = 255
 
 [[sfr.fields]]
 name = "ADFVR"
@@ -2308,6 +2523,10 @@ width = 1
 name = "DACCON0"
 addr = 280
 width = 8
+por = "00000000"
+mclr = "00000000"
+access = "n-n-nn-n"
+implemented = 173
 
 [[sfr.fields]]
 name = "DAC1NSS"
@@ -2343,6 +2562,10 @@ width = 1
 name = "DACCON1"
 addr = 281
 width = 8
+por = "00000000"
+mclr = "00000000"
+access = "---nnnnn"
+implemented = 31
 
 [[sfr.fields]]
 name = "DAC1R"
@@ -2378,6 +2601,10 @@ width = 1
 name = "ANSELA"
 addr = 396
 width = 8
+por = "00110111"
+mclr = "00110111"
+access = "--nn-nnn"
+implemented = 55
 
 [[sfr.fields]]
 name = "ANSA0"
@@ -2408,6 +2635,10 @@ width = 1
 name = "ANSELC"
 addr = 398
 width = 8
+por = "00111111"
+mclr = "00111111"
+access = "--nnnnnn"
+implemented = 63
 
 [[sfr.fields]]
 name = "ANSC0"
@@ -2443,6 +2674,11 @@ width = 1
 name = "RC1REG"
 addr = 409
 width = 8
+por = "00000000"
+mclr = "00000000"
+access = "rrrrrrrr"
+implemented = 255
+module = "DOS-01499"
 aliases = ["RCREG", "RCREG1"]
 
 [[sfr.fields]]
@@ -2454,6 +2690,11 @@ width = 8
 name = "TX1REG"
 addr = 410
 width = 8
+por = "00000000"
+mclr = "00000000"
+access = "nnnnnnnn"
+implemented = 255
+module = "DOS-01499"
 aliases = ["TXREG1", "TXREG"]
 
 [[sfr.fields]]
@@ -2465,6 +2706,11 @@ width = 8
 name = "SP1BRGL"
 addr = 411
 width = 8
+por = "00000000"
+mclr = "00000000"
+access = "nnnnnnnn"
+implemented = 255
+module = "DOS-01499"
 aliases = ["SPBRG1", "SPBRGL"]
 
 [[sfr.fields]]
@@ -2476,6 +2722,11 @@ width = 8
 name = "SP1BRGH"
 addr = 412
 width = 8
+por = "00000000"
+mclr = "00000000"
+access = "nnnnnnnn"
+implemented = 255
+module = "DOS-01499"
 aliases = ["SPBRGH", "SPBRGH1"]
 
 [[sfr.fields]]
@@ -2487,6 +2738,11 @@ width = 8
 name = "RC1STA"
 addr = 413
 width = 8
+por = "00000000"
+mclr = "00000000"
+access = "nnnnnrrr"
+implemented = 255
+module = "DOS-01499"
 aliases = ["RCSTA1", "RCSTA"]
 
 [[sfr.fields]]
@@ -2533,6 +2789,11 @@ width = 1
 name = "TX1STA"
 addr = 414
 width = 8
+por = "00000010"
+mclr = "00000010"
+access = "nnnnnnrn"
+implemented = 255
+module = "DOS-01499"
 aliases = ["TXSTA1", "TXSTA"]
 
 [[sfr.fields]]
@@ -2579,6 +2840,11 @@ width = 1
 name = "BAUD1CON"
 addr = 415
 width = 8
+por = "01-00-00"
+mclr = "01-00-00"
+access = "rr-nn-nn"
+implemented = 219
+module = "DOS-01499"
 aliases = ["BAUDCON1", "BAUDCTL1", "BAUDCON", "BAUDCTL"]
 
 [[sfr.fields]]
@@ -2615,6 +2881,10 @@ width = 1
 name = "WPUA"
 addr = 524
 width = 8
+por = "00000000"
+mclr = "00000000"
+access = "--nnnnnn"
+implemented = 63
 
 [[sfr.fields]]
 name = "WPUA0"
@@ -2650,6 +2920,10 @@ width = 1
 name = "WPUC"
 addr = 526
 width = 8
+por = "00000000"
+mclr = "00000000"
+access = "--nnnnnn"
+implemented = 63
 
 [[sfr.fields]]
 name = "WPUC0"
@@ -2685,6 +2959,11 @@ width = 1
 name = "SSP1BUF"
 addr = 529
 width = 8
+por = "xxxxxxxx"
+mclr = "uuuuuuuu"
+access = "nnnnnnnn"
+implemented = 255
+module = "DOS-01215_mssp_v5"
 aliases = ["SSPBUF"]
 
 [[sfr.fields]]
@@ -2736,6 +3015,11 @@ width = 1
 name = "SSP1ADD"
 addr = 530
 width = 8
+por = "00000000"
+mclr = "00000000"
+access = "nnnnnnnn"
+implemented = 255
+module = "DOS-01215_mssp_v5"
 aliases = ["SSPADD"]
 
 [[sfr.fields]]
@@ -2787,6 +3071,11 @@ width = 1
 name = "SSP1MSK"
 addr = 531
 width = 8
+por = "11111111"
+mclr = "11111111"
+access = "nnnnnnnn"
+implemented = 255
+module = "DOS-01215_mssp_v5"
 aliases = ["SSPMSK"]
 
 [[sfr.fields]]
@@ -2838,6 +3127,11 @@ width = 1
 name = "SSP1STAT"
 addr = 532
 width = 8
+por = "00000000"
+mclr = "00000000"
+access = "nnrrrrrr"
+implemented = 255
+module = "DOS-01215_mssp_v5"
 aliases = ["SSPSTAT"]
 
 [[sfr.fields]]
@@ -2884,6 +3178,11 @@ width = 1
 name = "SSP1CON1"
 addr = 533
 width = 8
+por = "00000000"
+mclr = "00000000"
+access = "rrnnnnnn"
+implemented = 255
+module = "DOS-01215_mssp_v5"
 aliases = ["SSPCON", "SSPCON1", "SSP1CON"]
 
 [[sfr.fields]]
@@ -2935,6 +3234,11 @@ width = 1
 name = "SSP1CON2"
 addr = 534
 width = 8
+por = "00000000"
+mclr = "00000000"
+access = "nrnnnnnn"
+implemented = 255
+module = "DOS-01215_mssp_v5"
 aliases = ["SSPCON2"]
 
 [[sfr.fields]]
@@ -2981,6 +3285,11 @@ width = 1
 name = "SSP1CON3"
 addr = 535
 width = 8
+por = "00000000"
+mclr = "00000000"
+access = "rnnnnnnn"
+implemented = 255
+module = "DOS-01215_mssp_v5"
 aliases = ["SSPCON3"]
 
 [[sfr.fields]]
@@ -3027,6 +3336,11 @@ width = 1
 name = "SSP2BUF"
 addr = 537
 width = 8
+por = "xxxxxxxx"
+mclr = "uuuuuuuu"
+access = "nnnnnnnn"
+implemented = 255
+module = "DOS-01215_mssp_v5"
 
 [[sfr.fields]]
 name = "BUF"
@@ -3077,6 +3391,11 @@ width = 1
 name = "SSP2ADD"
 addr = 538
 width = 8
+por = "00000000"
+mclr = "00000000"
+access = "nnnnnnnn"
+implemented = 255
+module = "DOS-01215_mssp_v5"
 
 [[sfr.fields]]
 name = "ADD"
@@ -3127,6 +3446,11 @@ width = 1
 name = "SSP2MSK"
 addr = 539
 width = 8
+por = "11111111"
+mclr = "11111111"
+access = "nnnnnnnn"
+implemented = 255
+module = "DOS-01215_mssp_v5"
 
 [[sfr.fields]]
 name = "MSK"
@@ -3177,6 +3501,11 @@ width = 1
 name = "SSP2STAT"
 addr = 540
 width = 8
+por = "00000000"
+mclr = "00000000"
+access = "nnrrrrrr"
+implemented = 255
+module = "DOS-01215_mssp_v5"
 
 [[sfr.fields]]
 name = "BF"
@@ -3222,6 +3551,11 @@ width = 1
 name = "SSP2CON1"
 addr = 541
 width = 8
+por = "00000000"
+mclr = "00000000"
+access = "rrnnnnnn"
+implemented = 255
+module = "DOS-01215_mssp_v5"
 aliases = ["SSP2CON"]
 
 [[sfr.fields]]
@@ -3273,6 +3607,11 @@ width = 1
 name = "SSP2CON2"
 addr = 542
 width = 8
+por = "00000000"
+mclr = "00000000"
+access = "nrnnnnnn"
+implemented = 255
+module = "DOS-01215_mssp_v5"
 
 [[sfr.fields]]
 name = "SEN"
@@ -3318,6 +3657,11 @@ width = 1
 name = "SSP2CON3"
 addr = 543
 width = 8
+por = "00000000"
+mclr = "00000000"
+access = "rnnnnnnn"
+implemented = 255
+module = "DOS-01215_mssp_v5"
 
 [[sfr.fields]]
 name = "DHEN"
@@ -3363,6 +3707,10 @@ width = 1
 name = "ODCONA"
 addr = 652
 width = 8
+por = "00000000"
+mclr = "00000000"
+access = "--nn-nnn"
+implemented = 55
 
 [[sfr.fields]]
 name = "ODCA0"
@@ -3393,6 +3741,10 @@ width = 1
 name = "ODCONC"
 addr = 654
 width = 8
+por = "00000000"
+mclr = "00000000"
+access = "--nnnnnn"
+implemented = 63
 
 [[sfr.fields]]
 name = "ODCC0"
@@ -3428,6 +3780,10 @@ width = 1
 name = "CCPR1L"
 addr = 657
 width = 8
+por = "xxxxxxxx"
+mclr = "xxxxxxxx"
+access = "nnnnnnnn"
+implemented = 255
 
 [[sfr.fields]]
 name = "CCPR1L"
@@ -3438,6 +3794,10 @@ width = 8
 name = "CCPR1H"
 addr = 658
 width = 8
+por = "xxxxxxxx"
+mclr = "xxxxxxxx"
+access = "nnnnnnnn"
+implemented = 255
 
 [[sfr.fields]]
 name = "CCPR1H"
@@ -3448,6 +3808,10 @@ width = 8
 name = "CCP1CON"
 addr = 659
 width = 8
+por = "00x00000"
+mclr = "00x00000"
+access = "n-rnnnnn"
+implemented = 191
 
 [[sfr.fields]]
 name = "CCP1MODE"
@@ -3493,6 +3857,10 @@ width = 1
 name = "CCP1CAP"
 addr = 660
 width = 8
+por = "00000000"
+mclr = "0000xxxx"
+access = "----nnnn"
+implemented = 15
 
 [[sfr.fields]]
 name = "CCP1CTS"
@@ -3523,6 +3891,10 @@ width = 1
 name = "CCPR2L"
 addr = 661
 width = 8
+por = "xxxxxxxx"
+mclr = "xxxxxxxx"
+access = "nnnnnnnn"
+implemented = 255
 
 [[sfr.fields]]
 name = "CCPR2L"
@@ -3533,6 +3905,10 @@ width = 8
 name = "CCPR2H"
 addr = 662
 width = 8
+por = "xxxxxxxx"
+mclr = "xxxxxxxx"
+access = "nnnnnnnn"
+implemented = 255
 
 [[sfr.fields]]
 name = "CCPR2H"
@@ -3543,6 +3919,10 @@ width = 8
 name = "CCP2CON"
 addr = 663
 width = 8
+por = "00x00000"
+mclr = "00x00000"
+access = "n-rnnnnn"
+implemented = 191
 
 [[sfr.fields]]
 name = "CCP2MODE"
@@ -3588,6 +3968,10 @@ width = 1
 name = "CCP2CAP"
 addr = 664
 width = 8
+por = "00000000"
+mclr = "0000xxxx"
+access = "----nnnn"
+implemented = 15
 
 [[sfr.fields]]
 name = "CCP2CTS"
@@ -3618,6 +4002,10 @@ width = 1
 name = "CCPTMRS"
 addr = 671
 width = 8
+por = "01010101"
+mclr = "01010101"
+access = "nnnnnnnn"
+implemented = 255
 
 [[sfr.fields]]
 name = "C1TSEL"
@@ -3683,6 +4071,10 @@ width = 1
 name = "SLRCONA"
 addr = 780
 width = 8
+por = "00110111"
+mclr = "00110111"
+access = "--nn-nnn"
+implemented = 55
 
 [[sfr.fields]]
 name = "SLRA0"
@@ -3713,6 +4105,10 @@ width = 1
 name = "SLRCONC"
 addr = 782
 width = 8
+por = "00111111"
+mclr = "00111111"
+access = "--nnnnnn"
+implemented = 63
 
 [[sfr.fields]]
 name = "SLRC0"
@@ -3748,6 +4144,10 @@ width = 1
 name = "CCPR3L"
 addr = 785
 width = 8
+por = "xxxxxxxx"
+mclr = "xxxxxxxx"
+access = "nnnnnnnn"
+implemented = 255
 
 [[sfr.fields]]
 name = "CCPR3L"
@@ -3758,6 +4158,10 @@ width = 8
 name = "CCPR3H"
 addr = 786
 width = 8
+por = "xxxxxxxx"
+mclr = "xxxxxxxx"
+access = "nnnnnnnn"
+implemented = 255
 
 [[sfr.fields]]
 name = "CCPR3H"
@@ -3768,6 +4172,10 @@ width = 8
 name = "CCP3CON"
 addr = 787
 width = 8
+por = "0-x00000"
+mclr = "0-x00000"
+access = "n-rnnnnn"
+implemented = 191
 
 [[sfr.fields]]
 name = "CCP3MODE"
@@ -3813,6 +4221,10 @@ width = 1
 name = "CCP3CAP"
 addr = 788
 width = 8
+por = "00000000"
+mclr = "----xxxx"
+access = "----nnnn"
+implemented = 15
 
 [[sfr.fields]]
 name = "CCP3CTS"
@@ -3843,6 +4255,10 @@ width = 1
 name = "CCPR4L"
 addr = 789
 width = 8
+por = "xxxxxxxx"
+mclr = "xxxxxxxx"
+access = "nnnnnnnn"
+implemented = 255
 
 [[sfr.fields]]
 name = "CCPR4L"
@@ -3853,6 +4269,10 @@ width = 8
 name = "CCPR4H"
 addr = 790
 width = 8
+por = "xxxxxxxx"
+mclr = "xxxxxxxx"
+access = "nnnnnnnn"
+implemented = 255
 
 [[sfr.fields]]
 name = "CCPR4H"
@@ -3863,6 +4283,10 @@ width = 8
 name = "CCP4CON"
 addr = 791
 width = 8
+por = "x-xxxxxx"
+mclr = "x-xxxxxx"
+access = "n-nnnnnn"
+implemented = 191
 
 [[sfr.fields]]
 name = "CCP4MODE"
@@ -3908,6 +4332,10 @@ width = 1
 name = "CCP4CAP"
 addr = 792
 width = 8
+por = "----xxxx"
+mclr = "----xxxx"
+access = "----nnnn"
+implemented = 15
 
 [[sfr.fields]]
 name = "CCP4CTS"
@@ -3938,6 +4366,10 @@ width = 1
 name = "INLVLA"
 addr = 908
 width = 8
+por = "00111111"
+mclr = "00111111"
+access = "--nnnnnn"
+implemented = 63
 
 [[sfr.fields]]
 name = "INLVLA0"
@@ -3973,6 +4405,10 @@ width = 1
 name = "INLVLC"
 addr = 910
 width = 8
+por = "00111111"
+mclr = "00111111"
+access = "--nnnnnn"
+implemented = 63
 
 [[sfr.fields]]
 name = "INLVLC0"
@@ -4008,6 +4444,10 @@ width = 1
 name = "IOCAP"
 addr = 913
 width = 8
+por = "--000000"
+mclr = "--000000"
+access = "--nnnnnn"
+implemented = 63
 
 [[sfr.fields]]
 name = "IOCAP0"
@@ -4043,6 +4483,10 @@ width = 1
 name = "IOCAN"
 addr = 914
 width = 8
+por = "--000000"
+mclr = "--000000"
+access = "--nnnnnn"
+implemented = 63
 
 [[sfr.fields]]
 name = "IOCAN0"
@@ -4078,6 +4522,10 @@ width = 1
 name = "IOCAF"
 addr = 915
 width = 8
+por = "--000000"
+mclr = "--000000"
+access = "--nnnnnn"
+implemented = 63
 
 [[sfr.fields]]
 name = "IOCAF0"
@@ -4113,6 +4561,10 @@ width = 1
 name = "IOCCP"
 addr = 919
 width = 8
+por = "--000000"
+mclr = "--000000"
+access = "--nnnnnn"
+implemented = 63
 
 [[sfr.fields]]
 name = "IOCCP0"
@@ -4148,6 +4600,10 @@ width = 1
 name = "IOCCN"
 addr = 920
 width = 8
+por = "--000000"
+mclr = "--000000"
+access = "--nnnnnn"
+implemented = 63
 
 [[sfr.fields]]
 name = "IOCCN0"
@@ -4183,6 +4639,10 @@ width = 1
 name = "IOCCF"
 addr = 921
 width = 8
+por = "--000000"
+mclr = "--000000"
+access = "--nnnnnn"
+implemented = 63
 
 [[sfr.fields]]
 name = "IOCCF0"
@@ -4218,6 +4678,10 @@ width = 1
 name = "CLKRCON"
 addr = 922
 width = 8
+por = "0--10000"
+mclr = "0--10000"
+access = "n--nnnnn"
+implemented = 159
 
 [[sfr.fields]]
 name = "CLKRDIV"
@@ -4263,6 +4727,10 @@ width = 1
 name = "MDCON"
 addr = 924
 width = 8
+por = "0--00--0"
+mclr = "0--00--0"
+access = "n--nr--n"
+implemented = 153
 
 [[sfr.fields]]
 name = "MDBIT"
@@ -4288,6 +4756,10 @@ width = 1
 name = "MDSRC"
 addr = 925
 width = 8
+por = "-000xxxx"
+mclr = "-000uuuu"
+access = "----nnnn"
+implemented = 15
 
 [[sfr.fields]]
 name = "MDMS"
@@ -4318,6 +4790,10 @@ width = 1
 name = "MDCARH"
 addr = 926
 width = 8
+por = "-xx0xxxx"
+mclr = "-uu0uuuu"
+access = "-nn-nnnn"
+implemented = 111
 
 [[sfr.fields]]
 name = "MDCH"
@@ -4358,6 +4834,10 @@ width = 1
 name = "MDCARL"
 addr = 927
 width = 8
+por = "-xx0xxxx"
+mclr = "-uu0uuuu"
+access = "-nn-nnnn"
+implemented = 111
 
 [[sfr.fields]]
 name = "MDCL"
@@ -4398,6 +4878,10 @@ width = 1
 name = "TMR3L"
 addr = 1041
 width = 8
+por = "xxxxxxxx"
+mclr = "uuuuuuuu"
+access = "nnnnnnnn"
+implemented = 255
 
 [[sfr.fields]]
 name = "TMR3L"
@@ -4408,6 +4892,10 @@ width = 8
 name = "TMR3H"
 addr = 1042
 width = 8
+por = "xxxxxxxx"
+mclr = "uuuuuuuu"
+access = "nnnnnnnn"
+implemented = 255
 
 [[sfr.fields]]
 name = "TMR3H"
@@ -4418,6 +4906,10 @@ width = 8
 name = "T3CON"
 addr = 1043
 width = 8
+por = "000000-0"
+mclr = "uuuuuu-u"
+access = "nnnnnn-n"
+implemented = 253
 
 [[sfr.fields]]
 name = "TMR3ON"
@@ -4468,6 +4960,10 @@ width = 1
 name = "T3GCON"
 addr = 1044
 width = 8
+por = "00000x00"
+mclr = "uuuuuxuu"
+access = "nnnnnrnn"
+implemented = 255
 
 [[sfr.fields]]
 name = "T3GSS"
@@ -4518,6 +5014,10 @@ width = 1
 name = "TMR4"
 addr = 1045
 width = 8
+por = "00000000"
+mclr = "00000000"
+access = "nnnnnnnn"
+implemented = 255
 
 [[sfr.fields]]
 name = "TMR4"
@@ -4528,6 +5028,10 @@ width = 8
 name = "PR4"
 addr = 1046
 width = 8
+por = "11111111"
+mclr = "11111111"
+access = "nnnnnnnn"
+implemented = 255
 
 [[sfr.fields]]
 name = "PR4"
@@ -4538,6 +5042,10 @@ width = 8
 name = "T4CON"
 addr = 1047
 width = 8
+por = "-0000000"
+mclr = "-0000000"
+access = "-nnnnnnn"
+implemented = 127
 
 [[sfr.fields]]
 name = "T4CKPS"
@@ -4588,6 +5096,10 @@ width = 1
 name = "TMR5L"
 addr = 1048
 width = 8
+por = "xxxxxxxx"
+mclr = "uuuuuuuu"
+access = "nnnnnnnn"
+implemented = 255
 
 [[sfr.fields]]
 name = "TMR5L"
@@ -4598,6 +5110,10 @@ width = 8
 name = "TMR5H"
 addr = 1049
 width = 8
+por = "xxxxxxxx"
+mclr = "uuuuuuuu"
+access = "nnnnnnnn"
+implemented = 255
 
 [[sfr.fields]]
 name = "TMR5H"
@@ -4608,6 +5124,10 @@ width = 8
 name = "T5CON"
 addr = 1050
 width = 8
+por = "000000-0"
+mclr = "uuuuuu-u"
+access = "nnnnnn-n"
+implemented = 253
 
 [[sfr.fields]]
 name = "TMR5ON"
@@ -4658,6 +5178,10 @@ width = 1
 name = "T5GCON"
 addr = 1051
 width = 8
+por = "00000x00"
+mclr = "uuuuuxuu"
+access = "nnnnnrnn"
+implemented = 255
 
 [[sfr.fields]]
 name = "T5GSS"
@@ -4708,6 +5232,10 @@ width = 1
 name = "TMR6"
 addr = 1052
 width = 8
+por = "00000000"
+mclr = "00000000"
+access = "nnnnnnnn"
+implemented = 255
 
 [[sfr.fields]]
 name = "TMR6"
@@ -4718,6 +5246,10 @@ width = 8
 name = "PR6"
 addr = 1053
 width = 8
+por = "11111111"
+mclr = "11111111"
+access = "nnnnnnnn"
+implemented = 255
 
 [[sfr.fields]]
 name = "PR6"
@@ -4728,6 +5260,10 @@ width = 8
 name = "T6CON"
 addr = 1054
 width = 8
+por = "-0000000"
+mclr = "-0000000"
+access = "-nnnnnnn"
+implemented = 127
 
 [[sfr.fields]]
 name = "T6CKPS"
@@ -4778,6 +5314,10 @@ width = 1
 name = "CCDCON"
 addr = 1055
 width = 8
+por = "000000xx"
+mclr = "000000uu"
+access = "n-----nn"
+implemented = 131
 
 [[sfr.fields]]
 name = "CCDS"
@@ -4803,6 +5343,11 @@ width = 1
 name = "NCO1ACCL"
 addr = 1176
 width = 8
+por = "00000000"
+mclr = "00000000"
+access = "nnnnnnnn"
+implemented = 255
+module = "DOS-01444B_NCO_v1_a1_183xx"
 
 [[sfr.fields]]
 name = "NCO1ACC"
@@ -4813,6 +5358,11 @@ width = 8
 name = "NCO1ACCH"
 addr = 1177
 width = 8
+por = "00000000"
+mclr = "00000000"
+access = "nnnnnnnn"
+implemented = 255
+module = "DOS-01444B_NCO_v1_a1_183xx"
 
 [[sfr.fields]]
 name = "NCO1ACC"
@@ -4823,6 +5373,11 @@ width = 8
 name = "NCO1ACCU"
 addr = 1178
 width = 8
+por = "----0000"
+mclr = "----0000"
+access = "----nnnn"
+implemented = 15
+module = "DOS-01444B_NCO_v1_a1_183xx"
 
 [[sfr.fields]]
 name = "NCO1ACC"
@@ -4833,6 +5388,11 @@ width = 4
 name = "NCO1INCL"
 addr = 1179
 width = 8
+por = "00000001"
+mclr = "00000001"
+access = "nnnnnnnn"
+implemented = 255
+module = "DOS-01444B_NCO_v1_a1_183xx"
 
 [[sfr.fields]]
 name = "NCO1INC"
@@ -4843,6 +5403,11 @@ width = 8
 name = "NCO1INCH"
 addr = 1180
 width = 8
+por = "00000000"
+mclr = "00000000"
+access = "nnnnnnnn"
+implemented = 255
+module = "DOS-01444B_NCO_v1_a1_183xx"
 
 [[sfr.fields]]
 name = "NCO1INC"
@@ -4853,6 +5418,11 @@ width = 8
 name = "NCO1INCU"
 addr = 1181
 width = 8
+por = "----0000"
+mclr = "----0000"
+access = "----nnnn"
+implemented = 15
+module = "DOS-01444B_NCO_v1_a1_183xx"
 
 [[sfr.fields]]
 name = "NCO1INC"
@@ -4863,6 +5433,11 @@ width = 4
 name = "NCO1CON"
 addr = 1182
 width = 8
+por = "0-00---0"
+mclr = "0-00---0"
+access = "n-rn---n"
+implemented = 177
+module = "DOS-01444B_NCO_v1_a1_183xx"
 
 [[sfr.fields]]
 name = "N1PFM"
@@ -4888,6 +5463,11 @@ width = 1
 name = "NCO1CLK"
 addr = 1183
 width = 8
+por = "000---00"
+mclr = "000---00"
+access = "nnn---nn"
+implemented = 227
+module = "DOS-01444B_NCO_v1_a1_183xx"
 
 [[sfr.fields]]
 name = "N1CKS"
@@ -4903,6 +5483,11 @@ width = 3
 name = "PWM5DCL"
 addr = 1559
 width = 8
+por = "xx------"
+mclr = "uu------"
+access = "nn------"
+implemented = 192
+module = "DOS-01435"
 
 [[sfr.fields]]
 name = "PWM5DCL"
@@ -4923,6 +5508,11 @@ width = 1
 name = "PWM5DCH"
 addr = 1560
 width = 8
+por = "xxxxxxxx"
+mclr = "uuuuuuuu"
+access = "nnnnnnnn"
+implemented = 255
+module = "DOS-01435"
 
 [[sfr.fields]]
 name = "PWM5DCH"
@@ -4973,6 +5563,11 @@ width = 1
 name = "PWM5CON"
 addr = 1561
 width = 8
+por = "0-x0----"
+mclr = "0-x0----"
+access = "n-rn----"
+implemented = 176
+module = "DOS-01435"
 aliases = ["PWM5CON0"]
 
 [[sfr.fields]]
@@ -4994,6 +5589,11 @@ width = 1
 name = "PWM6DCL"
 addr = 1562
 width = 8
+por = "xx------"
+mclr = "uu------"
+access = "nn------"
+implemented = 192
+module = "DOS-01435"
 
 [[sfr.fields]]
 name = "PWM6DCL"
@@ -5014,6 +5614,11 @@ width = 1
 name = "PWM6DCH"
 addr = 1563
 width = 8
+por = "xxxxxxxx"
+mclr = "uuuuuuuu"
+access = "nnnnnnnn"
+implemented = 255
+module = "DOS-01435"
 
 [[sfr.fields]]
 name = "PWM6DCH"
@@ -5064,6 +5669,11 @@ width = 1
 name = "PWM6CON"
 addr = 1564
 width = 8
+por = "0-x0----"
+mclr = "0-x0----"
+access = "n-rn----"
+implemented = 176
+module = "DOS-01435"
 aliases = ["PWM6CON0"]
 
 [[sfr.fields]]
@@ -5085,6 +5695,10 @@ width = 1
 name = "PWMTMRS"
 addr = 1567
 width = 8
+por = "----0101"
+mclr = "----0101"
+access = "----nnnn"
+implemented = 15
 
 [[sfr.fields]]
 name = "P5TSEL"
@@ -5120,6 +5734,11 @@ width = 1
 name = "CWG1CLKCON"
 addr = 1681
 width = 8
+por = "-------0"
+mclr = "-------0"
+access = "-------n"
+implemented = 1
+module = "DOS-02485_wg_cwg_v1_183xx_8Bit"
 
 [[sfr.fields]]
 name = "CS"
@@ -5135,6 +5754,11 @@ width = 1
 name = "CWG1DAT"
 addr = 1682
 width = 8
+por = "----0000"
+mclr = "----0000"
+access = "----nnnn"
+implemented = 15
+module = "DOS-02485_wg_cwg_v1_183xx_8Bit"
 
 [[sfr.fields]]
 name = "DAT"
@@ -5165,6 +5789,11 @@ width = 1
 name = "CWG1DBR"
 addr = 1683
 width = 8
+por = "--000000"
+mclr = "--000000"
+access = "--nnnnnn"
+implemented = 63
+module = "DOS-02485_wg_cwg_v1_183xx_8Bit"
 
 [[sfr.fields]]
 name = "DBR"
@@ -5205,6 +5834,11 @@ width = 1
 name = "CWG1DBF"
 addr = 1684
 width = 8
+por = "--000000"
+mclr = "--000000"
+access = "--nnnnnn"
+implemented = 63
+module = "DOS-02485_wg_cwg_v1_183xx_8Bit"
 
 [[sfr.fields]]
 name = "DBF"
@@ -5245,6 +5879,11 @@ width = 1
 name = "CWG1CON0"
 addr = 1685
 width = 8
+por = "00---000"
+mclr = "00---000"
+access = "nn---nnn"
+implemented = 199
+module = "DOS-02485_wg_cwg_v1_183xx_8Bit"
 
 [[sfr.fields]]
 name = "MODE"
@@ -5285,6 +5924,11 @@ width = 1
 name = "CWG1CON1"
 addr = 1686
 width = 8
+por = "--x-0000"
+mclr = "--u-0000"
+access = "--r-nnnn"
+implemented = 47
+module = "DOS-02485_wg_cwg_v1_183xx_8Bit"
 
 [[sfr.fields]]
 name = "POLA"
@@ -5340,6 +5984,11 @@ width = 1
 name = "CWG1AS0"
 addr = 1687
 width = 8
+por = "000101--"
+mclr = "000101--"
+access = "nnnnnn--"
+implemented = 252
+module = "DOS-02485_wg_cwg_v1_183xx_8Bit"
 
 [[sfr.fields]]
 name = "LSAC"
@@ -5385,6 +6034,11 @@ width = 1
 name = "CWG1AS1"
 addr = 1688
 width = 8
+por = "---00000"
+mclr = "---u0000"
+access = "---nnnnn"
+implemented = 31
+module = "DOS-02485_wg_cwg_v1_183xx_8Bit"
 
 [[sfr.fields]]
 name = "AS0E"
@@ -5415,6 +6069,11 @@ width = 1
 name = "CWG1STR"
 addr = 1689
 width = 8
+por = "00000000"
+mclr = "00000000"
+access = "nnnnnnnn"
+implemented = 255
+module = "DOS-02485_wg_cwg_v1_183xx_8Bit"
 
 [[sfr.fields]]
 name = "STRA"
@@ -5500,6 +6159,11 @@ width = 1
 name = "CWG2CLKCON"
 addr = 1809
 width = 8
+por = "-------0"
+mclr = "-------0"
+access = "-------n"
+implemented = 1
+module = "DOS-02485_wg_cwg_v1_183xx_8Bit"
 
 [[sfr.fields]]
 name = "CS"
@@ -5515,6 +6179,11 @@ width = 1
 name = "CWG2DAT"
 addr = 1810
 width = 8
+por = "----0000"
+mclr = "----0000"
+access = "----nnnn"
+implemented = 15
+module = "DOS-02485_wg_cwg_v1_183xx_8Bit"
 
 [[sfr.fields]]
 name = "DAT"
@@ -5545,6 +6214,11 @@ width = 1
 name = "CWG2DBR"
 addr = 1811
 width = 8
+por = "--000000"
+mclr = "--000000"
+access = "--nnnnnn"
+implemented = 63
+module = "DOS-02485_wg_cwg_v1_183xx_8Bit"
 
 [[sfr.fields]]
 name = "DBR"
@@ -5585,6 +6259,11 @@ width = 1
 name = "CWG2DBF"
 addr = 1812
 width = 8
+por = "--000000"
+mclr = "--000000"
+access = "--nnnnnn"
+implemented = 63
+module = "DOS-02485_wg_cwg_v1_183xx_8Bit"
 
 [[sfr.fields]]
 name = "DBF"
@@ -5625,6 +6304,11 @@ width = 1
 name = "CWG2CON0"
 addr = 1813
 width = 8
+por = "00---000"
+mclr = "00---000"
+access = "nn---nnn"
+implemented = 199
+module = "DOS-02485_wg_cwg_v1_183xx_8Bit"
 
 [[sfr.fields]]
 name = "MODE"
@@ -5665,6 +6349,11 @@ width = 1
 name = "CWG2CON1"
 addr = 1814
 width = 8
+por = "--x-0000"
+mclr = "--u-0000"
+access = "--r-nnnn"
+implemented = 47
+module = "DOS-02485_wg_cwg_v1_183xx_8Bit"
 
 [[sfr.fields]]
 name = "POLA"
@@ -5720,6 +6409,11 @@ width = 1
 name = "CWG2AS0"
 addr = 1815
 width = 8
+por = "000101--"
+mclr = "000101--"
+access = "nnnnnn--"
+implemented = 252
+module = "DOS-02485_wg_cwg_v1_183xx_8Bit"
 
 [[sfr.fields]]
 name = "LSAC"
@@ -5765,6 +6459,11 @@ width = 1
 name = "CWG2AS1"
 addr = 1816
 width = 8
+por = "---00000"
+mclr = "---u0000"
+access = "---nnnnn"
+implemented = 31
+module = "DOS-02485_wg_cwg_v1_183xx_8Bit"
 
 [[sfr.fields]]
 name = "AS0E"
@@ -5795,6 +6494,11 @@ width = 1
 name = "CWG2STR"
 addr = 1817
 width = 8
+por = "00000000"
+mclr = "00000000"
+access = "nnnnnnnn"
+implemented = 255
+module = "DOS-02485_wg_cwg_v1_183xx_8Bit"
 
 [[sfr.fields]]
 name = "STRA"
@@ -5880,6 +6584,10 @@ width = 1
 name = "NVMADRL"
 addr = 2193
 width = 8
+por = "00000000"
+mclr = "uuuuuuuu"
+access = "nnnnnnnn"
+implemented = 255
 aliases = ["EEADRL", "PMADRL"]
 
 [[sfr.fields]]
@@ -5931,6 +6639,10 @@ width = 1
 name = "NVMADRH"
 addr = 2194
 width = 8
+por = "10000000"
+mclr = "-uuuuuuu"
+access = "-nnnnnnn"
+implemented = 127
 aliases = ["EEADRH", "PMADRH"]
 
 [[sfr.fields]]
@@ -5977,6 +6689,10 @@ width = 1
 name = "NVMDATL"
 addr = 2195
 width = 8
+por = "00000000"
+mclr = "uuuuuuuu"
+access = "nnnnnnnn"
+implemented = 255
 aliases = ["EEDATL", "PMDATL"]
 
 [[sfr.fields]]
@@ -6028,6 +6744,10 @@ width = 1
 name = "NVMDATH"
 addr = 2196
 width = 8
+por = "--000000"
+mclr = "--uuuuuu"
+access = "--nnnnnn"
+implemented = 63
 aliases = ["EEDATH", "PMDATH"]
 
 [[sfr.fields]]
@@ -6069,6 +6789,10 @@ width = 1
 name = "NVMCON1"
 addr = 2197
 width = 8
+por = "0000x000"
+mclr = "0000q000"
+access = "-nnnnnnn"
+implemented = 127
 aliases = ["EECON1", "PMCON1"]
 
 [[sfr.fields]]
@@ -6115,6 +6839,10 @@ width = 1
 name = "NVMCON2"
 addr = 2198
 width = 8
+por = "00000000"
+mclr = "00000000"
+access = "nnnnnnnn"
+implemented = 255
 aliases = ["EECON2", "PMCON2"]
 
 [[sfr.fields]]
@@ -6131,6 +6859,10 @@ width = 8
 name = "PCON0"
 addr = 2203
 width = 8
+por = "00-1110q"
+mclr = "qq-qqquu"
+access = "nn-nnnnn"
+implemented = 223
 
 [[sfr.fields]]
 name = "nBOR"
@@ -6171,6 +6903,10 @@ width = 1
 name = "PMD0"
 addr = 2321
 width = 8
+por = "00000000"
+mclr = "00000000"
+access = "nn---nnn"
+implemented = 199
 
 [[sfr.fields]]
 name = "IOCMD"
@@ -6201,6 +6937,10 @@ width = 1
 name = "PMD1"
 addr = 2322
 width = 8
+por = "00x0x000"
+mclr = "00u0u000"
+access = "nnnnnnnn"
+implemented = 255
 
 [[sfr.fields]]
 name = "TMR0MD"
@@ -6246,6 +6986,10 @@ width = 1
 name = "PMD2"
 addr = 2323
 width = 8
+por = "00000000"
+mclr = "00000000"
+access = "-nn--nn-"
+implemented = 102
 
 [[sfr.fields]]
 name = "CMP1MD"
@@ -6271,6 +7015,10 @@ width = 1
 name = "PMD3"
 addr = 2324
 width = 8
+por = "00000000"
+mclr = "00000000"
+access = "nnnnnnnn"
+implemented = 255
 
 [[sfr.fields]]
 name = "CCP1MD"
@@ -6316,6 +7064,10 @@ width = 1
 name = "PMD4"
 addr = 2325
 width = 8
+por = "00000000"
+mclr = "00000000"
+access = "--n--nn-"
+implemented = 38
 
 [[sfr.fields]]
 name = "MSSP1MD"
@@ -6336,6 +7088,10 @@ width = 1
 name = "PMD5"
 addr = 2326
 width = 8
+por = "00000000"
+mclr = "00000000"
+access = "---nnnnn"
+implemented = 31
 
 [[sfr.fields]]
 name = "DSMMD"
@@ -6366,6 +7122,10 @@ width = 1
 name = "CPUDOZE"
 addr = 2328
 width = 8
+por = "00000000"
+mclr = "00000000"
+access = "nnnn-nnn"
+implemented = 247
 
 [[sfr.fields]]
 name = "DOZE"
@@ -6411,6 +7171,10 @@ width = 1
 name = "OSCCON1"
 addr = 2329
 width = 8
+por = "0qqq0000"
+mclr = "0qqq0000"
+access = "-nnnnnnn"
+implemented = 127
 
 [[sfr.fields]]
 name = "NDIV"
@@ -6461,6 +7225,10 @@ width = 1
 name = "OSCCON2"
 addr = 2330
 width = 8
+por = "0qqq0000"
+mclr = "0qqq0000"
+access = "-rrrrrrr"
+implemented = 127
 
 [[sfr.fields]]
 name = "CDIV"
@@ -6511,6 +7279,10 @@ width = 1
 name = "OSCCON3"
 addr = 2331
 width = 8
+por = "00000000"
+mclr = "00000000"
+access = "nnnrr---"
+implemented = 248
 
 [[sfr.fields]]
 name = "NOSCR"
@@ -6541,6 +7313,10 @@ width = 1
 name = "OSCSTAT1"
 addr = 2332
 width = 8
+por = "q0-0qq-0"
+mclr = "qq-qqq-q"
+access = "rr-rrr-r"
+implemented = 221
 
 [[sfr.fields]]
 name = "PLLR"
@@ -6576,6 +7352,10 @@ width = 1
 name = "OSCEN"
 addr = 2333
 width = 8
+por = "00000000"
+mclr = "00000000"
+access = "nn-nnn--"
+implemented = 220
 
 [[sfr.fields]]
 name = "ADOEN"
@@ -6606,6 +7386,10 @@ width = 1
 name = "OSCTUNE"
 addr = 2334
 width = 8
+por = "00100000"
+mclr = "00100000"
+access = "--nnnnnn"
+implemented = 63
 
 [[sfr.fields]]
 name = "HFTUN"
@@ -6646,6 +7430,10 @@ width = 1
 name = "OSCFRQ"
 addr = 2335
 width = 8
+por = "-0000110"
+mclr = "-0000110"
+access = "----nnnn"
+implemented = 15
 
 [[sfr.fields]]
 name = "HFFRQ"
@@ -6676,6 +7464,10 @@ width = 1
 name = "PPSLOCK"
 addr = 3599
 width = 8
+por = "00000000"
+mclr = "00000000"
+access = "-------n"
+implemented = 1
 
 [[sfr.fields]]
 name = "PPSLOCKED"
@@ -6686,6 +7478,10 @@ width = 1
 name = "INTPPS"
 addr = 3600
 width = 8
+por = "00000010"
+mclr = "000uuuuu"
+access = "---nnnnn"
+implemented = 31
 
 [[sfr.fields]]
 name = "INTPPS"
@@ -6721,6 +7517,10 @@ width = 1
 name = "T0CKIPPS"
 addr = 3601
 width = 8
+por = "00000010"
+mclr = "000uuuuu"
+access = "---nnnnn"
+implemented = 31
 
 [[sfr.fields]]
 name = "T0CKIPPS"
@@ -6756,6 +7556,10 @@ width = 1
 name = "T1CKIPPS"
 addr = 3602
 width = 8
+por = "00000101"
+mclr = "000uuuuu"
+access = "---nnnnn"
+implemented = 31
 
 [[sfr.fields]]
 name = "T1CKIPPS"
@@ -6791,6 +7595,10 @@ width = 1
 name = "T1GPPS"
 addr = 3603
 width = 8
+por = "00000100"
+mclr = "000uuuuu"
+access = "---nnnnn"
+implemented = 31
 
 [[sfr.fields]]
 name = "T1GPPS"
@@ -6826,6 +7634,10 @@ width = 1
 name = "CCP1PPS"
 addr = 3604
 width = 8
+por = "00010101"
+mclr = "000uuuuu"
+access = "---nnnnn"
+implemented = 31
 
 [[sfr.fields]]
 name = "CCP1PPS"
@@ -6861,6 +7673,10 @@ width = 1
 name = "CCP2PPS"
 addr = 3605
 width = 8
+por = "00010011"
+mclr = "000uuuuu"
+access = "---nnnnn"
+implemented = 31
 
 [[sfr.fields]]
 name = "CCP2PPS"
@@ -6896,6 +7712,10 @@ width = 1
 name = "CCP3PPS"
 addr = 3606
 width = 8
+por = "00000010"
+mclr = "000uuuuu"
+access = "---nnnnn"
+implemented = 31
 
 [[sfr.fields]]
 name = "CCP3PPS"
@@ -6931,6 +7751,10 @@ width = 1
 name = "CCP4PPS"
 addr = 3607
 width = 8
+por = "00010001"
+mclr = "000uuuuu"
+access = "---nnnnn"
+implemented = 31
 
 [[sfr.fields]]
 name = "CCP4PPS"
@@ -6966,6 +7790,10 @@ width = 1
 name = "CWG1PPS"
 addr = 3608
 width = 8
+por = "00000010"
+mclr = "000uuuuu"
+access = "---nnnnn"
+implemented = 31
 
 [[sfr.fields]]
 name = "CWG1PPS"
@@ -7001,6 +7829,10 @@ width = 1
 name = "CWG2PPS"
 addr = 3609
 width = 8
+por = "00000010"
+mclr = "000uuuuu"
+access = "---nnnnn"
+implemented = 31
 
 [[sfr.fields]]
 name = "CWG2PPS"
@@ -7036,6 +7868,10 @@ width = 1
 name = "MDCIN1PPS"
 addr = 3610
 width = 8
+por = "00010010"
+mclr = "000uuuuu"
+access = "---nnnnn"
+implemented = 31
 
 [[sfr.fields]]
 name = "MDCIN1PPS"
@@ -7071,6 +7907,10 @@ width = 1
 name = "MDCIN2PPS"
 addr = 3611
 width = 8
+por = "00010101"
+mclr = "000uuuuu"
+access = "---nnnnn"
+implemented = 31
 
 [[sfr.fields]]
 name = "MDCIN2PPS"
@@ -7106,6 +7946,10 @@ width = 1
 name = "MDMINPPS"
 addr = 3612
 width = 8
+por = "00010011"
+mclr = "000uuuuu"
+access = "---nnnnn"
+implemented = 31
 
 [[sfr.fields]]
 name = "MDMINPPS"
@@ -7141,6 +7985,10 @@ width = 1
 name = "SSP2CLKPPS"
 addr = 3613
 width = 8
+por = "00010100"
+mclr = "000uuuuu"
+access = "---nnnnn"
+implemented = 31
 
 [[sfr.fields]]
 name = "SSP2CLKPPS"
@@ -7176,6 +8024,10 @@ width = 1
 name = "SSP2DATPPS"
 addr = 3614
 width = 8
+por = "00010101"
+mclr = "000uuuuu"
+access = "---nnnnn"
+implemented = 31
 
 [[sfr.fields]]
 name = "SSP2DATPPS"
@@ -7211,6 +8063,10 @@ width = 1
 name = "SSP2SSPPS"
 addr = 3615
 width = 8
+por = "00000000"
+mclr = "000uuuuu"
+access = "---nnnnn"
+implemented = 31
 
 [[sfr.fields]]
 name = "SSP2SSPPS"
@@ -7246,6 +8102,10 @@ width = 1
 name = "SSP1CLKPPS"
 addr = 3616
 width = 8
+por = "00010000"
+mclr = "000uuuuu"
+access = "---nnnnn"
+implemented = 31
 
 [[sfr.fields]]
 name = "SSP1CLKPPS"
@@ -7281,6 +8141,10 @@ width = 1
 name = "SSP1DATPPS"
 addr = 3617
 width = 8
+por = "00010001"
+mclr = "000uuuuu"
+access = "---nnnnn"
+implemented = 31
 
 [[sfr.fields]]
 name = "SSP1DATPPS"
@@ -7316,6 +8180,10 @@ width = 1
 name = "SSP1SSPPS"
 addr = 3618
 width = 8
+por = "00010011"
+mclr = "000uuuuu"
+access = "---nnnnn"
+implemented = 31
 
 [[sfr.fields]]
 name = "SSP1SSPPS"
@@ -7351,6 +8219,10 @@ width = 1
 name = "RXPPS"
 addr = 3620
 width = 8
+por = "00010101"
+mclr = "000uuuuu"
+access = "---nnnnn"
+implemented = 31
 
 [[sfr.fields]]
 name = "RXPPS"
@@ -7386,6 +8258,10 @@ width = 1
 name = "TXPPS"
 addr = 3621
 width = 8
+por = "00010100"
+mclr = "000uuuuu"
+access = "---nnnnn"
+implemented = 31
 
 [[sfr.fields]]
 name = "TXPPS"
@@ -7421,6 +8297,10 @@ width = 1
 name = "CLCIN0PPS"
 addr = 3624
 width = 8
+por = "00010011"
+mclr = "000uuuuu"
+access = "---nnnnn"
+implemented = 31
 
 [[sfr.fields]]
 name = "CLCIN0PPS"
@@ -7456,6 +8336,10 @@ width = 1
 name = "CLCIN1PPS"
 addr = 3625
 width = 8
+por = "00000100"
+mclr = "000uuuuu"
+access = "---nnnnn"
+implemented = 31
 
 [[sfr.fields]]
 name = "CLCIN1PPS"
@@ -7491,6 +8375,10 @@ width = 1
 name = "CLCIN2PPS"
 addr = 3626
 width = 8
+por = "00010001"
+mclr = "000uuuuu"
+access = "---nnnnn"
+implemented = 31
 
 [[sfr.fields]]
 name = "CLCIN2PPS"
@@ -7526,6 +8414,10 @@ width = 1
 name = "CLCIN3PPS"
 addr = 3627
 width = 8
+por = "00000101"
+mclr = "000uuuuu"
+access = "---nnnnn"
+implemented = 31
 
 [[sfr.fields]]
 name = "CLCIN3PPS"
@@ -7561,6 +8453,10 @@ width = 1
 name = "T3CKIPPS"
 addr = 3628
 width = 8
+por = "00010101"
+mclr = "000uuuuu"
+access = "---nnnnn"
+implemented = 31
 
 [[sfr.fields]]
 name = "T3CKIPPS"
@@ -7571,6 +8467,10 @@ width = 5
 name = "T3GPPS"
 addr = 3629
 width = 8
+por = "00010100"
+mclr = "000uuuuu"
+access = "---nnnnn"
+implemented = 31
 
 [[sfr.fields]]
 name = "T3GPPS"
@@ -7581,6 +8481,10 @@ width = 5
 name = "T5CKIPPS"
 addr = 3630
 width = 8
+por = "00010000"
+mclr = "000uuuuu"
+access = "---nnnnn"
+implemented = 31
 
 [[sfr.fields]]
 name = "T5CKIPPS"
@@ -7591,6 +8495,10 @@ width = 5
 name = "T5GPPS"
 addr = 3631
 width = 8
+por = "00010011"
+mclr = "000uuuuu"
+access = "---nnnnn"
+implemented = 31
 
 [[sfr.fields]]
 name = "T5GPPS"
@@ -7601,6 +8509,10 @@ width = 5
 name = "RA0PPS"
 addr = 3728
 width = 8
+por = "---00000"
+mclr = "---uuuuu"
+access = "---nnnnn"
+implemented = 31
 
 [[sfr.fields]]
 name = "RA0PPS"
@@ -7636,6 +8548,10 @@ width = 1
 name = "RA1PPS"
 addr = 3729
 width = 8
+por = "---00000"
+mclr = "---uuuuu"
+access = "---nnnnn"
+implemented = 31
 
 [[sfr.fields]]
 name = "RA1PPS"
@@ -7671,6 +8587,10 @@ width = 1
 name = "RA2PPS"
 addr = 3730
 width = 8
+por = "---00000"
+mclr = "---uuuuu"
+access = "---nnnnn"
+implemented = 31
 
 [[sfr.fields]]
 name = "RA2PPS"
@@ -7706,6 +8626,10 @@ width = 1
 name = "RA4PPS"
 addr = 3732
 width = 8
+por = "---00000"
+mclr = "---uuuuu"
+access = "---nnnnn"
+implemented = 31
 
 [[sfr.fields]]
 name = "RA4PPS"
@@ -7741,6 +8665,10 @@ width = 1
 name = "RA5PPS"
 addr = 3733
 width = 8
+por = "---00000"
+mclr = "---uuuuu"
+access = "---nnnnn"
+implemented = 31
 
 [[sfr.fields]]
 name = "RA5PPS"
@@ -7776,6 +8704,10 @@ width = 1
 name = "RC0PPS"
 addr = 3744
 width = 8
+por = "---00000"
+mclr = "---uuuuu"
+access = "---nnnnn"
+implemented = 31
 
 [[sfr.fields]]
 name = "RC0PPS"
@@ -7811,6 +8743,10 @@ width = 1
 name = "RC1PPS"
 addr = 3745
 width = 8
+por = "---00000"
+mclr = "---uuuuu"
+access = "---nnnnn"
+implemented = 31
 
 [[sfr.fields]]
 name = "RC1PPS"
@@ -7846,6 +8782,10 @@ width = 1
 name = "RC2PPS"
 addr = 3746
 width = 8
+por = "---00000"
+mclr = "---uuuuu"
+access = "---nnnnn"
+implemented = 31
 
 [[sfr.fields]]
 name = "RC2PPS"
@@ -7881,6 +8821,10 @@ width = 1
 name = "RC3PPS"
 addr = 3747
 width = 8
+por = "---00000"
+mclr = "---uuuuu"
+access = "---nnnnn"
+implemented = 31
 
 [[sfr.fields]]
 name = "RC3PPS"
@@ -7916,6 +8860,10 @@ width = 1
 name = "RC4PPS"
 addr = 3748
 width = 8
+por = "---00000"
+mclr = "---uuuuu"
+access = "---nnnnn"
+implemented = 31
 
 [[sfr.fields]]
 name = "RC4PPS"
@@ -7951,6 +8899,10 @@ width = 1
 name = "RC5PPS"
 addr = 3749
 width = 8
+por = "---00000"
+mclr = "---uuuuu"
+access = "---nnnnn"
+implemented = 31
 
 [[sfr.fields]]
 name = "RC5PPS"
@@ -7986,6 +8938,10 @@ width = 1
 name = "CLCDATA"
 addr = 3855
 width = 8
+por = "00000000"
+mclr = "00000000"
+access = "----rrrr"
+implemented = 15
 
 [[sfr.fields]]
 name = "MLC1OUT"
@@ -8011,6 +8967,11 @@ width = 1
 name = "CLC1CON"
 addr = 3856
 width = 8
+por = "0-000000"
+mclr = "0-000000"
+access = "n-rnnnnn"
+implemented = 191
+module = "DOS-02286_CLC"
 
 [[sfr.fields]]
 name = "LC1MODE"
@@ -8056,6 +9017,11 @@ width = 1
 name = "CLC1POL"
 addr = 3857
 width = 8
+por = "0---xxxx"
+mclr = "0---uuuu"
+access = "n---nnnn"
+implemented = 143
+module = "DOS-02286_CLC"
 
 [[sfr.fields]]
 name = "LC1G1POL"
@@ -8111,6 +9077,11 @@ width = 1
 name = "CLC1SEL0"
 addr = 3858
 width = 8
+por = "--xxxxxx"
+mclr = "--uuuuuu"
+access = "--nnnnnn"
+implemented = 63
+module = "DOS-02286_CLC"
 
 [[sfr.fields]]
 name = "LC1D1S"
@@ -8151,6 +9122,11 @@ width = 1
 name = "CLC1SEL1"
 addr = 3859
 width = 8
+por = "--xxxxxx"
+mclr = "--uuuuuu"
+access = "--nnnnnn"
+implemented = 63
+module = "DOS-02286_CLC"
 
 [[sfr.fields]]
 name = "LC1D2S"
@@ -8191,6 +9167,11 @@ width = 1
 name = "CLC1SEL2"
 addr = 3860
 width = 8
+por = "--xxxxxx"
+mclr = "--uuuuuu"
+access = "--nnnnnn"
+implemented = 63
+module = "DOS-02286_CLC"
 
 [[sfr.fields]]
 name = "LC1D3S"
@@ -8231,6 +9212,11 @@ width = 1
 name = "CLC1SEL3"
 addr = 3861
 width = 8
+por = "--xxxxxx"
+mclr = "--uuuuuu"
+access = "--nnnnnn"
+implemented = 63
+module = "DOS-02286_CLC"
 
 [[sfr.fields]]
 name = "LC1D4S"
@@ -8271,6 +9257,11 @@ width = 1
 name = "CLC1GLS0"
 addr = 3862
 width = 8
+por = "xxxxxxxx"
+mclr = "uuuuuuuu"
+access = "nnnnnnnn"
+implemented = 255
+module = "DOS-02286_CLC"
 
 [[sfr.fields]]
 name = "LC1G1D1N"
@@ -8356,6 +9347,11 @@ width = 1
 name = "CLC1GLS1"
 addr = 3863
 width = 8
+por = "xxxxxxxx"
+mclr = "uuuuuuuu"
+access = "nnnnnnnn"
+implemented = 255
+module = "DOS-02286_CLC"
 
 [[sfr.fields]]
 name = "LC1G2D1N"
@@ -8441,6 +9437,11 @@ width = 1
 name = "CLC1GLS2"
 addr = 3864
 width = 8
+por = "xxxxxxxx"
+mclr = "uuuuuuuu"
+access = "nnnnnnnn"
+implemented = 255
+module = "DOS-02286_CLC"
 
 [[sfr.fields]]
 name = "LC1G3D1N"
@@ -8526,6 +9527,11 @@ width = 1
 name = "CLC1GLS3"
 addr = 3865
 width = 8
+por = "xxxxxxxx"
+mclr = "uuuuuuuu"
+access = "nnnnnnnn"
+implemented = 255
+module = "DOS-02286_CLC"
 
 [[sfr.fields]]
 name = "LC1G4D1N"
@@ -8571,6 +9577,11 @@ width = 1
 name = "CLC2CON"
 addr = 3866
 width = 8
+por = "0-000000"
+mclr = "0-000000"
+access = "n-rnnnnn"
+implemented = 191
+module = "DOS-02286_CLC"
 
 [[sfr.fields]]
 name = "LC2MODE"
@@ -8616,6 +9627,11 @@ width = 1
 name = "CLC2POL"
 addr = 3867
 width = 8
+por = "0---xxxx"
+mclr = "0---uuuu"
+access = "n---nnnn"
+implemented = 143
+module = "DOS-02286_CLC"
 
 [[sfr.fields]]
 name = "LC2G1POL"
@@ -8671,6 +9687,11 @@ width = 1
 name = "CLC2SEL0"
 addr = 3868
 width = 8
+por = "--xxxxxx"
+mclr = "--uuuuuu"
+access = "--nnnnnn"
+implemented = 63
+module = "DOS-02286_CLC"
 
 [[sfr.fields]]
 name = "LC2D1S"
@@ -8711,6 +9732,11 @@ width = 1
 name = "CLC2SEL1"
 addr = 3869
 width = 8
+por = "--xxxxxx"
+mclr = "--uuuuuu"
+access = "--nnnnnn"
+implemented = 63
+module = "DOS-02286_CLC"
 
 [[sfr.fields]]
 name = "LC2D2S"
@@ -8751,6 +9777,11 @@ width = 1
 name = "CLC2SEL2"
 addr = 3870
 width = 8
+por = "--xxxxxx"
+mclr = "--uuuuuu"
+access = "--nnnnnn"
+implemented = 63
+module = "DOS-02286_CLC"
 
 [[sfr.fields]]
 name = "LC2D3S"
@@ -8791,6 +9822,11 @@ width = 1
 name = "CLC2SEL3"
 addr = 3871
 width = 8
+por = "--xxxxxx"
+mclr = "--uuuuuu"
+access = "--nnnnnn"
+implemented = 63
+module = "DOS-02286_CLC"
 
 [[sfr.fields]]
 name = "LC2D4S"
@@ -8831,6 +9867,11 @@ width = 1
 name = "CLC2GLS0"
 addr = 3872
 width = 8
+por = "xxxxxxxx"
+mclr = "uuuuuuuu"
+access = "nnnnnnnn"
+implemented = 255
+module = "DOS-02286_CLC"
 
 [[sfr.fields]]
 name = "LC2G1D1N"
@@ -8916,6 +9957,11 @@ width = 1
 name = "CLC2GLS1"
 addr = 3873
 width = 8
+por = "xxxxxxxx"
+mclr = "uuuuuuuu"
+access = "nnnnnnnn"
+implemented = 255
+module = "DOS-02286_CLC"
 
 [[sfr.fields]]
 name = "LC2G2D1N"
@@ -9001,6 +10047,11 @@ width = 1
 name = "CLC2GLS2"
 addr = 3874
 width = 8
+por = "xxxxxxxx"
+mclr = "uuuuuuuu"
+access = "nnnnnnnn"
+implemented = 255
+module = "DOS-02286_CLC"
 
 [[sfr.fields]]
 name = "LC2G3D1N"
@@ -9086,6 +10137,11 @@ width = 1
 name = "CLC2GLS3"
 addr = 3875
 width = 8
+por = "xxxxxxxx"
+mclr = "uuuuuuuu"
+access = "nnnnnnnn"
+implemented = 255
+module = "DOS-02286_CLC"
 
 [[sfr.fields]]
 name = "LC2G4D1N"
@@ -9131,6 +10187,11 @@ width = 1
 name = "CLC3CON"
 addr = 3876
 width = 8
+por = "0-000000"
+mclr = "0-000000"
+access = "n-rnnnnn"
+implemented = 191
+module = "DOS-02286_CLC"
 
 [[sfr.fields]]
 name = "LC3MODE"
@@ -9176,6 +10237,11 @@ width = 1
 name = "CLC3POL"
 addr = 3877
 width = 8
+por = "0---xxxx"
+mclr = "0---uuuu"
+access = "n---nnnn"
+implemented = 143
+module = "DOS-02286_CLC"
 
 [[sfr.fields]]
 name = "LC3G1POL"
@@ -9231,6 +10297,11 @@ width = 1
 name = "CLC3SEL0"
 addr = 3878
 width = 8
+por = "--xxxxxx"
+mclr = "--uuuuuu"
+access = "--nnnnnn"
+implemented = 63
+module = "DOS-02286_CLC"
 
 [[sfr.fields]]
 name = "LC3D1S"
@@ -9271,6 +10342,11 @@ width = 1
 name = "CLC3SEL1"
 addr = 3879
 width = 8
+por = "--xxxxxx"
+mclr = "--uuuuuu"
+access = "--nnnnnn"
+implemented = 63
+module = "DOS-02286_CLC"
 
 [[sfr.fields]]
 name = "LC3D2S"
@@ -9311,6 +10387,11 @@ width = 1
 name = "CLC3SEL2"
 addr = 3880
 width = 8
+por = "--xxxxxx"
+mclr = "--uuuuuu"
+access = "--nnnnnn"
+implemented = 63
+module = "DOS-02286_CLC"
 
 [[sfr.fields]]
 name = "LC3D3S"
@@ -9351,6 +10432,11 @@ width = 1
 name = "CLC3SEL3"
 addr = 3881
 width = 8
+por = "--xxxxxx"
+mclr = "--uuuuuu"
+access = "--nnnnnn"
+implemented = 63
+module = "DOS-02286_CLC"
 
 [[sfr.fields]]
 name = "LC3D4S"
@@ -9391,6 +10477,11 @@ width = 1
 name = "CLC3GLS0"
 addr = 3882
 width = 8
+por = "xxxxxxxx"
+mclr = "uuuuuuuu"
+access = "nnnnnnnn"
+implemented = 255
+module = "DOS-02286_CLC"
 
 [[sfr.fields]]
 name = "LC3G1D1N"
@@ -9476,6 +10567,11 @@ width = 1
 name = "CLC3GLS1"
 addr = 3883
 width = 8
+por = "xxxxxxxx"
+mclr = "uuuuuuuu"
+access = "nnnnnnnn"
+implemented = 255
+module = "DOS-02286_CLC"
 
 [[sfr.fields]]
 name = "LC3G2D1N"
@@ -9561,6 +10657,11 @@ width = 1
 name = "CLC3GLS2"
 addr = 3884
 width = 8
+por = "xxxxxxxx"
+mclr = "uuuuuuuu"
+access = "nnnnnnnn"
+implemented = 255
+module = "DOS-02286_CLC"
 
 [[sfr.fields]]
 name = "LC3G3D1N"
@@ -9646,6 +10747,11 @@ width = 1
 name = "CLC3GLS3"
 addr = 3885
 width = 8
+por = "xxxxxxxx"
+mclr = "uuuuuuuu"
+access = "nnnnnnnn"
+implemented = 255
+module = "DOS-02286_CLC"
 
 [[sfr.fields]]
 name = "LC3G4D1N"
@@ -9691,6 +10797,11 @@ width = 1
 name = "CLC4CON"
 addr = 3886
 width = 8
+por = "0-000000"
+mclr = "0-000000"
+access = "n-rnnnnn"
+implemented = 191
+module = "DOS-02286_CLC"
 
 [[sfr.fields]]
 name = "LC4MODE"
@@ -9736,6 +10847,11 @@ width = 1
 name = "CLC4POL"
 addr = 3887
 width = 8
+por = "0---xxxx"
+mclr = "0---uuuu"
+access = "n---nnnn"
+implemented = 143
+module = "DOS-02286_CLC"
 
 [[sfr.fields]]
 name = "LC4G1POL"
@@ -9791,6 +10907,11 @@ width = 1
 name = "CLC4SEL0"
 addr = 3888
 width = 8
+por = "--xxxxxx"
+mclr = "--uuuuuu"
+access = "--nnnnnn"
+implemented = 63
+module = "DOS-02286_CLC"
 
 [[sfr.fields]]
 name = "LC4D1S"
@@ -9831,6 +10952,11 @@ width = 1
 name = "CLC4SEL1"
 addr = 3889
 width = 8
+por = "--xxxxxx"
+mclr = "--uuuuuu"
+access = "--nnnnnn"
+implemented = 63
+module = "DOS-02286_CLC"
 
 [[sfr.fields]]
 name = "LC4D2S"
@@ -9871,6 +10997,11 @@ width = 1
 name = "CLC4SEL2"
 addr = 3890
 width = 8
+por = "--xxxxxx"
+mclr = "--uuuuuu"
+access = "--nnnnnn"
+implemented = 63
+module = "DOS-02286_CLC"
 
 [[sfr.fields]]
 name = "LC4D3S"
@@ -9911,6 +11042,11 @@ width = 1
 name = "CLC4SEL3"
 addr = 3891
 width = 8
+por = "--xxxxxx"
+mclr = "--uuuuuu"
+access = "--nnnnnn"
+implemented = 63
+module = "DOS-02286_CLC"
 
 [[sfr.fields]]
 name = "LC4D4S"
@@ -9951,6 +11087,11 @@ width = 1
 name = "CLC4GLS0"
 addr = 3892
 width = 8
+por = "xxxxxxxx"
+mclr = "uuuuuuuu"
+access = "nnnnnnnn"
+implemented = 255
+module = "DOS-02286_CLC"
 
 [[sfr.fields]]
 name = "LC4G1D1N"
@@ -10036,6 +11177,11 @@ width = 1
 name = "CLC4GLS1"
 addr = 3893
 width = 8
+por = "xxxxxxxx"
+mclr = "uuuuuuuu"
+access = "nnnnnnnn"
+implemented = 255
+module = "DOS-02286_CLC"
 
 [[sfr.fields]]
 name = "LC4G2D1N"
@@ -10121,6 +11267,11 @@ width = 1
 name = "CLC4GLS2"
 addr = 3894
 width = 8
+por = "xxxxxxxx"
+mclr = "uuuuuuuu"
+access = "nnnnnnnn"
+implemented = 255
+module = "DOS-02286_CLC"
 
 [[sfr.fields]]
 name = "LC4G3D1N"
@@ -10206,6 +11357,11 @@ width = 1
 name = "CLC4GLS3"
 addr = 3895
 width = 8
+por = "xxxxxxxx"
+mclr = "uuuuuuuu"
+access = "nnnnnnnn"
+implemented = 255
+module = "DOS-02286_CLC"
 
 [[sfr.fields]]
 name = "LC4G4D1N"
@@ -10251,6 +11407,10 @@ width = 1
 name = "STATUS_SHAD"
 addr = 4068
 width = 8
+por = "-----xxx"
+mclr = "-----uuu"
+access = "-----nnn"
+implemented = 7
 
 [[sfr.fields]]
 name = "C_SHAD"
@@ -10271,6 +11431,10 @@ width = 1
 name = "WREG_SHAD"
 addr = 4069
 width = 8
+por = "xxxxxxxx"
+mclr = "uuuuuuuu"
+access = "nnnnnnnn"
+implemented = 255
 
 [[sfr.fields]]
 name = "WREG_SHAD"
@@ -10281,6 +11445,10 @@ width = 8
 name = "BSR_SHAD"
 addr = 4070
 width = 8
+por = "---xxxxx"
+mclr = "---uuuuu"
+access = "---nnnnn"
+implemented = 31
 
 [[sfr.fields]]
 name = "BSR_SHAD"
@@ -10291,6 +11459,10 @@ width = 5
 name = "PCLATH_SHAD"
 addr = 4071
 width = 8
+por = "-xxxxxxx"
+mclr = "-uuuuuuu"
+access = "-nnnnnnn"
+implemented = 127
 
 [[sfr.fields]]
 name = "PCLATH_SHAD"
@@ -10301,6 +11473,10 @@ width = 7
 name = "FSR0L_SHAD"
 addr = 4072
 width = 8
+por = "xxxxxxxx"
+mclr = "uuuuuuuu"
+access = "nnnnnnnn"
+implemented = 255
 
 [[sfr.fields]]
 name = "FSR0L_SHAD"
@@ -10311,6 +11487,10 @@ width = 8
 name = "FSR0H_SHAD"
 addr = 4073
 width = 8
+por = "xxxxxxxx"
+mclr = "uuuuuuuu"
+access = "nnnnnnnn"
+implemented = 255
 
 [[sfr.fields]]
 name = "FSR0H_SHAD"
@@ -10321,6 +11501,10 @@ width = 8
 name = "FSR1L_SHAD"
 addr = 4074
 width = 8
+por = "xxxxxxxx"
+mclr = "uuuuuuuu"
+access = "nnnnnnnn"
+implemented = 255
 
 [[sfr.fields]]
 name = "FSR1L_SHAD"
@@ -10331,6 +11515,10 @@ width = 8
 name = "FSR1H_SHAD"
 addr = 4075
 width = 8
+por = "xxxxxxxx"
+mclr = "uuuuuuuu"
+access = "nnnnnnnn"
+implemented = 255
 
 [[sfr.fields]]
 name = "FSR1H_SHAD"
@@ -10341,6 +11529,10 @@ width = 8
 name = "STKPTR"
 addr = 4077
 width = 8
+por = "---xxxxx"
+mclr = "---uuuuu"
+access = "---nnnnn"
+implemented = 31
 
 [[sfr.fields]]
 name = "STKPTR"
@@ -10351,6 +11543,10 @@ width = 5
 name = "TOSL"
 addr = 4078
 width = 8
+por = "xxxxxxxx"
+mclr = "uuuuuuuu"
+access = "nnnnnnnn"
+implemented = 255
 
 [[sfr.fields]]
 name = "TOSL"
@@ -10361,6 +11557,10 @@ width = 8
 name = "TOSH"
 addr = 4079
 width = 8
+por = "-xxxxxxx"
+mclr = "-uuuuuuu"
+access = "-nnnnnnn"
+implemented = 127
 
 [[sfr.fields]]
 name = "TOSH"

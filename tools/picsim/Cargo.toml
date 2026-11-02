@@ -1,0 +1,13 @@
+[package]
+name = "picsim-cli"
+version = "0.1.0"
+edition = "2024"
+description = "Command line front end of the PIC simulator"
+
+[[bin]]
+name = "basil-sim"
+path = "src/main.rs"
+
+[dependencies]
+picsim = { path = "../../crates/picsim" }
+devdesc = { path = "../../crates/devdesc" }

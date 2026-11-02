@@ -154,6 +154,25 @@ pub struct Sfr {
     pub addr: u32,
     /// Register width in bits (8 for ordinary SFRs).
     pub width: u8,
+    /// Value after power-on reset, as the pack writes it: one character per bit, most significant
+    /// first (`0`, `1`, `x`, `u`, `q`, `-`). Kept verbatim; the simulator decodes it. Empty if the
+    /// pack gives none.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub por: String,
+    /// Value after an MCLR (or other non-power-on) reset, same encoding as `por`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub mclr: String,
+    /// Access of each bit as the pack writes it, one character per bit, most significant first
+    /// (`n`, `r`, `w`, `c`, `s`, `-`). Kept verbatim.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub access: String,
+    /// Mask of bits that exist (pack `impl`); `None` if the pack gives none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub implemented: Option<u32>,
+    /// Peripheral IP module the register belongs to (pack `_modsrc`, without `.Module`); empty for
+    /// registers the pack gives no module for.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub module: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub aliases: Vec<String>,
     /// Bit fields using the current (data sheet) names.
@@ -283,6 +302,16 @@ impl Device {
             if !in_sfr {
                 errs.push(format!("SFR {} at {:#x} is outside every SFR range", s.name, s.addr));
             }
+            for (label, bits) in [("por", &s.por), ("mclr", &s.mclr), ("access", &s.access)] {
+                if !bits.is_empty() && bits.chars().count() != usize::from(s.width) {
+                    errs.push(format!("SFR {} {label} \"{bits}\" is not {} characters", s.name, s.width));
+                }
+            }
+            if let Some(m) = s.implemented
+                && u64::from(m) >> s.width != 0
+            {
+                errs.push(format!("SFR {} implemented mask {m:#x} is wider than {} bits", s.name, s.width));
+            }
             for (label, fields) in [("fields", &s.fields), ("legacy", &s.legacy)] {
                 let mut used: u64 = 0;
                 for f in fields.iter() {
@@ -373,6 +402,11 @@ mod tests {
                 name: "PORTB".into(),
                 addr: 0xF8D,
                 width: 8,
+                por: "xxxxxxxx".into(),
+                mclr: "uuuuuuuu".into(),
+                access: "nnnnnnnn".into(),
+                implemented: Some(0xFF),
+                module: "port".into(),
                 aliases: vec![],
                 fields: vec![Field { name: "RB0".into(), pos: 0, width: 1 }],
                 legacy: vec![],

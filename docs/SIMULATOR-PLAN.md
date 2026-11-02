@@ -1,0 +1,143 @@
+# Simulator plan (`basil-sim`)
+
+A simulator of the PIC parts Basil supports, to replace MDB as the test oracle and to give the editor
+extensions a debugger. Decisions D57 and D58 in `DECISIONS.md`.
+
+## Starting point
+
+* MDB (MPLAB X) is the oracle today (`tests/backend.rs`, `scripts/exec-test.py`). It is slow and closed,
+  has no DMA or I2C host model, and has known deviations (D34, the Q41 double vectoring in D56).
+* `scripts/picsim.py` is a PIC18-only Python simulator that parses the `.S` text, with a Q41 I2C1 host model.
+  `scripts/dma_sim.py` is a DMA model attached to a live MDB session.
+* `devices/*.toml` had no SFR reset values or access masks. The pack has them on every `SFRDef`
+  (`por`, `mclr`, `access`, `impl`), and `_modsrc` names the peripheral IP block
+  (e.g. `DOS-01631_tmr_mid0_v1_8bit_rev2`). Schema 0.2 records them (milestone S0).
+
+## Decisions
+
+* **Rust** (D57): crate `crates/picsim`, CLI `tools/picsim`. Reuses `devdesc` directly; the suite runs
+  thousands of programs twice.
+* **Cycle exact** (D58) for the cores and every peripheral model from the first milestone that has it:
+  instruction timing, pipeline effects on skips/branches/table reads, interrupt latency, timer prescaler and
+  synchroniser delays. `' cycles:` bounds and the benchmark harness (D18) rely on it. Every timing rule is
+  cited to the data sheet; where the data sheet is silent the rule is marked `[A#]` and measured against MDB.
+
+## Architecture
+
+```
+                 ┌──────────── Machine ──────────────┐
+ .hex + .sym ──► │  Core (trait)                     │
+ devices/X.toml  │   ├─ Pic18Core   (Q10, Q41)       │
+ stimulus file   │   └─ Pic16ECore  (enh. mid-range) │
+                 │  DataBus: banks, access bank,     │
+                 │   FSR/INDF, linear RAM, SFR map   │──► trace / RAM dump /
+                 │  ProgMem + config + EEPROM/NVM    │    cycle count / VCD
+                 │  Scheduler (cycle-ordered events) │
+                 │  IntController (per family)       │
+                 │  Peripherals: Vec<Box<dyn Periph>>│
+                 └───────────────────────────────────┘
+```
+
+### Device data
+
+`devdesc` 0.2 adds to each SFR the pack's raw `por`, `mclr`, `access` strings, the `implemented` mask and the
+`module` (`_modsrc`). The strings are kept verbatim (one character per bit, MSB first); the simulator decodes
+them, and the meaning of each letter is recorded with its source in `docs/FACTS-SIM.md` before it is relied on.
+An SFR without a peripheral model is a latch honouring `implemented` and the read-only bits, and its first
+access logs a warning, so no test passes silently on an unmodelled peripheral.
+
+### Cores — `trait Core { fn reset(&mut self, kind); fn step(&mut self, bus: &mut Bus) -> Cycles; }`
+
+Both decode the **hex** (what pic-as produced, not the assembly text), table driven, with a predecode cache
+per program word.
+
+* `Pic18Core`: base instruction set, the Q41 additions the emitter uses (`movffl`, ...), hardware stack depth
+  from `memory.hw_stack`, shadow registers per `Target.hw_context` (D56), `TBLRD`/`TBLWT`.
+* `Pic16ECore`: enhanced mid-range set, `BSR` banking, linear data memory through the FSRs, automatic context
+  save, `MOVIW`/`MOVWI`.
+
+Every flag, timing and edge-case rule goes into `docs/FACTS-SIM-<family>.md` with its data sheet cite.
+
+### Bus and memory
+
+Address decoding comes from the same TOML regions the compiler uses, so the two cannot disagree. SFR access
+dispatches through an address table built at load time (latch, or hook into a peripheral for read side
+effects and write-to-clear bits). Configuration words are read from the hex and handed to the models
+(oscillator, watchdog, `MVECEN`, `LVP`).
+
+### Peripherals
+
+```rust
+trait Periph {
+    fn bind(dev: &Device, instance: &str) -> Option<Self> where Self: Sized; // finds its SFRs by name
+    fn read(&mut self, reg: RegId, now: Cycle) -> u8;
+    fn write(&mut self, reg: RegId, v: u8, now: Cycle, sched: &mut Scheduler);
+    fn event(&mut self, ev: EvId, now: Cycle, sched: &mut Scheduler, irq: &mut IrqLines);
+}
+```
+
+A registry maps module ids to model constructors; a part gets every model whose module it contains.
+Models are event driven (no per-cycle tick) but schedule at exact cycles.
+
+Order, by what `lib/` uses: timers 0/1/2, interrupts and ports → UART (TX capture, RX feed) → NVM/EEPROM and
+flash write → ADC (fed values) → MSSP SPI/I2C, PPS, PWM/CCP → Q41 I2C host (ported from `picsim.py`) →
+DMA (ported from `dma_sim.py`).
+
+A `Stimulus` file (TOML) drives pins over time, UART RX bytes, ADC values, and I2C/SPI client models
+(the models in `tests/exec_rtcc` and `tests/exec_pins` become clients).
+
+### Interrupt controllers
+
+One per family: PIC18 two-priority, Q41 with `MVECEN = 0` (D56; `MVECEN = 1` is `E-CONFIG`, so not needed
+yet), PIC16 single vector with automatic context save. Vector addresses from `[vectors]`.
+
+### Front ends
+
+* CLI: `basil-sim prog.hex --device 18F16Q41 --until __halt --dump T_R1,T_R2 --cycles --trace --stim s.toml --vcd out.vcd`
+  (symbols from the `.sym` pic-as writes).
+* `exec-test.py --engine=sim|mdb`; `' expect:`, `' cycles:`, `' dma:` lines work unchanged.
+* GUI: `tools/picsim-gui` (`basil-sim-gui`, egui): load a hex, Run/Pause/Step/Step over/Reset, breakpoints by
+  clicking a disassembly line, registers, return stack, memory and SFR views, watch list, time at a given Fosc.
+* Later: source-level stepping from the `-g` DWARF (`src/dwarf.rs`), and a Debug Adapter Protocol server for
+  `vscode-extension`.
+
+## Verifying the simulator
+
+1. **Differential against MDB**: every `tests/exec*` program on both engines, `-O` and `-O0`; compare the full
+   GPR snapshot and the cycle count at `__halt`. Known MDB deviations go in a cited allowlist.
+2. **Instruction conformance**: generated opcode × flag edge-case programs, checked against the data sheet's
+   instruction tables (like the `scripts/gen-*-tests.py` generators).
+3. **Peripheral unit tests** from the data sheets' timing examples; `test_dma_sim.py` and `test_i2chw.py` carry over.
+4. **Gate**: the simulator becomes the default engine only when the whole suite agrees with MDB;
+   `BASIL_MDB=1` stays available.
+
+## Milestones
+
+| # | Deliverable | Done when |
+|---|---|---|
+| S0 | devdesc 0.2 (reset values, access, implemented mask, module), devgen, regenerated devices | `check-devices.sh` passes; compiler output byte-identical |
+| S1 | Crate skeleton, hex + sym loader, `Pic18Core` cycle exact, latch SFRs, halt detection, CLI dump | peripheral-free `tests/exec` programs match MDB (RAM and cycles) on 18F27Q10 and 18F16Q41 |
+| S2 | `Pic16ECore` | same on 16F17146, 16F13145, 16F18346, 16F15244 |
+| S3 | Interrupt controllers, timers, configuration words | `' cycles:` and ISR tests pass |
+| S4 | Ports, PPS, UART, ADC, stimulus file | `serial`, `adc`, `exec_pins` pass |
+| S5 | NVM/EEPROM, SPI, I2C, Q41 I2C host, DMA | `exec_rtcc`, DMA and I2C tests pass; `picsim.py`, `dma_sim.py` retired |
+| S6 | Trace, VCD, breakpoints, DWARF stepping, DAP | stepping a `.bas` file in the editor |
+
+## Adding a part later
+
+1. `devgen gen` → `devices/<part>.toml`, plus the hand-written `.expect.toml` (existing procedure).
+2. Known core family and every module already in the registry: no code. Run the differential suite with
+   `--device <part>`.
+3. New peripheral IP block: one `Periph` impl registered under its module id, plus a FACTS section.
+4. New core family (baseline PIC10/12, dsPIC, ...): one `Core` impl and interrupt controller; bus, scheduler,
+   peripherals and front ends are shared.
+5. `basil-sim --coverage <part>` lists the part's modules that have no model.
+
+## Status
+
+* S0 done (devdesc 0.2, regenerated devices).
+* S1 done for the core: `crates/picsim` (hex loader, bus, `Pic18`, disassembler), `basil-sim` CLI, `basil-sim-gui`,
+  `exec-test.py --engine sim|mdb|both` (DMA programs are skipped under `sim` until S5). Results and the rules
+  relied on are in `FACTS-SIM.md`.
+* Open for S1's "done when": the `both` comparison of cycle counts with MDB.
+* Next: S3 (interrupt controllers, timers, configuration words), which clears most of the remaining failures.
