@@ -142,4 +142,4 @@ yet), PIC16 single vector with automatic context save. Vector addresses from `[v
 * Open for S1's "done when": the `both` comparison of cycle counts with MDB.
 * S3 mostly done: interrupt controllers (Q10 legacy, Q41 `MVECEN = 0` with hardware context), Timer0/1/2. Configuration words done (`config.rs`, FACTS-SIM.md). Open: reset values after MCLR/watchdog, two documented MDB differences (`FACTS-SIM.md`, D-SIM-1/2). Hardware probes in `tests/hw/` can
   settle them on a PIC18F27Q10 (PICkit 4 `ipecmd`, or the PIC-Programmer) when a programmer is at hand.
-* Next: S4 (ports, PPS, UART, ADC, stimulus file).
+* S4 started: EUSART1/2 transmitter of the Q10 style (TXIF, TRMT, baud timing, byte capture; `lib_serial`, `lib_serial2` pass). EUSART receiver and the stimulus file (`[[uart]]`, `basil-sim --stim`) done; `tests/sim/run.sh` and `cargo test -p picsim` cover them. ADC of the Q10 (basic mode, `[[adc]]` stimulus) and FVRRDY done; `lib_adc` and `lib_adin` pass. Q41 UART (`periph/quart.rs`: buffers, TXMTIF, FIFO flags, parity/address modes, stimulus) done. Next: Q41 ADC, then S5 (`lib_eeprom` and `lib_flashwrite` loop forever on the sim until NVM exists).

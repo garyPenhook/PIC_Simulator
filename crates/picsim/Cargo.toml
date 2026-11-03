@@ -6,3 +6,4 @@ description = "Cycle-exact simulator of the PIC parts Basil supports (see docs/S
 
 [dependencies]
 devdesc = { path = "../devdesc" }
+toml = "1"

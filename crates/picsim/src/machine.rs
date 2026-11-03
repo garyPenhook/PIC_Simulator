@@ -23,6 +23,8 @@ pub struct Machine {
     pub syms: BTreeMap<String, u32>,
     pub breakpoints: Vec<u32>,
     image: Image,
+    /// Stimulus file text, applied again after every reset (the peripherals are rebuilt then).
+    stimulus: Option<String>,
 }
 
 impl Machine {
@@ -31,7 +33,7 @@ impl Machine {
             return Err(format!("{}: family {} is not simulated yet", dev.device.name, dev.device.family));
         }
         let cpu = Pic18::new(&dev)?;
-        Ok(Machine { cpu, dev, syms: BTreeMap::new(), breakpoints: Vec::new(), image: Image::default() })
+        Ok(Machine { cpu, dev, syms: BTreeMap::new(), breakpoints: Vec::new(), image: Image::default(), stimulus: None })
     }
 
     pub fn load_hex(&mut self, text: &str) -> Result<(), String> {
@@ -41,10 +43,22 @@ impl Machine {
         Ok(())
     }
 
+    /// Drive the part as a stimulus file says (see `stimulus.rs`).
+    pub fn load_stimulus(&mut self, text: &str) -> Result<(), String> {
+        crate::stimulus::Stimulus::parse(text)?.apply(&self.dev, &mut self.cpu.p)?;
+        self.stimulus = Some(text.to_string());
+        Ok(())
+    }
+
     /// Power-on reset: the core and memory return to their reset state and the program is loaded again.
     pub fn reset(&mut self) {
         if let Ok(mut c) = Pic18::new(&self.dev) {
             c.load(&self.image);
+            if let Some(t) = &self.stimulus
+                && let Ok(st) = crate::stimulus::Stimulus::parse(t)
+            {
+                let _ = st.apply(&self.dev, &mut c.p); // it applied once on this device, so it applies again
+            }
             self.cpu = c;
         }
     }

@@ -2430,6 +2430,7 @@ name = "picsim"
 version = "0.1.0"
 dependencies = [
  "devdesc",
+ "toml",
 ]
 
 [[package]]

@@ -7,5 +7,6 @@ pub mod machine;
 pub mod mem;
 pub mod periph;
 pub mod pic18;
+pub mod stimulus;
 
 pub use machine::{Machine, Stop};

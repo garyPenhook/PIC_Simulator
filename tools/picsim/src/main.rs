@@ -1,4 +1,4 @@
-//! `basil-sim prog.hex --device 18F16Q41 [--asm prog.S] [--until __halt] [--dump T_R1:2,T_R2] [--bp SYM,SYM] [--bp-max N] [--config]`
+//! `basil-sim prog.hex --device 18F16Q41 [--asm prog.S] [--until __halt] [--dump T_R1:2,T_R2] [--bp SYM,SYM] [--bp-max N] [--config] [--stim FILE]`
 //! `--bp` prints the cycle count each time one of the symbols is reached (at most `--bp-max`, default 20).
 
 use picsim::{Machine, Stop};
@@ -20,6 +20,7 @@ fn run() -> Result<ExitCode, String> {
     let mut trace: Option<(u64, u64)> = None;
     let (mut bps, mut bp_max) = (Vec::<String>::new(), 20usize);
     let mut show_cfg = false;
+    let mut stim = None::<PathBuf>;
     let (mut hex, mut device, mut asm, mut until, mut dump, mut max) =
         (None::<PathBuf>, String::from("18F27Q10"), None::<PathBuf>, Some(String::from("__halt")), Vec::new(), 2_000_000_000u64);
     let mut root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../devices");
@@ -37,6 +38,7 @@ fn run() -> Result<ExitCode, String> {
                 trace = Some((a.parse().map_err(|_| "bad --trace")?, b.parse().map_err(|_| "bad --trace")?));
             }
             "--config" => show_cfg = true,
+            "--stim" => stim = Some(PathBuf::from(val("--stim")?)),
             "--bp" => bps = val("--bp")?.split(',').map(String::from).collect(),
             "--bp-max" => bp_max = val("--bp-max")?.parse().map_err(|_| "bad --bp-max")?,
             "--max-cycles" => max = val("--max-cycles")?.parse().map_err(|_| "bad --max-cycles")?,
@@ -56,6 +58,9 @@ fn run() -> Result<ExitCode, String> {
                 println!("  {n} = {:#04x}", m.cpu.m.mem[s.addr as usize]);
             }
         }
+    }
+    if let Some(f) = &stim {
+        m.load_stimulus(&std::fs::read_to_string(f).map_err(|e| format!("{}: {e}", f.display()))?).map_err(|e| format!("{}: {e}", f.display()))?;
     }
     let asm = asm.unwrap_or_else(|| hex.with_extension("S"));
     if let Ok(t) = std::fs::read_to_string(&asm) {
@@ -104,6 +109,12 @@ fn run() -> Result<ExitCode, String> {
         let b = m.peek(addr, len);
         let v: u64 = b.iter().rev().fold(0, |a, x| a << 8 | u64::from(*x));
         println!("{name} = {v}  ({})", b.iter().map(|x| format!("{x:02X}")).collect::<Vec<_>>().join(" "));
+    }
+    for n in 1..=2u8 {
+        let bytes: Vec<u8> = m.cpu.p.tx.iter().filter(|t| t.0 == n).map(|t| t.2).collect();
+        if !bytes.is_empty() {
+            println!("tx{n}: {}", String::from_utf8_lossy(&bytes).escape_debug());
+        }
     }
     for n in &m.cpu.notes {
         eprintln!("note: {n}");

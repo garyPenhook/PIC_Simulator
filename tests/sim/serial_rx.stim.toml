@@ -1,0 +1,8 @@
+# Three good characters, then one with a bad Stop bit.
+[[uart]]
+at = 20000
+bytes = "Hi!"
+
+[[uart]]
+data = [0x3F]
+bad_stop = true
