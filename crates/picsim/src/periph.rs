@@ -27,9 +27,11 @@ use std::collections::{BTreeSet, VecDeque};
 mod flash;
 mod nvm;
 mod nvmq;
+mod i2cq;
 mod mssp;
 mod quart;
 mod spi;
+use i2cq::I2cQ;
 use mssp::Mssp;
 use nvm::Nvm;
 use nvmq::NvmQ;
@@ -109,6 +111,9 @@ const SPI_END: u8 = SPI0 + 2 * spi::HOOKS;
 /// Q10 MSSP n (0-based) uses hook codes MSSP0 + mssp::HOOKS * n + sub-code (see `mssp.rs`); at most 2.
 const MSSP0: u8 = 190;
 const MSSP_END: u8 = MSSP0 + 2 * mssp::HOOKS;
+/// Q41 I2C n (0-based) uses hook codes I2CQ0 + i2cq::HOOKS * n + sub-code (see `i2cq.rs`); at most 2.
+const I2CQ0: u8 = 202;
+const I2CQ_END: u8 = I2CQ0 + 2 * i2cq::HOOKS;
 const NVM0: u8 = 240;
 const NVMQ0: u8 = 242;
 
@@ -246,6 +251,7 @@ pub struct Periph {
     quarts: Vec<QUart>,
     spis: Vec<Spi>,
     mssps: Vec<Mssp>,
+    i2cqs: Vec<I2cQ>,
     adc: Option<Adc>,
     nvm: Option<Nvm>,
     nvmq: Option<NvmQ>,
@@ -307,7 +313,7 @@ impl Periph {
 
     /// Find the timers the part has and mark their registers as hooked in `m`.
     pub fn bind(dev: &Device, m: &mut DataMem) -> Periph {
-        let mut p = Periph { ports: Vec::new(), drive: Vec::new(), t0: None, t1: None, t2: None, uarts: Vec::new(), quarts: Vec::new(), spis: Vec::new(), mssps: Vec::new(), adc: None, nvm: None, nvmq: None, stall: 0, fvr: None, tx: Vec::new(), spi_tx: Vec::new(), i2c_log: Vec::new(), notes: BTreeSet::new(), event: None };
+        let mut p = Periph { ports: Vec::new(), drive: Vec::new(), t0: None, t1: None, t2: None, uarts: Vec::new(), quarts: Vec::new(), spis: Vec::new(), mssps: Vec::new(), i2cqs: Vec::new(), adc: None, nvm: None, nvmq: None, stall: 0, fvr: None, tx: Vec::new(), spi_tx: Vec::new(), i2c_log: Vec::new(), notes: BTreeSet::new(), event: None };
         let mut hook = |a: usize, k: u8| m.special[a] = Special::Hook(k);
         if let (Some(l), Some(h), Some(c0), Some(c1), Some(flag)) =
             (addr(dev, "TMR0L"), addr(dev, "TMR0H"), addr(dev, "T0CON0"), addr(dev, "T0CON1"), Flag::find(dev, "TMR0IF"))
@@ -445,6 +451,15 @@ impl Periph {
                 p.mssps.push(q);
             }
         }
+        for n in 1..=2u8 {
+            if let Some((q, regs)) = I2cQ::find(dev, n) {
+                let k = I2CQ0 + i2cq::HOOKS * p.i2cqs.len() as u8;
+                for (i, a) in regs.into_iter().enumerate() {
+                    hook(a, k + i as u8);
+                }
+                p.i2cqs.push(q);
+            }
+        }
         p
     }
 
@@ -463,12 +478,14 @@ impl Periph {
 
     /// Add an I2C client to the bus of MSSP `num` (1-based). False when the part has no such MSSP.
     pub fn i2c_client(&mut self, num: u8, c: I2cClient) -> bool {
-        match self.mssps.iter_mut().find(|s| s.num == num) {
-            Some(s) => {
-                s.i2c.push(c);
-                true
-            }
-            None => false,
+        if let Some(s) = self.mssps.iter_mut().find(|s| s.num == num) {
+            s.i2c.push(c);
+            true
+        } else if let Some(s) = self.i2cqs.iter_mut().find(|s| s.num == num) {
+            s.i2c.push(c);
+            true
+        } else {
+            false
         }
     }
 
@@ -735,6 +752,9 @@ impl Periph {
         for q in &mut self.mssps {
             q.sync(m, now, &mut ev, &mut self.spi_tx, &mut self.i2c_log, &mut self.notes);
         }
+        for q in &mut self.i2cqs {
+            q.sync(m, now, &mut ev, &mut self.i2c_log, &mut self.notes);
+        }
         if let Some(n) = &mut self.nvm
             && let Some(e) = n.sync(m, now)
         {
@@ -794,6 +814,10 @@ impl Periph {
                 let i = usize::from(k - MSSP0) / usize::from(mssp::HOOKS);
                 self.mssps[i].read_buf(m)
             }
+            I2CQ0..I2CQ_END => {
+                let i = usize::from(k - I2CQ0) / usize::from(i2cq::HOOKS);
+                self.i2cqs[i].read_rxb(m, now)
+            }
             UART0..=39 => {
                 let u = &mut self.uarts[usize::from(k - UART0) / usize::from(UART_HOOKS)];
                 // `[A10]` An empty FIFO reads the last character again (the data sheet does not say).
@@ -812,6 +836,7 @@ impl Periph {
         !(k == NVM0 + nvm::CON2 || k == NVMQ0 + nvmq::LOCK || matches!(k, T0L | T1L | T1H | T2T | T1G | PORT0..=0x6F) || (UART0..40).contains(&k) && (k - UART0) % UART_HOOKS == 3
             || (QUART0..QUART_END).contains(&k) && (k - QUART0) % quart::HOOKS == quart::RXB
             || (SPI0..SPI_END).contains(&k) && (k - SPI0) % spi::HOOKS == spi::RXB
+            || (I2CQ0..I2CQ_END).contains(&k) && (k - I2CQ0) % i2cq::HOOKS == i2cq::RXB
             || (MSSP0..MSSP_END).contains(&k) && (k - MSSP0) % mssp::HOOKS == mssp::BUF)
     }
 
@@ -836,6 +861,10 @@ impl Periph {
             MSSP0..MSSP_END => {
                 let i = usize::from(k - MSSP0) / usize::from(mssp::HOOKS);
                 self.mssps[i].write((k - MSSP0) % mssp::HOOKS, v, now, m, &mut self.notes);
+            }
+            I2CQ0..I2CQ_END => {
+                let i = usize::from(k - I2CQ0) / usize::from(i2cq::HOOKS);
+                self.i2cqs[i].write((k - I2CQ0) % i2cq::HOOKS, v, now, m, &mut self.i2c_log);
             }
             QUART0..QUART_END => {
                 let i = usize::from(k - QUART0) / usize::from(quart::HOOKS);

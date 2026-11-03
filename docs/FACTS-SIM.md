@@ -310,5 +310,21 @@ NACKed and a read from nobody gives FFh.
   clears BF, S, P, R/W (WCOL and SSPOV stay). WCOL and SSPOV are set by hardware only; software writes can clear them. A rejected SSPxBUF
   write (WCOL) leaves SSPxBUF unchanged. Two `[[i2c]]` clients with the same address on one port are a stimulus error.
 * `[A50]` an SSPxBUF write with SSPEN = 0 only fills the buffer.
+* `[A51]` Q41 I2C host (`periph/i2cq.rs`, DS40002214G ch.36): a TXB write with TXBE = 1 clears TXBE at once; the first write starts the Start
+  after the bus free time; the address moves to the shift register one SCL period after the Start (SCIF set, MMA = 1). SCL period =
+  5 (4 with FME) x (BAUD + 1) cycles; I2CxCLK other than FOSC/4 logs a note and runs as FOSC/4.
+* `[A52]` at the 8th edge of a transmitted byte with TXBE = 1 and I2CxCNT != 0 the host sets MDR and stretches until TXB is written.
+* `[A53]` at the 9th edge after an ACK a pending TXB byte moves into the shift register and the count decrements; with nothing pending and
+  count 0, CNTIF is set and the Stop follows (RSEN = 0) or MDR is set (RSEN = 1).
+* `[A54]` a NACK from the client sets NACKIF and ACKSTAT; RSEN = 0 stops by itself, RSEN = 1 sets MDR and waits.
+* `[A55]` a TXB write or S = 1 at the MDR pause issues the Restart; RSCIF one SCL period later, the address moves to the shift register two periods later.
+* `[A56]` host receive: RXB/RXBF/count at the 8th edge, MDR stall at the 7th edge of the next byte while RXBF = 1; the 9th clock sends ACKDT
+  (count != 0) or ACKCNT (count 0); a NACK before the count ends is a Stop; the host's own NACK sets NACKIF.
+* `[A57]` P = 1 while MMA = 1 stops within one SCL period and clears MDR.
+* `[A58]` EN = 0 resets the state machine (count kept); on EN = 1 SCIF and PCIF are set 3 cycles later (errata); BFRE = 8 prescaled clocks after
+  the enable or a Stop.
+* `[A59]` TXB written with TXBE = 0 sets TXWE and NACKIF and is dropped; RXB read with RXBF = 0 sets RXRE and NACKIF and returns the old byte.
+* `[A60]` TXB written with EN = 0 or MODE != 100 only fills TXB. Client modes, 10-bit addressing, bus time-out, collisions and clock
+  stretching by a client are not modelled.
 * Tests: `crates/picsim/tests/mssp.rs`; `tests/sim/spi_q10` and `tests/sim/i2c_q10` run the library `Spi` and `I2c` modules (compiled with
   `basil`) against clients.
