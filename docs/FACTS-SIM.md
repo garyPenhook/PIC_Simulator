@@ -257,3 +257,13 @@ Q10, DS40002043F 12.1 p.142-156; Q41, DS40002214G 10.3 p.88-98.
 * Results: `exec/lib_flashwrite` (18F27Q10, 28046 cycles) and `exec_q41/lib_flashwrite` (18F16Q41, 34286 cycles) pass on the sim; neither
   is compared with MDB. `tests/exec/lib_flashwrite.bas` in Basic_Compiler was changed: with flash reads modelled R3 is 1 as on hardware
   and the sector path is exercised by a second update (R5, R6).
+
+### NVM against MDB (`exec-test.py --engine both`)
+
+* D-SIM-3: MDB does not model self-write durations. `lib_eeprom` takes 426 cycles (Q10) / 451 (Q41) in MDB against 30414 / 30439 in the
+  sim; `exec_q41/lib_flashwrite` 2061 against 34286. The `' expect:` values of those three agree on both engines; only the cycle count
+  differs, by the write waits (MDB completes a write at once). `--engine both` therefore reports FAIL for NVM programs on cycles alone.
+* D-SIM-4: `exec/lib_flashwrite` (Q10) fails in MDB itself (`FW_R3` 0 not 1, `FW_TA` 86 not 18, `FW_ER` 16 not 0): MDB does not model the
+  program flash reads and the self-write the way the data sheet describes, so the sim (which passes) cannot be checked against it there.
+* Not compared: write times against hardware (the `[A30]`-`[A38]` times stay data sheet maxima), errata 1.9.1.
+
