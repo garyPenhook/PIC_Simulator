@@ -418,7 +418,7 @@ impl eframe::App for App {
                             let (r, _) = ui.allocate_exact_size(egui::vec2(26.0, 26.0), egui::Sense::hover());
                             let v = (60.0 + 195.0 * d.clamp(0.0, 1.0)) as u8;
                             ui.painter().circle_filled(r.center(), 11.0, egui::Color32::from_rgb(v, (f32::from(v) * 0.15) as u8, (f32::from(v) * 0.1) as u8));
-                            ui.small(format!("{} {}", l.name, pin_name(l.pin)));
+                            ui.label(format!("{} {}", l.name, pin_name(l.pin)));
                         });
                     }
                     for o in &b.oleds {
@@ -436,7 +436,7 @@ impl eframe::App for App {
                                 }
                             }
                             let st = if o.status.is_empty() { String::new() } else { format!(" - NOT WIRED: {}", o.status) };
-                            ui.small(format!("OLED {} SCL {} SDA {}{st}", match o.bus { Bus::Gpio => "GPIO".to_string(), Bus::I2c(n) => format!("I2C{n}") }, pin_name(o.scl), pin_name(o.sda)));
+                            ui.label(format!("OLED {} SCL {} SDA {}{st}", match o.bus { Bus::Gpio => "GPIO".to_string(), Bus::I2c(n) => format!("I2C{n}") }, pin_name(o.scl), pin_name(o.sda)));
                         });
                     }
                 });
@@ -498,10 +498,10 @@ impl eframe::App for App {
                 ui.separator();
                 ui.heading("Notes");
                 for n in &m.cpu.notes {
-                    ui.small(n);
+                    ui.label(n);
                 }
                 if !m.cpu.m.unmodelled.is_empty() {
-                    ui.small(format!("unmodelled SFRs touched: {}", m.cpu.m.unmodelled.iter().cloned().collect::<Vec<_>>().join(" ")));
+                    ui.label(format!("unmodelled SFRs touched: {}", m.cpu.m.unmodelled.iter().cloned().collect::<Vec<_>>().join(" ")));
                 }
             }
         });
@@ -569,7 +569,7 @@ impl eframe::App for App {
                                 }
                             });
                         });
-                        ui.small("orange: changed since the last Step or Run");
+                        ui.label("orange: changed since the last Step or Run");
                     }
                 }
                 _ => {
@@ -670,7 +670,7 @@ impl eframe::App for App {
                     m.breakpoints.push(b);
                 }
             }
-            ui.small("click an instruction to toggle a breakpoint");
+            ui.label("click an instruction to toggle a breakpoint");
         });
     }
 }
@@ -820,7 +820,7 @@ fn board_ui(ui: &mut egui::Ui, board: &mut Board, pins: &[Pin]) -> bool {
                 board.oleds.push(Oled::new(Bus::I2c(1), a, d, 0x3C, 64));
                 changed = true;
             }
-            ui.small("The pins must be the ones the program uses. Hardware I2C also needs the program's PPS setup (SSPxCLKPPS/SSPxDATPPS and RxyPPS) to match.");
+            ui.label("The pins must be the ones the program uses. Hardware I2C also needs the program's PPS setup (SSPxCLKPPS/SSPxDATPPS and RxyPPS) to match.");
     changed
 }
 
