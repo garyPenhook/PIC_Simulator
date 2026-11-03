@@ -306,3 +306,53 @@ fn capture_reads_timer5() {
     let expect = 300 - start;
     assert!((expect.saturating_sub(2)..=expect + 2).contains(&cap), "captured {cap}, edge {expect}");
 }
+
+#[test]
+fn pwm3_pwm4_pulse_polarity_and_timer_select() {
+    let mut m = machine("");
+    w(&mut m, "RA3PPS", 0x07); // PWM3 on RA3
+    w(&mut m, "RC3PPS", 0x08); // PWM4 on RC3
+    w(&mut m, "TRISA", 0xF7);
+    w(&mut m, "TRISC", 0xF7);
+    w(&mut m, "T2PR", 0x3F); // period 64 cycles
+    w(&mut m, "T2CLKCON", 1);
+    w(&mut m, "PWM3DCH", 0x08); // 8 << 2 = 32 Tosc = 8 cycles after the period match
+    w(&mut m, "PWM4DCH", 0x08);
+    w(&mut m, "PWM3CON", 0x80);
+    w(&mut m, "PWM4CON", 0x90); // inverted
+    w(&mut m, "T2CON", 0x80);
+    let start = m.cpu.cycles;
+    run_to(&mut m, start + 400);
+    let log = m.cpu.p.pin_log.clone();
+    let p3: Vec<_> = log.iter().filter(|e| e.1 == b'A' && e.2 == 3).collect();
+    let p4: Vec<_> = log.iter().filter(|e| e.1 == b'C' && e.2 == 3).collect();
+    assert!(p3.len() >= 6 && p4.len() >= 6, "{log:?}");
+    assert!(p3[0].3 && !p3[1].3 && p3[1].0 - p3[0].0 == 32, "{p3:?}");
+    assert!(p3[2].0 - p3[0].0 == 256);
+    // PWM4 is inverted: its first edge after the start-up level is a fall, then a rise 32 Tosc later.
+    let fall = p4.iter().position(|e| !e.3).unwrap();
+    assert!(p4[fall + 1].3 && p4[fall + 1].0 - p4[fall].0 == 32, "{p4:?}");
+    assert_eq!(r(&mut m, "PWM3CON") & 0x20 != 0, p3.last().unwrap().3);
+}
+
+#[test]
+fn pwm3_follows_timer4_and_stops_when_disabled() {
+    let mut m = machine("");
+    w(&mut m, "RA3PPS", 0x07);
+    w(&mut m, "TRISA", 0xF7);
+    w(&mut m, "CCPTMRS", 0x65); // P3TSEL = 10: Timer4
+    w(&mut m, "T4PR", 0x1F);
+    w(&mut m, "T4CLKCON", 1);
+    w(&mut m, "PWM3DCH", 0x04);
+    w(&mut m, "PWM3CON", 0x80);
+    w(&mut m, "T4CON", 0x80);
+    let s = m.cpu.cycles;
+    run_to(&mut m, s + 300);
+    let n = m.cpu.p.pin_log.len();
+    assert!(n >= 6, "{n}");
+    w(&mut m, "PWM3CON", 0x00);
+    let n2 = m.cpu.p.pin_log.len();
+    run_to(&mut m, s + 600);
+    assert!(m.cpu.p.pin_log.len() <= n2 + 1);
+    assert_eq!(r(&mut m, "PWM3CON") & 0x20, 0);
+}

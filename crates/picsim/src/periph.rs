@@ -34,7 +34,7 @@ mod mssp;
 mod quart;
 mod spi;
 pub use board::{parse_pin, pin_name, Board, Bus, Led, Oled, Pin};
-use ccp::Ccp;
+use ccp::{Ccp, Pwm};
 use i2cq::I2cQ;
 use mssp::Mssp;
 use nvm::Nvm;
@@ -149,6 +149,8 @@ const I2CQ0: u8 = 202;
 const I2CQ_END: u8 = I2CQ0 + 2 * i2cq::HOOKS;
 /// Q10 CCP n (0-based) uses hook code CCP0 + n (CCPxCON only, see `ccp.rs`); at most 2.
 const CCP0: u8 = 224;
+/// Q10 PWM3/PWM4 (PWMxCON only) use hook codes PWM0 + n.
+const PWM0: u8 = 236;
 const NVM0: u8 = 240;
 const NVMQ0: u8 = 242;
 
@@ -317,6 +319,7 @@ pub struct Periph {
     pub i2c_log: Vec<(u8, u64, I2cEv)>,
     pub notes: BTreeSet<String>,
     ccps: Vec<Ccp>,
+    pwms: Vec<Pwm>,
     /// A compare match with TMR1 clearing happened on the last clock: TMR1 goes to 0 on the next one `[A61]`.
     ccptmrs: Option<usize>,
     /// RxyPPS registers: (register, index into `ports`, pin).
@@ -393,7 +396,7 @@ impl Periph {
 
     /// Find the timers the part has and mark their registers as hooked in `m`.
     pub fn bind(dev: &Device, m: &mut DataMem) -> Periph {
-        let mut p = Periph { ports: Vec::new(), drive: Vec::new(), t0: None, t1: Vec::new(), t2: Vec::new(), uarts: Vec::new(), quarts: Vec::new(), spis: Vec::new(), mssps: Vec::new(), i2cqs: Vec::new(), adc: None, nvm: None, nvmq: None, stall: 0, fvr: None, tx: Vec::new(), spi_tx: Vec::new(), i2c_log: Vec::new(), notes: BTreeSet::new(), ccps: Vec::new(), ccptmrs: None, ppsout: Vec::new(), i2c_pps: Vec::new(), board: Board::default(), pullup: Vec::new(), forced: Vec::new(), sig: 0, sched: Vec::new(), pin_log: Vec::new(), event: None };
+        let mut p = Periph { ports: Vec::new(), drive: Vec::new(), t0: None, t1: Vec::new(), t2: Vec::new(), uarts: Vec::new(), quarts: Vec::new(), spis: Vec::new(), mssps: Vec::new(), i2cqs: Vec::new(), adc: None, nvm: None, nvmq: None, stall: 0, fvr: None, tx: Vec::new(), spi_tx: Vec::new(), i2c_log: Vec::new(), notes: BTreeSet::new(), ccps: Vec::new(), pwms: Vec::new(), ccptmrs: None, ppsout: Vec::new(), i2c_pps: Vec::new(), board: Board::default(), pullup: Vec::new(), forced: Vec::new(), sig: 0, sched: Vec::new(), pin_log: Vec::new(), event: None };
         let mut hook = |a: usize, k: u8| m.special[a] = Special::Hook(k);
         if let (Some(l), Some(h), Some(c0), Some(c1), Some(flag)) =
             (addr(dev, "TMR0L"), addr(dev, "TMR0H"), addr(dev, "T0CON0"), addr(dev, "T0CON1"), Flag::find(dev, "TMR0IF"))
@@ -488,6 +491,12 @@ impl Periph {
                 if let Some(c) = Ccp::find(dev, n) {
                     hook(c.con, CCP0 + p.ccps.len() as u8 * ccp::HOOKS);
                     p.ccps.push(c);
+                }
+            }
+            for n in 3..=4u8 {
+                if let Some(w) = Pwm::find(dev, n) {
+                    hook(w.con, PWM0 + p.pwms.len() as u8);
+                    p.pwms.push(w);
                 }
             }
         }
@@ -777,6 +786,9 @@ impl Periph {
         for c in self.ccps.iter().filter(|c| c.sig == code) {
             if new { m.mem[c.con] |= 0x20 } else { m.mem[c.con] &= !0x20 }
         }
+        for w in self.pwms.iter().filter(|w| w.sig == code) {
+            if new { m.mem[w.con] |= 0x20 } else { m.mem[w.con] &= !0x20 }
+        }
         for &(reg, pi, bit) in &self.ppsout {
             if m.mem[reg] & 31 == code && m.mem[self.ports[pi].tris] >> bit & 1 == 0 {
                 self.pin_log.push((tick, self.ports[pi].letter, bit, new));
@@ -1026,6 +1038,23 @@ impl Periph {
                 hits.push(Sched { tick: 4 * c, code: ccp.sig, act: 1, flag: None, pwm: true });
                 if pulse < period {
                     hits.push(Sched { tick: 4 * c + pulse, code: ccp.sig, act: 0, flag: Some(ccp.flag), pwm: true }); // [A62]
+                }
+            }
+        }
+        for &(tn, c, t2_pr, t2_sh) in &periods {
+            for w in &self.pwms {
+                if !w.en(m) || ccp::timer_of(self.ccptmrs, m, w.n, true) != tn {
+                    continue;
+                }
+                let (on, off) = if w.pol(m) { (0, 1) } else { (1, 0) };
+                let pulse = u64::from(w.duty(m)) << t2_sh;
+                let period = (u64::from(t2_pr) + 1) * 4 << t2_sh;
+                if pulse == 0 {
+                    continue;
+                }
+                hits.push(Sched { tick: 4 * c, code: w.sig, act: on, flag: None, pwm: true });
+                if pulse < period {
+                    hits.push(Sched { tick: 4 * c + pulse, code: w.sig, act: off, flag: None, pwm: true });
                 }
             }
         }
@@ -1308,12 +1337,23 @@ impl Periph {
                     self.sched.retain(|s| s.code != sig);
                 }
             }
+            PWM0..=237 => {
+                let i = usize::from(k - PWM0);
+                let (con, sig) = (self.pwms[i].con, self.pwms[i].sig);
+                let old = m.mem[con];
+                m.mem[con] = v & 0x90 | old & 0x20; // only EN and POL are writable; OUT is read only
+                self.sched.retain(|s| s.code != sig);
+                // Idle level: inactive (POL) while enabled, low while disabled [A64][A65].
+                let idle = u8::from(v & 0x80 != 0 && v & 0x10 != 0);
+                self.set_sig(m, sig, idle, 4 * now);
+            }
             k if matches!(t2_dec(k), Some((_, 2))) => {
                 let ti = t2_dec(k).unwrap().0;
                 if v & 0x80 == 0 {
                     // A stopped Timer2/4/6 freezes the PWM pins of the CCPs that use it.
                     let n = self.t2[ti].n;
-                    let off: Vec<u8> = self.ccps.iter().filter(|c| ccp::timer_of(self.ccptmrs, m, c.n, true) == n).map(|c| c.sig).collect();
+                    let mut off: Vec<u8> = self.ccps.iter().filter(|c| ccp::timer_of(self.ccptmrs, m, c.n, true) == n).map(|c| c.sig).collect();
+                    off.extend(self.pwms.iter().filter(|w| ccp::timer_of(self.ccptmrs, m, w.n, true) == n).map(|w| w.sig));
                     self.sched.retain(|s| !(s.pwm && off.contains(&s.code)));
                 }
                 let t = &mut self.t2[ti];
@@ -1407,7 +1447,7 @@ impl Periph {
         for &(reg, pi, bit) in &self.ppsout {
             // A pin driven by a modelled peripheral source (RxyPPS, TRIS clear) shows the source level, not the latch.
             let code = m.mem[reg] & 31;
-            if pi == i && tris >> bit & 1 == 0 && self.ccps.iter().any(|c| c.sig == code) {
+            if pi == i && tris >> bit & 1 == 0 && (self.ccps.iter().any(|c| c.sig == code) || self.pwms.iter().any(|c| c.sig == code)) {
                 v = v & !(1 << bit) | u8::from(self.sig >> code & 1 != 0) << bit;
             }
         }

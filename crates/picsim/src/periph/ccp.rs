@@ -93,3 +93,41 @@ pub fn timer_of(tmrs: Option<usize>, m: &DataMem, n: u8, pwm: bool) -> u8 {
         _ => 0,
     }
 }
+
+/// PWM3/PWM4 of the PIC18F27Q10 (DS40002043F ch.23 p.360-368): 10-bit PWM on Timer2/4/6 chosen by CCPTMRS (P3TSEL, P4TSEL).
+/// Same time base as the CCP PWM: set at the period match (not when the duty is 0), cleared when the 10-bit base reaches
+/// DCH:DCL[7:6]; a duty at or above the period leaves the output set (23.1, 23.4, 23.5). PPS output codes 0x07 (PWM3), 0x08 (PWM4).
+/// Assumptions: `[A64]` POL inverts the pin and the OUT bit alike (Figure 23-1 shows the polarity mux before the pin; the
+/// "to other peripherals" tap is not placed). `[A65]` a disabled module (EN = 0) drives its output low, whatever POL is.
+/// `[A66]` the double buffering of the duty changes nothing here: the duty is read when the period match is scheduled.
+pub struct Pwm {
+    pub n: u8,
+    pub con: usize,
+    pub dcl: usize,
+    pub dch: usize,
+    pub sig: u8,
+}
+
+impl Pwm {
+    pub fn find(dev: &Device, n: u8) -> Option<Pwm> {
+        Some(Pwm {
+            n,
+            con: addr(dev, &format!("PWM{n}CON"))?,
+            dcl: addr(dev, &format!("PWM{n}DCL"))?,
+            dch: addr(dev, &format!("PWM{n}DCH"))?,
+            sig: 4 + n,
+        })
+    }
+
+    pub fn en(&self, m: &DataMem) -> bool {
+        m.mem[self.con] & 0x80 != 0
+    }
+
+    pub fn pol(&self, m: &DataMem) -> bool {
+        m.mem[self.con] & 0x10 != 0
+    }
+
+    pub fn duty(&self, m: &DataMem) -> u32 {
+        u32::from(m.mem[self.dch]) << 2 | u32::from(m.mem[self.dcl] >> 6)
+    }
+}
