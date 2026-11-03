@@ -306,7 +306,8 @@ impl Pic18 {
             Special::Hook(k) => {
                 let now = self.cycles;
                 self.p.sync(&mut self.m, now);
-                self.p.write(k, v & self.m.implemented[i], now, &mut self.m);
+                self.p.write(k, v & self.m.implemented[i], now, &mut self.m, &mut self.prog);
+                self.cycles += self.p.take_stall(); // the CPU waits for a program flash write or erase
             }
             Special::Pcl => {
                 self.m.mem[self.m.regs.pcl as usize] = v;
@@ -788,7 +789,7 @@ impl Pic18 {
                 }
                 0x07 => self.daw(),
                 0x08..=0x0B => self.tblrd((w & 3) as u8),
-                0x0C..=0x0F => self.cycles += 1, // TBLWT: holding latches arrive with the NVM model (S5)
+                0x0C..=0x0F => self.tblwt((w & 3) as u8),
                 0x10 | 0x11 => self.retfie(w & 1 != 0),
                 0x12 | 0x13 => {
                     self.cycles += 1;
@@ -930,6 +931,34 @@ impl Pic18 {
         }
         let b = self.table_byte(p & 0x3FFFFF);
         self.m.mem[self.m.regs.tablat as usize] = b;
+        match mode {
+            1 => p = p.wrapping_add(1),
+            2 => p = p.wrapping_sub(1),
+            _ => {}
+        }
+        self.m.mem[a] = p as u8;
+        self.m.mem[a + 1] = (p >> 8) as u8;
+        self.m.mem[a + 2] = (p >> 16) as u8 & self.m.implemented[a + 2];
+        self.cycles += 1;
+    }
+
+    /// TBLWT: TABLAT goes to the holding register (Q10) or buffer RAM byte (Q41) that TBLPTR[7:0] selects, not to
+    /// flash (DS40002043F 12.1.4 p.151; DS40002214G 10.3.10.5 p.99). The pointer moves as for TBLRD.
+    fn tblwt(&mut self, mode: u8) {
+        let a = self.m.regs.tblptr as usize;
+        let mut p = u32::from(self.m.mem[a + 2]) << 16 | u32::from(self.m.mem[a + 1]) << 8 | u32::from(self.m.mem[a]);
+        if mode == 3 {
+            p = p.wrapping_add(1);
+        }
+        match self.p.hold_base() {
+            Some(base) => {
+                let t = self.m.mem[self.m.regs.tablat as usize];
+                self.m.mem[base + (p & 0xFF) as usize] = t;
+            }
+            None => {
+                self.notes.insert("TBLWT on a part without holding registers is not modelled".into());
+            }
+        }
         match mode {
             1 => p = p.wrapping_add(1),
             2 => p = p.wrapping_sub(1),

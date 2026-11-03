@@ -24,6 +24,7 @@ use crate::mem::{DataMem, Special};
 use devdesc::Device;
 use std::collections::{BTreeSet, VecDeque};
 
+mod flash;
 mod nvm;
 mod nvmq;
 mod quart;
@@ -234,6 +235,8 @@ pub struct Periph {
     adc: Option<Adc>,
     nvm: Option<Nvm>,
     nvmq: Option<NvmQ>,
+    /// Cycles the CPU is stalled by a program flash operation; the core takes them after the write (`take_stall`).
+    stall: u64,
     fvr: Option<usize>,
     /// Bytes the transmitters started to send: (EUSART number 1-based, cycle it started, byte).
     pub tx: Vec<(u8, u64, u8)>,
@@ -255,6 +258,23 @@ impl Periph {
         self.event = None;
     }
 
+    /// Cycles the CPU stalled for a program flash write or erase since the last call.
+    pub fn take_stall(&mut self) -> u64 {
+        std::mem::take(&mut self.stall)
+    }
+
+    /// The NVM flag of a stalling operation is set when the stall ends.
+    fn flash_event(&mut self, now: u64) {
+        if self.stall > 0 {
+            self.raised(now + self.stall);
+        }
+    }
+
+    /// Data memory address of the holding registers / buffer RAM that `TBLWT` writes, when the part has them.
+    pub fn hold_base(&self) -> Option<usize> {
+        self.nvm.as_ref().and_then(|n| n.hold()).or_else(|| self.nvmq.as_ref().and_then(|n| n.hold()))
+    }
+
     pub fn peek_event(&self) -> Option<u64> {
         self.event
     }
@@ -269,7 +289,7 @@ impl Periph {
 
     /// Find the timers the part has and mark their registers as hooked in `m`.
     pub fn bind(dev: &Device, m: &mut DataMem) -> Periph {
-        let mut p = Periph { ports: Vec::new(), drive: Vec::new(), t0: None, t1: None, t2: None, uarts: Vec::new(), quarts: Vec::new(), adc: None, nvm: None, nvmq: None, fvr: None, tx: Vec::new(), notes: BTreeSet::new(), event: None };
+        let mut p = Periph { ports: Vec::new(), drive: Vec::new(), t0: None, t1: None, t2: None, uarts: Vec::new(), quarts: Vec::new(), adc: None, nvm: None, nvmq: None, stall: 0, fvr: None, tx: Vec::new(), notes: BTreeSet::new(), event: None };
         let mut hook = |a: usize, k: u8| m.special[a] = Special::Hook(k);
         if let (Some(l), Some(h), Some(c0), Some(c1), Some(flag)) =
             (addr(dev, "TMR0L"), addr(dev, "TMR0H"), addr(dev, "T0CON0"), addr(dev, "T0CON1"), Flag::find(dev, "TMR0IF"))
@@ -720,15 +740,17 @@ impl Periph {
     }
 
     /// A write: `v` is already masked to the implemented bits. The caller has synced to the writing cycle.
-    pub fn write(&mut self, k: u8, v: u8, now: u64, m: &mut DataMem) {
+    pub fn write(&mut self, k: u8, v: u8, now: u64, m: &mut DataMem, prog: &mut [u8]) {
         match k {
             NVMQ0..=244 => {
                 let n = self.nvmq.as_mut().unwrap();
-                n.write(k - NVMQ0, v, now, m, &mut self.notes);
+                self.stall += n.write(k - NVMQ0, v, now, m, prog, &mut self.notes);
+                self.flash_event(now);
             }
             NVM0..=241 => {
                 let n = self.nvm.as_mut().unwrap();
-                n.write(k - NVM0, v, now, m, &mut self.notes);
+                self.stall += n.write(k - NVM0, v, now, m, prog, &mut self.notes);
+                self.flash_event(now);
             }
             UART0..=39 => self.uart_write(k, v, now, m),
             QUART0..QUART_END => {

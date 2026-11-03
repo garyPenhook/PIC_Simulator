@@ -231,3 +231,29 @@ lacks keeps the register's unprogrammed default (0xFF). `basil-sim --config` pri
   ignores instructions between the writes. `[A36]` not modelled: PFM and page operations, WRTn protection, WRERR after a Reset
   during a write, blocking of NVMADR/NVMDAT writes while GO is set.
 * Errata DS80000901H: the search found no NVM item. `exec_q41/lib_eeprom` passes (30439 cycles, not yet compared with MDB).
+
+## Program flash self-write (S5, `periph/flash.rs`, `nvm.rs`, `nvmq.rs`, `Pic18::tblwt`)
+
+Q10, DS40002043F 12.1 p.142-156; Q41, DS40002214G 10.3 p.88-98.
+
+* Sector (Q10) or page (Q41) = 128 words = 256 bytes, selected by NVMADR[21:8]; NVMADR holds the byte address (Table 12-2 p.142,
+  10.3.1 p.89). The holding registers / buffer RAM are the 256-byte GPR bank after the last GPR bank (12.1 p.142; Table 10-2 p.92):
+  bank 13 on the 18F27Q10, bank 9/13/21 on the Fx4/Fx5/Fx6Q41. The device files mark it `system`, which is where the model reads it.
+* `TBLWT` writes TABLAT to the holding register / buffer byte TBLPTR[7:0] selects, not to flash; the pointer moves as for `TBLRD`
+  (12.1.4 p.151, 10.3.10.5 p.99). The sector/page read fills the holding bytes; the sector/page write programs from them.
+* Q10 control bits and unlock pairs (Table 12-4 p.147): WR 55h/AAh, SECWR DDh/22h, SECER CCh/33h, SECRD BBh/44h. They are gated by
+  NVMEN, RD is not (12.1.4.5 p.156); an unlock for one operation does not enable another. Q41: NVMCMD 000/001 read, 010 page read,
+  011/100 word write, 101 page write, 110 page erase, unlock NVMLOCK 55h/AAh (Table 10-1 p.87-88).
+* The CPU stalls until a PFM erase or write ends; the control bit/GO is clear when it resumes and NVMIF is set. Reads and table writes
+  set no NVMIF. An invalid address sets NVMERR (Q10) or WRERR (Q41) and the operation does not happen.
+* Q10 times, typical (39.3.5 p.697): word write 50 us, sector write 6 ms, sector erase 10 ms. Q41 gives maxima only (48.3.6 p.896):
+  word write 75 us, page write 10 ms, page erase 11 ms.
+* `[A37]` the Q10 sector read takes no time. `[A38]` the Q41 uses its maxima. `[A39]` a Q41 page read takes no time and post increment adds 2
+  to NVMADR on the PFM. `[A40]` flash programming only clears bits: a write ANDs into what is there, with a note when it would need 0 -> 1.
+  All times scale with `write_cycles` (10 000 = 10 ms at Fosc 4 MHz, A30/A33).
+* Not modelled: write protection (WRTn), User ID and configuration space (such operations are ignored with a note), NVMERR/WRERR after
+  a Reset during a write. Errata DS80000832G 1.9.1 (the first instruction after a self-write instruction may not execute; the library adds
+  two NOPs, p.7) is not modelled either, so code without the NOPs would run on the simulator and fail on silicon.
+* Results: `exec/lib_flashwrite` (18F27Q10, 28046 cycles) and `exec_q41/lib_flashwrite` (18F16Q41, 34286 cycles) pass on the sim; neither
+  is compared with MDB. `tests/exec/lib_flashwrite.bas` in Basic_Compiler was changed: with flash reads modelled R3 is 1 as on hardware
+  and the sector path is exercised by a second update (R5, R6).

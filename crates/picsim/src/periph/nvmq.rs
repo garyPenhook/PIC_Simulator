@@ -20,9 +20,21 @@
 //!   does not say when a write increments (its Example 10-11 sets GO n times without polling).
 //! * `[A35]` The unlock is tracked as 55h then AAh written to NVMLOCK and the next NVMCON0 write; instructions between
 //!   are not checked. A GO write consumes the unlock whether or not it starts anything.
-//! * `[A36]` Not modelled: program flash and page operations, write protection (WRTn), WRERR after a Reset during a
-//!   write, blocking of NVMADR/NVMDAT writes while GO is set. Each page or PFM request clears GO and adds a note.
+//! * `[A36]` Not modelled: write protection (WRTn), User ID and configuration space, WRERR after a Reset during a
+//!   write, blocking of NVMADR/NVMDAT writes while GO is set.
+//!
+//! Program flash (10.3, p.88-98; array rules in `flash.rs`):
+//! * Word read (000) fills NVMDAT, page read (010) fills the buffer RAM (the 256-byte GPR bank after the last one,
+//!   Table 10-2 p.92). Word write (011) needs an erased word; page erase (110) and page write (101) work on the page
+//!   NVMADR[21:8] selects (10.3.1 p.89, 10.3.4 p.92, 10.3.5 p.94). All need the unlock except the reads.
+//! * The CPU stalls during an erase or write and GO is clear when it resumes; NVMIF is set (10.3.1 p.89, 10.3.4 p.92).
+//!   Reads set no NVMIF (Table 10-1).
+//! * A write or erase at an invalid address sets WRERR and the GO attempt fails (10.3 p.91, 10.3.4 p.92).
+//! * Times (48.3.6 p.896) are maxima only: page write 10 ms, page erase 11 ms, word write 75 us. `[A38]` the model
+//!   uses them as the durations, scaled with `write_cycles` (A33). `[A39]` a page read takes no time, and post
+//!   increment adds 2 to NVMADR on the PFM (a word) when the operation ends.
 
+use super::flash::Flash as Pfm;
 use super::{Flag, addr};
 use crate::mem::DataMem;
 use devdesc::Device;
@@ -49,6 +61,8 @@ pub struct NvmQ {
     /// A write in progress: (completion cycle, byte offset, data, post increment).
     op: Option<(u64, usize, u8, bool)>,
     pub write_cycles: u64,
+    pfm: Option<Pfm>,
+    datah: usize,
 }
 
 impl NvmQ {
@@ -67,6 +81,8 @@ impl NvmQ {
             unlock: 0,
             op: None,
             write_cycles: 10_000,
+            pfm: Pfm::find(dev),
+            datah: addr(dev, "NVMDATH")?,
         })
     }
 
@@ -79,10 +95,7 @@ impl NvmQ {
     }
 
     fn post_increment(&self, m: &mut DataMem) {
-        let a = self.address(m).wrapping_add(1);
-        for (i, r) in self.adr.iter().enumerate() {
-            m.mem[*r] = (a >> (8 * i)) as u8;
-        }
+        self.post_increment_by(m, 1);
     }
 
     fn busy(&self) -> bool {
@@ -102,7 +115,24 @@ impl NvmQ {
         Some(e)
     }
 
-    pub fn write(&mut self, k: u8, v: u8, now: u64, m: &mut DataMem, notes: &mut BTreeSet<String>) {
+    pub fn hold(&self) -> Option<usize> {
+        self.pfm.as_ref().map(|f| f.hold)
+    }
+
+    /// Scale a time in microseconds to instruction cycles (`write_cycles` is the 10 ms of A33).
+    fn us(&self, t: u64) -> u64 {
+        t * self.write_cycles / 10_000
+    }
+
+    fn post_increment_by(&self, m: &mut DataMem, n: u32) {
+        let a = self.address(m).wrapping_add(n);
+        for (i, r) in self.adr.iter().enumerate() {
+            m.mem[*r] = (a >> (8 * i)) as u8;
+        }
+    }
+
+    /// A write to NVMCON0, NVMCON1 or NVMLOCK. Returns the cycles the CPU stalls (a program flash operation).
+    pub fn write(&mut self, k: u8, v: u8, now: u64, m: &mut DataMem, prog: &mut [u8], notes: &mut BTreeSet<String>) -> u64 {
         match k {
             LOCK => {
                 self.unlock = match (self.unlock, v) {
@@ -113,56 +143,102 @@ impl NvmQ {
             }
             CON1 => {
                 if self.busy() {
-                    return; // blocked while GO is set
+                    return 0; // blocked while GO is set
                 }
                 // WRERR can be cleared but not set by software; NVMCMD is read/write.
                 m.mem[self.con1] = (m.mem[self.con1] & v & WRERR) | (v & 7);
             }
             _ => {
                 if self.busy() {
-                    return; // GO cannot be cleared by software, and the register is blocked
+                    return 0; // GO cannot be cleared by software, and the register is blocked
                 }
                 let unlocked = std::mem::replace(&mut self.unlock, 0) == 2;
                 if v & GO != 0 {
-                    self.go(unlocked, now, m, notes);
+                    return self.go(unlocked, now, m, prog, notes);
                 }
             }
         }
+        0
     }
 
-    fn go(&mut self, unlocked: bool, now: u64, m: &mut DataMem, notes: &mut BTreeSet<String>) {
+    fn go(&mut self, unlocked: bool, now: u64, m: &mut DataMem, prog: &mut [u8], notes: &mut BTreeSet<String>) -> u64 {
         let cmd = m.mem[self.con1] & 7;
+        let a = self.address(m);
+        let dfm = self.offset(m);
         match cmd {
-            0 | 1 => match self.offset(m) {
-                Some(o) => {
+            0 | 1 => {
+                if let Some(o) = dfm {
                     m.mem[self.datl] = self.eeprom[o];
                     if cmd == 1 {
                         self.post_increment(m);
                     }
+                } else if let Some(f) = self.pfm.as_ref().filter(|f| f.valid(a)) {
+                    let w = f.word_read(prog, a);
+                    m.mem[self.datl] = w as u8;
+                    m.mem[self.datah] = (w >> 8) as u8;
+                    if cmd == 1 {
+                        self.post_increment_by(m, 2);
+                    }
+                } else {
+                    notes.insert("NVM reads of User ID, configuration and device ID space are not modelled; NVMDAT is unchanged".into());
                 }
-                None => {
-                    notes.insert("NVM reads outside the data EEPROM (program flash, IDs) are not modelled; NVMDAT is unchanged".into());
+                0
+            }
+            2 => {
+                // Page read: PFM into the buffer RAM; not supported for the DFM (10.4.1 p.102).
+                match self.pfm.as_ref().filter(|f| f.valid(a)) {
+                    Some(f) => f.sector_read(prog, m, a),
+                    None => {
+                        notes.insert("a NVM page read outside program flash does nothing in the model".into());
+                    }
                 }
-            },
-            3 | 4 => {
+                0
+            }
+            3 | 4 | 5 | 6 => {
                 if !unlocked {
                     m.mem[self.con1] |= WRERR; // a write attempted while locked
-                } else if let Some(o) = self.offset(m) {
-                    self.op = Some((now + self.write_cycles, o, m.mem[self.datl], cmd == 4));
-                    m.mem[self.con0] |= GO;
-                } else {
-                    m.mem[self.con1] |= WRERR; // unimplemented area
-                    notes.insert("an NVM write outside the data EEPROM is not modelled; it only sets WRERR".into());
+                    return 0;
                 }
-            }
-            2 | 5 | 6 => {
-                if self.offset(m).is_some() {
-                    m.mem[self.con1] |= WRERR; // a page operation directed to a DFM area
-                } else {
-                    notes.insert("NVM page operations on program flash are not modelled; GO is cleared".into());
+                if let Some(o) = dfm {
+                    if cmd == 3 || cmd == 4 {
+                        self.op = Some((now + self.write_cycles, o, m.mem[self.datl], cmd == 4));
+                        m.mem[self.con0] |= GO;
+                    } else {
+                        m.mem[self.con1] |= WRERR; // a page operation directed to a DFM area
+                    }
+                    return 0;
                 }
+                let Some(f) = self.pfm.as_ref() else { return 0 };
+                if !f.valid(a) {
+                    if f.is_aux(a) {
+                        notes.insert("NVM writes to User ID and configuration space are not modelled; the operation is ignored".into());
+                    } else {
+                        m.mem[self.con1] |= WRERR; // unimplemented area
+                    }
+                    return 0;
+                }
+                let stall = match cmd {
+                    3 | 4 => {
+                        let w = u16::from(m.mem[self.datl]) | u16::from(m.mem[self.datah]) << 8;
+                        f.word_write(prog, a, w, notes);
+                        if cmd == 4 {
+                            self.post_increment_by(m, 2);
+                        }
+                        self.us(75)
+                    }
+                    5 => {
+                        f.sector_write(prog, m, a, notes);
+                        self.us(10_000)
+                    }
+                    _ => {
+                        f.sector_erase(prog, a);
+                        self.us(11_000)
+                    }
+                };
+                self.flag.set(m);
+                stall
             }
-            _ => {} // 111 reserved: no operation
+            _ => 0, // 111 reserved: no operation
         }
     }
 }
