@@ -28,7 +28,7 @@ out=$(./target/release/basil-sim "$w/serial_tx_q41.hex" --device 18F16Q41 2>/dev
 echo "$out" | grep -q "^tx1: AB$" || { echo "FAIL serial_tx_q41: want 'tx1: AB'"; echo "$out"; exit 1; }
 echo "PASS serial_tx_q41"
 cp tests/sim/adc_q41.bas "$w/"
-"$BASIL" --keep-vars "$w/adc_q41.bas" >/dev/null
+"${BASIL:-./target/release/basil}" --keep-vars "$w/adc_q41.bas" >/dev/null
 out=$(./target/release/basil-sim "$w/adc_q41.hex" --device 18F16Q41 --stim tests/sim/adc_q41.stim.toml --dump ADQ_A0:2,ADQ_A1:2,ADQ_A2:2 2>/dev/null)
 for l in "ADQ_A0 = 2748" "ADQ_A1 = 0 " "ADQ_A2 = 291"; do
     echo "$out" | grep -q "^$l" || { echo "FAIL adc_q41: missing '$l'"; echo "$out"; exit 1; }
@@ -41,3 +41,17 @@ for l in "SQ1_SQ_INIT = 1 " "SQ1_SQ_R0 = 239" "SQ1_SQ_R1 = 64" "SQ1_SQ_R2 = 24" 
     echo "$out" | grep -q "^$l" || { echo "FAIL spi_q41: missing '$l'"; echo "$out"; exit 1; }
 done
 echo "PASS spi_q41"
+cp tests/sim/spi_q10.bas "$w/"
+"${BASIL:-./target/release/basil}" --keep-vars "$w/spi_q10.bas" >/dev/null
+out=$(./target/release/basil-sim "$w/spi_q10.hex" --device 18F27Q10 --stim tests/sim/spi_q10.stim.toml --dump SQ10_SQ_INIT,SQ10_SQ_R0,SQ10_SQ_R1,SQ10_SQ_R2,SQ10_SQ_ST 2>/dev/null)
+for l in "SQ10_SQ_INIT = 1 " "SQ10_SQ_R0 = 239" "SQ10_SQ_R1 = 64" "SQ10_SQ_R2 = 24" "SQ10_SQ_ST = 0 " "spi1: 9F 00 FF"; do
+    echo "$out" | grep -q "^$l" || { echo "FAIL spi_q10: missing '$l'"; echo "$out"; exit 1; }
+done
+echo "PASS spi_q10"
+cp tests/sim/i2c_q10.bas "$w/"
+"${BASIL:-./target/release/basil}" --keep-vars "$w/i2c_q10.bas" >/dev/null
+out=$(./target/release/basil-sim "$w/i2c_q10.hex" --device 18F27Q10 --stim tests/sim/i2c_q10.stim.toml --dump IQ10_IQ_INIT,IQ10_IQ_S0,IQ10_IQ_S1,IQ10_IQ_S2,IQ10_IQ_S3,IQ10_IQ_R0,IQ10_IQ_R1,IQ10_IQ_NAK 2>/dev/null)
+for l in "IQ10_IQ_INIT = 1 " "IQ10_IQ_S1 = 0 " "IQ10_IQ_S2 = 0 " "IQ10_IQ_R0 = 202" "IQ10_IQ_R1 = 254" "IQ10_IQ_NAK = 3 " "i2c1: S 50W 10 Sr 50R CA FE! P S 5AW! P"; do
+    echo "$out" | grep -q "^$l" || { echo "FAIL i2c_q10: missing '$l'"; echo "$out"; exit 1; }
+done
+echo "PASS i2c_q10"

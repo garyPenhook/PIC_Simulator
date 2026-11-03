@@ -15,7 +15,13 @@
 //! value = 512
 //! at = 0              # from this instruction cycle on, default 0; later entries replace earlier ones
 //!
-//! [[spi]]            # the client on an SPI host of the Q41: answers each exchanged byte with the next of `data`
+//! [[i2c]]            # a client on the I2C bus of MSSP `port` (Q10): ACKs `address` (7 bits), sends `data` then `fill` when read
+//! port = 1            # MSSP number, default 1
+//! address = 0x50
+//! data = [0x12, 0x34]
+//! fill = 0xFF         # default 0xFF
+//!
+//! [[spi]]            # the client on an SPI host (Q41 SPI, Q10 MSSP): answers each exchanged byte with the next of `data`
 //! port = 1            # SPI number, default 1
 //! data = [0x12, 0x34] # bytes the client sends back, in order
 //! fill = 0            # sent after `data` is used up, default 0
@@ -34,7 +40,7 @@
 //! ```
 //! Pins read 0 until driven. Only input pins (TRISx = 1) with ANSELx = 0 show the level; an output pin shows its latch.
 
-use crate::periph::{RxStream, SpiClient};
+use crate::periph::{I2cClient, RxStream, SpiClient};
 use devdesc::Device;
 
 /// Largest `at`, `bit` and `gap`: 2^32 instruction cycles. Keeps the receiver's cycle arithmetic far from u64 overflow.
@@ -45,6 +51,8 @@ pub struct Stimulus {
     pub uart: Vec<(u8, RxStream)>,
     /// (SPI number, client)
     pub spi: Vec<(u8, SpiClient)>,
+    /// (MSSP number, client)
+    pub i2c: Vec<(u8, I2cClient)>,
     /// (channel, from cycle, code)
     pub adc: Vec<(u8, u64, u16)>,
     /// (port letter, from cycle, pin mask, levels)
@@ -106,6 +114,34 @@ impl Stimulus {
                     let fill = t.get("fill").map_or(Ok(0), byte)?;
                     let port = t.get("port").map_or(Ok(1), |x| x.as_integer().and_then(|i| u8::try_from(i).ok()).ok_or("bad spi.port"))?;
                     st.spi.push((port, SpiClient { data, fill }));
+                }
+                continue;
+            }
+            if k == "i2c" {
+                for e in v.as_array().ok_or("i2c must be [[i2c]] entries")? {
+                    let t = e.as_table().ok_or("i2c entry must be a table")?;
+                    for k in t.keys() {
+                        if !["port", "address", "data", "fill"].contains(&k.as_str()) {
+                            return Err(format!("i2c: unknown key {k}"));
+                        }
+                    }
+                    let byte = |x: &toml::Value| x.as_integer().and_then(|i| u8::try_from(i).ok()).ok_or(format!("i2c byte {x} out of range 0..255"));
+                    let address = match t.get("address").map(byte) {
+                        Some(Ok(a)) if a < 128 => a,
+                        Some(Ok(a)) => return Err(format!("i2c.address {a} is not a 7-bit address")),
+                        Some(Err(e)) => return Err(e),
+                        None => return Err("i2c needs an address".into()),
+                    };
+                    let data = match t.get("data") {
+                        Some(d) => d.as_array().ok_or("i2c.data must be an array")?.iter().map(byte).collect::<Result<_, _>>()?,
+                        None => Default::default(),
+                    };
+                    let fill = t.get("fill").map_or(Ok(0xFF), byte)?;
+                    let port = t.get("port").map_or(Ok(1), |x| x.as_integer().and_then(|i| u8::try_from(i).ok()).ok_or("bad i2c.port"))?;
+                    if st.i2c.iter().any(|(p, c)| *p == port && c.address == address) {
+                        return Err(format!("i2c: address {address:#x} given twice on port {port}"));
+                    }
+                    st.i2c.push((port, I2cClient { address, data, fill }));
                 }
                 continue;
             }
@@ -193,6 +229,11 @@ impl Stimulus {
         for (port, c) in self.spi {
             if !p.spi_client(port, c) {
                 return Err(format!("{}: no SPI{port} host in the simulator", dev.device.name));
+            }
+        }
+        for (port, c) in self.i2c {
+            if !p.i2c_client(port, c) {
+                return Err(format!("{}: no MSSP{port} in the simulator", dev.device.name));
             }
         }
         for (letter, at, mask, val) in self.pins {

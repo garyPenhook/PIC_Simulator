@@ -1,6 +1,7 @@
 //! `basil-sim prog.hex --device 18F16Q41 [--asm prog.S] [--until __halt] [--dump T_R1:2,T_R2] [--bp SYM,SYM] [--bp-max N] [--config] [--stim FILE]`
 //! `--bp` prints the cycle count each time one of the symbols is reached (at most `--bp-max`, default 20).
 
+use picsim::periph::I2cEv;
 use picsim::{Machine, Stop};
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -120,6 +121,25 @@ fn run() -> Result<ExitCode, String> {
         let bytes: Vec<String> = m.cpu.p.spi_tx.iter().filter(|t| t.0 == n).map(|t| format!("{:02X}", t.2)).collect();
         if !bytes.is_empty() {
             println!("spi{n}: {}", bytes.join(" "));
+        }
+    }
+    for n in 1..=2u8 {
+        let ev: Vec<String> = m
+            .cpu
+            .p
+            .i2c_log
+            .iter()
+            .filter(|t| t.0 == n)
+            .map(|t| match t.2 {
+                I2cEv::Start => "S".to_string(),
+                I2cEv::Restart => "Sr".to_string(),
+                I2cEv::Stop => "P".to_string(),
+                I2cEv::Addr(b, ack) => format!("{:02X}{}{}", b >> 1, if b & 1 != 0 { 'R' } else { 'W' }, if ack { "" } else { "!" }),
+                I2cEv::Write(b, ack) | I2cEv::Read(b, ack) => format!("{b:02X}{}", if ack { "" } else { "!" }),
+            })
+            .collect();
+        if !ev.is_empty() {
+            println!("i2c{n}: {}", ev.join(" "));
         }
     }
     for n in &m.cpu.notes {

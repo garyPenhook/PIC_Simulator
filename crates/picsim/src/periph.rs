@@ -27,12 +27,15 @@ use std::collections::{BTreeSet, VecDeque};
 mod flash;
 mod nvm;
 mod nvmq;
+mod mssp;
 mod quart;
 mod spi;
+use mssp::Mssp;
 use nvm::Nvm;
 use nvmq::NvmQ;
 use quart::QUart;
 use spi::Spi;
+pub use mssp::{I2cClient, I2cEv};
 pub use spi::SpiClient;
 
 /// A flag bit in a PIRx register.
@@ -103,6 +106,9 @@ const PORT0: u8 = 48;
 /// Q41 SPI n (0-based) uses hook codes SPI0 + spi::HOOKS * n + sub-code (see `spi.rs`); at most 2.
 const SPI0: u8 = 160;
 const SPI_END: u8 = SPI0 + 2 * spi::HOOKS;
+/// Q10 MSSP n (0-based) uses hook codes MSSP0 + mssp::HOOKS * n + sub-code (see `mssp.rs`); at most 2.
+const MSSP0: u8 = 190;
+const MSSP_END: u8 = MSSP0 + 2 * mssp::HOOKS;
 const NVM0: u8 = 240;
 const NVMQ0: u8 = 242;
 
@@ -239,6 +245,7 @@ pub struct Periph {
     uarts: Vec<Uart>,
     quarts: Vec<QUart>,
     spis: Vec<Spi>,
+    mssps: Vec<Mssp>,
     adc: Option<Adc>,
     nvm: Option<Nvm>,
     nvmq: Option<NvmQ>,
@@ -249,6 +256,8 @@ pub struct Periph {
     pub tx: Vec<(u8, u64, u8)>,
     /// Bytes the SPI hosts sent: (SPI number, cycle the byte started, byte).
     pub spi_tx: Vec<(u8, u64, u8)>,
+    /// What the I2C hosts put on the bus: (MSSP number, cycle, event).
+    pub i2c_log: Vec<(u8, u64, I2cEv)>,
     pub notes: BTreeSet<String>,
     /// Cycle of the latest flag set by `sync` since the core last looked (`take_event`).
     event: Option<u64>,
@@ -298,7 +307,7 @@ impl Periph {
 
     /// Find the timers the part has and mark their registers as hooked in `m`.
     pub fn bind(dev: &Device, m: &mut DataMem) -> Periph {
-        let mut p = Periph { ports: Vec::new(), drive: Vec::new(), t0: None, t1: None, t2: None, uarts: Vec::new(), quarts: Vec::new(), spis: Vec::new(), adc: None, nvm: None, nvmq: None, stall: 0, fvr: None, tx: Vec::new(), spi_tx: Vec::new(), notes: BTreeSet::new(), event: None };
+        let mut p = Periph { ports: Vec::new(), drive: Vec::new(), t0: None, t1: None, t2: None, uarts: Vec::new(), quarts: Vec::new(), spis: Vec::new(), mssps: Vec::new(), adc: None, nvm: None, nvmq: None, stall: 0, fvr: None, tx: Vec::new(), spi_tx: Vec::new(), i2c_log: Vec::new(), notes: BTreeSet::new(), event: None };
         let mut hook = |a: usize, k: u8| m.special[a] = Special::Hook(k);
         if let (Some(l), Some(h), Some(c0), Some(c1), Some(flag)) =
             (addr(dev, "TMR0L"), addr(dev, "TMR0H"), addr(dev, "T0CON0"), addr(dev, "T0CON1"), Flag::find(dev, "TMR0IF"))
@@ -427,14 +436,36 @@ impl Periph {
                 p.spis.push(q);
             }
         }
+        for n in 1..=2u8 {
+            if let Some((q, regs)) = Mssp::find(dev, n) {
+                let k = MSSP0 + mssp::HOOKS * p.mssps.len() as u8;
+                for (i, a) in regs.into_iter().enumerate() {
+                    hook(a, k + i as u8);
+                }
+                p.mssps.push(q);
+            }
+        }
         p
     }
 
     /// Set the byte-level client that answers SPI `num` (1-based). False when the part has no such SPI.
     pub fn spi_client(&mut self, num: u8, c: SpiClient) -> bool {
-        match self.spis.iter_mut().find(|s| s.num == num) {
+        if let Some(s) = self.spis.iter_mut().find(|s| s.num == num) {
+            s.client = c;
+            true
+        } else if let Some(s) = self.mssps.iter_mut().find(|s| s.num == num) {
+            s.spi = c;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Add an I2C client to the bus of MSSP `num` (1-based). False when the part has no such MSSP.
+    pub fn i2c_client(&mut self, num: u8, c: I2cClient) -> bool {
+        match self.mssps.iter_mut().find(|s| s.num == num) {
             Some(s) => {
-                s.client = c;
+                s.i2c.push(c);
                 true
             }
             None => false,
@@ -701,6 +732,9 @@ impl Periph {
         for q in &mut self.spis {
             q.sync(m, now, &mut ev, &mut self.spi_tx, &mut self.notes);
         }
+        for q in &mut self.mssps {
+            q.sync(m, now, &mut ev, &mut self.spi_tx, &mut self.i2c_log, &mut self.notes);
+        }
         if let Some(n) = &mut self.nvm
             && let Some(e) = n.sync(m, now)
         {
@@ -756,6 +790,10 @@ impl Periph {
                 let i = usize::from(k - SPI0) / usize::from(spi::HOOKS);
                 self.spis[i].read_rxb(m, now)
             }
+            MSSP0..MSSP_END => {
+                let i = usize::from(k - MSSP0) / usize::from(mssp::HOOKS);
+                self.mssps[i].read_buf(m)
+            }
             UART0..=39 => {
                 let u = &mut self.uarts[usize::from(k - UART0) / usize::from(UART_HOOKS)];
                 // `[A10]` An empty FIFO reads the last character again (the data sheet does not say).
@@ -773,7 +811,8 @@ impl Periph {
     pub fn is_stored(k: u8) -> bool {
         !(k == NVM0 + nvm::CON2 || k == NVMQ0 + nvmq::LOCK || matches!(k, T0L | T1L | T1H | T2T | T1G | PORT0..=0x6F) || (UART0..40).contains(&k) && (k - UART0) % UART_HOOKS == 3
             || (QUART0..QUART_END).contains(&k) && (k - QUART0) % quart::HOOKS == quart::RXB
-            || (SPI0..SPI_END).contains(&k) && (k - SPI0) % spi::HOOKS == spi::RXB)
+            || (SPI0..SPI_END).contains(&k) && (k - SPI0) % spi::HOOKS == spi::RXB
+            || (MSSP0..MSSP_END).contains(&k) && (k - MSSP0) % mssp::HOOKS == mssp::BUF)
     }
 
     /// A write: `v` is already masked to the implemented bits. The caller has synced to the writing cycle.
@@ -793,6 +832,10 @@ impl Periph {
             SPI0..SPI_END => {
                 let i = usize::from(k - SPI0) / usize::from(spi::HOOKS);
                 self.spis[i].write((k - SPI0) % spi::HOOKS, v, now, m);
+            }
+            MSSP0..MSSP_END => {
+                let i = usize::from(k - MSSP0) / usize::from(mssp::HOOKS);
+                self.mssps[i].write((k - MSSP0) % mssp::HOOKS, v, now, m, &mut self.notes);
             }
             QUART0..QUART_END => {
                 let i = usize::from(k - QUART0) / usize::from(quart::HOOKS);

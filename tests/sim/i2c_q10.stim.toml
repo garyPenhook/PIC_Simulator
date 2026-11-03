@@ -1,0 +1,3 @@
+[[i2c]]
+address = 0x50
+data = [0xCA, 0xFE]

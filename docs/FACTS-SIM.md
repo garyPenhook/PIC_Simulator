@@ -283,3 +283,32 @@ sends are printed by `basil-sim` as `spiN: ...`. Chip select (SS_out, SSET), SS_
 * `[A43]` bytes narrower than 8 bits use the low w bits; SDIP inverts the client's reply; LSBF and CKP/CKE/SMP do not change the data.
 * `[A44]` a TXB write with EN = 0 is dropped.
 * Tests: `crates/picsim/tests/spi.rs`; `tests/sim/spi_q41.bas` runs the library `Spi` module against a client.
+
+## MSSP of the PIC18-Q10 (S5, `periph/mssp.rs`, DS40002043F ch.28)
+
+SPI host and I2C host. Slave modes, the firmware controlled I2C host (SSPM = 1011) and multi-master bus collisions are not modelled (a
+note is printed; BCLxIF is never set). PPS, TRIS and the pins are not modelled: the module runs once SSPEN is set. The outside world comes
+from the stimulus file: `[[spi]]` (same as the Q41 SPI: `port` = MSSP number, `data`, `fill`) answers each exchanged byte, and `[[i2c]]`
+(`port`, `address` 7-bit, `data`, `fill` default FFh; several entries make several clients) are clients on the bus. `basil-sim` prints
+`spiN: ...` (bytes sent) and `i2cN: S 50W 10 Sr 50R CA FE! P`: 7-bit address with R/W, `!` after a byte nobody acknowledged (address or
+write) or after a byte the host answered with NACK; `S`, `Sr`, `P` are the conditions. The bus has pull-ups: an address nobody owns is
+NACKed and a read from nobody gives FFh.
+
+* Sourced: SPI starts on the SSPxBUF write, a write while shifting is dropped with WCOL, BF and SSPxIF at the end, a read of SSPxBUF clears
+  BF (28.2 p.444-445); clocks FOSC/4, /16, /64, FOSC/(4 (SSPxADD + 1)) (SSPxCON1 p.494, Eq. 28-1 p.489); I2C no queuing (28.6 p.474-475),
+  Start / Repeated start / Stop / Acknowledge sequences (28.6.4-28.6.9 p.476-482), transmit BF / ACKSTAT / SSPxIF (28.6.6 p.477-478), receive
+  RCEN / BF / SSPOV (28.6.7 p.479-480), S and P cleared by a disabled module (28.6 p.474), STAT.R/W = transmit in progress (p.492).
+* `[A45]` the SPI transfer starts in the cycle of the write and takes 8 bit times (1, 4, 16 or SSPxADD + 1 cycles a bit); TMR2 / 2 as
+  clock runs as FOSC/4 with a note.
+* `[A46]` I2C TBRG = (SSPxADD + 1) / 2 cycles (BRG at FOSC/2, Fig. 28-40 p.489), sequences of k TBRG rounded up: Start 2 (S at 1), Repeated
+  start 3 (S at 2), Stop 3 (P at 2), byte sent 18 (BF clears at 16, ACKSTAT at 17), byte received 16, Acknowledge 2. The data sheet gives the
+  steps, not the counts.
+* `[A47]` several SSPxCON2 enable bits written at once: the lowest of SEN, RSEN, PEN, RCEN, ACKEN starts, the others are dropped.
+* `[A48]` the first overflow (BF set, SSPOV clear, BOEN = 0) still updates SSPxBUF and sets SSPOV; the data sheet says SSPxBUF is updated
+  only while SSPOV is clear.
+* `[A49]` a client acknowledges its address and every byte written to it; clearing SSPEN or changing SSPM aborts the running operation and
+  clears BF, S, P, R/W (WCOL and SSPOV stay). WCOL and SSPOV are set by hardware only; software writes can clear them. A rejected SSPxBUF
+  write (WCOL) leaves SSPxBUF unchanged. Two `[[i2c]]` clients with the same address on one port are a stimulus error.
+* `[A50]` an SSPxBUF write with SSPEN = 0 only fills the buffer.
+* Tests: `crates/picsim/tests/mssp.rs`; `tests/sim/spi_q10` and `tests/sim/i2c_q10` run the library `Spi` and `I2c` modules (compiled with
+  `basil`) against clients.
