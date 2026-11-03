@@ -1,4 +1,6 @@
 # LEDs and an OLED on the pins the program uses. Run:  basil-sim prog.hex --stim tests/sim/board_example.stim.toml
+fosc_mhz = 64       # the PIC clock; the OLED's scrolling runs on real time
+
 [[led]]
 pin = "RB0"
 name = "heartbeat"
@@ -14,3 +16,4 @@ scl = "RC3"
 sda = "RC4"
 address = 0x3C
 height = 64
+external_vcc = false  # the code must send 8Dh 14h before AFh, or the panel stays dark

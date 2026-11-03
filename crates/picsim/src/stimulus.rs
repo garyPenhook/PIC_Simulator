@@ -38,6 +38,8 @@
 //! mask = 0xFF         # default 0xFF
 //! at = 0
 //!
+//! fosc_mhz = 64       # optional: the PIC clock, for the OLED's scrolling time (default 64)
+//!
 //! [[led]]             # an LED on a pin: on while the pin is an output at the active level
 //! pin = "RB0"         # the PIC pin the LED is wired to
 //! active = "high"     # "high" (default) or "low" (the LED is wired to Vdd through the pin)
@@ -49,6 +51,7 @@
 //! sda = "RC4"         #   (hardware bus: SSPxCLKPPS/SSPxDATPPS and RxyPPS of both pins; see periph/board.rs)
 //! address = 0x3C      # 7 bits, default 0x3C
 //! height = 64         # 64 (default) or 32
+//! external_vcc = false  # true: the module has its own VCC and lights without the charge pump (8Dh 14h)
 //! ```
 //! Pins read 0 until driven. Only input pins (TRISx = 1) with ANSELx = 0 show the level; an output pin shows its latch.
 
@@ -112,10 +115,15 @@ impl Stimulus {
                 }
                 continue;
             }
+            if k == "fosc_mhz" {
+                let f = v.as_float().or_else(|| v.as_integer().map(|i| i as f64)).filter(|f| *f > 0.0 && *f <= 64.0);
+                st.board.fosc_mhz = f.ok_or("fosc_mhz must be a number in 0..64")?;
+                continue;
+            }
             if k == "led" || k == "oled" {
                 for e in v.as_array().ok_or(format!("{k} must be [[{k}]] entries"))? {
                     let t = e.as_table().ok_or(format!("{k} entry must be a table"))?;
-                    let keys: &[&str] = if k == "led" { &["pin", "active", "name"] } else { &["bus", "scl", "sda", "address", "height"] };
+                    let keys: &[&str] = if k == "led" { &["pin", "active", "name"] } else { &["bus", "scl", "sda", "address", "height", "external_vcc"] };
                     for key in t.keys() {
                         if !keys.contains(&key.as_str()) {
                             return Err(format!("{k}: unknown key {key}"));
@@ -148,7 +156,12 @@ impl Stimulus {
                         if height != 64 && height != 32 {
                             return Err("oled.height must be 64 or 32".into());
                         }
-                        st.board.oleds.push(Oled::new(bus, pin("scl")?, pin("sda")?, int("address", 0x3C, 0x7F)?, height));
+                        let mut o = Oled::new(bus, pin("scl")?, pin("sda")?, int("address", 0x3C, 0x7F)?, height);
+                        o.external_vcc = match t.get("external_vcc") {
+                            None => false,
+                            Some(x) => x.as_bool().ok_or("oled.external_vcc must be true or false")?,
+                        };
+                        st.board.oleds.push(o);
                     }
                 }
                 continue;

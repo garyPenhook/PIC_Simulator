@@ -367,13 +367,24 @@ NACKed and a read from nobody gives FFh.
     0/1/2 with the pointer rules of 10.1.3 (p.34-35; page mode returns to the column start address, not 0), column/page range, page
     and column start, start line, display offset and multiplex ratio (Tables 10-1..10-3 p.37-38: COM c shows line c + offset and RAM
     row line + start line, modulo the ratio), segment remap (applies to data written afterwards, 10.1.8), COM scan direction, invert,
-    entire display on, charge pump 8Dh (accepted; the display lights without it, as on modules with an external VCC). Scrolling
-    commands take their arguments and are ignored with a note.
+    entire display on, charge pump, scrolling (below).
+  * Charge pump (application note p.3, 8Dh A[2]; reset = disabled): the panel is lit only with the pump enabled or `external_vcc = true`
+    on the `[[oled]]` (modules with their own VCC); display on without either gives a note and a dark panel (the GUI shows why and has the
+    checkbox). The pump setting counts whenever it is made; the documented order 8Dh 14h AFh is not required `[A65]`.
+  * Scrolling (Table 9-1 p.28-29, 10.2 p.44-46): 26h/27h shift pages start..end right/left one column per step (SEG127 wraps to SEG0),
+    29h/2Ah add E rows per step inside the A3h scroll area (rows move down, the last wraps to the first, A3h note 4 `[A67]`). The RAM is
+    not changed, the picture moves. A step is C[2:0] frames (5, 64, 128, 256, 3, 4, 25, 2); a frame is D x K x MUX display clocks at Fosc
+    (8.3 p.22), D from D5h, K = phase 1 + phase 2 + 50 from D9h (54 at reset), MUX from A8h. `[A66]` Fosc is 370 kHz (Table 13-1 typ) whatever
+    D5h A[7:4] says: the data sheet gives no table for that field. At reset a step of 5 frames is about 47 ms. Time comes from the PIC
+    clock: `fosc_mhz` in the stimulus file (default 64) or the GUI's Fosc box (`Board::fosc_mhz`). 2Eh stops it and the picture returns to the RAM
+    (a note repeats 10.2.3: the RAM must be rewritten); a note is also printed for 2Fh with no setup, an end page below the start page
+    (ignored), a setup while scrolling and RAM writes while scrolling (10.2.1, 10.2.2, 10.2.4).
   * Reads: "Under serial mode, only write operations are allowed" (PDF p.17), "No data read is provided in serial mode operation"
     (9.1, p.33) and "No status read is provided for serial mode" (10.1.21, p.43). The status register of Table 9-2 therefore does not
     exist on I2C. The OLED acknowledges the read address (8.1.5 a: it responds to the address including R/W#) and drives nothing: the
     host reads 0xFF and a note is printed.
 * `[A64]` The data sheet defines no behaviour for the data phase after a read address (only that read mode exists); acknowledging the
   address and leaving SDA high is the model's choice. The 8Dh charge pump command is from the application note at the end of the same PDF.
+* `[A65]` Charge pump order not enforced; `[A66]` Fosc fixed at 370 kHz; `[A67]` vertical scroll direction read from A3h note 4 (the data sheet shows it only in Figure 10-10).
 * Pin changes in the GUI re-attach the part: the OLED starts blank, like a power-up. Reset keeps the wiring.
 * Tests: `crates/picsim/tests/board.rs` (hardware bus through the MSSP model, bit-banged lines driven by the test, wrong-pin cases).

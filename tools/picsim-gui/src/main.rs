@@ -222,6 +222,7 @@ impl eframe::App for App {
             return;
         };
         let pc = m.cpu.pc;
+        m.cpu.p.board.fosc_mhz = f64::from(self.fosc_mhz);
         if !m.cpu.p.board.is_empty() {
             let duty = m.cpu.p.board.take_window();
             self.led_duty = duty;
@@ -398,6 +399,12 @@ impl eframe::App for App {
                             }
                             if ui.small_button("remove").clicked() {
                                 remove = true;
+                            }
+                        });
+                        ui.horizontal(|ui| {
+                            ui.checkbox(&mut o.external_vcc, "external VCC (no charge pump needed)");
+                            if o.on && !o.powered() {
+                                ui.colored_label(egui::Color32::from_rgb(255, 150, 80), "on, but dark: charge pump (8Dh 14h) not enabled");
                             }
                         });
                         if !o.status.is_empty() {

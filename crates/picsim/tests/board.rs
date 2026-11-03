@@ -104,7 +104,7 @@ fn hardware_i2c_oled_shows_what_the_code_writes() {
     let mut m = hw(HW);
     wire(&mut m, 0x13, 0x14); // RC3, RC4
     run_for(&mut m, 5);
-    hw_send(&mut m, &[0x78, 0x00, 0xAF]);
+    hw_send(&mut m, &[0x78, 0x00, 0x8D, 0x14, 0xAF]); // charge pump on, display on
     hw_send(&mut m, &[0x78, 0x40, 0xFF, 0x01]);
     let o = &m.cpu.p.board.oleds[0];
     assert!(o.on, "status {:?}", o.status);
@@ -178,6 +178,8 @@ fn bit_banged_oled_acknowledges_and_draws() {
     b.start();
     assert!(b.byte(0x78), "address acknowledged");
     assert!(b.byte(0x00));
+    assert!(b.byte(0x8D));
+    assert!(b.byte(0x14)); // charge pump on
     assert!(b.byte(0xAF));
     assert!(b.byte(0xA1)); // segment remap
     b.stop();
@@ -268,4 +270,43 @@ fn hardware_i2c_read_returns_ff() {
     w(&mut m, "SSP1CON2", 0x08); // RCEN
     run_for(&mut m, 120);
     assert_eq!(rd(&mut m, "SSP1BUF"), 0xFF);
+}
+
+#[test]
+fn display_stays_dark_without_the_charge_pump_unless_the_module_has_its_own_vcc() {
+    for (stim, lit) in [(HW.to_string(), false), (format!("{HW}external_vcc = true\n"), true)] {
+        let mut m = hw(&stim);
+        wire(&mut m, 0x13, 0x14);
+        run_for(&mut m, 5);
+        hw_send(&mut m, &[0x78, 0x00, 0xAF]);
+        hw_send(&mut m, &[0x78, 0x40, 0xFF]);
+        let o = &m.cpu.p.board.oleds[0];
+        assert!(o.on);
+        assert_eq!(o.pixel(0, 0), lit);
+        assert_eq!(m.cpu.notes.iter().any(|n| n.contains("charge pump")), !lit, "{:?}", m.cpu.notes);
+    }
+}
+
+#[test]
+fn scrolling_runs_on_the_pic_clock_time() {
+    // 4 MHz Fosc: one instruction cycle is 1 us. 26h, pages 0..7, C = 111b (2 frames), then 2Fh.
+    let mut m = hw(&format!("fosc_mhz = 4\n{HW}external_vcc = true\n"));
+    wire(&mut m, 0x13, 0x14);
+    run_for(&mut m, 5);
+    hw_send(&mut m, &[0x78, 0x00, 0xAF]);
+    hw_send(&mut m, &[0x78, 0x40, 0x01]);
+    hw_send(&mut m, &[0x78, 0x00, 0x26, 0, 0, 7, 7, 0, 0xFF, 0x2F]);
+    assert!(m.cpu.p.board.oleds[0].is_scrolling());
+    assert!(m.cpu.p.board.oleds[0].pixel(0, 0));
+    // A step is 2 frames of 54 x 64 clocks at 370 kHz = 18.7 ms = 18 683 cycles.
+    poll(&mut m, 18_000);
+    assert!(m.cpu.p.board.oleds[0].pixel(0, 0), "not yet");
+    poll(&mut m, 1_000);
+    let o = &m.cpu.p.board.oleds[0];
+    assert!(!o.pixel(0, 0) && o.pixel(1, 0), "one column to the right");
+    // The same time at 64 MHz is 16 times fewer ms: far more steps.
+    m.cpu.p.board.fosc_mhz = 64.0;
+    poll(&mut m, 18_683);
+    let o = &m.cpu.p.board.oleds[0];
+    assert!(o.pixel(2, 0) || o.pixel(1, 0), "{}", o.ascii());
 }
