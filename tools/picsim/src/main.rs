@@ -142,6 +142,11 @@ fn run() -> Result<ExitCode, String> {
             println!("i2c{n}: {}", ev.join(" "));
         }
     }
+    if !m.cpu.p.pin_log.is_empty() {
+        // Peripheral-driven pins (RxyPPS): time in Fosc ticks (4 per instruction cycle) and the new level.
+        let ev: Vec<String> = m.cpu.p.pin_log.iter().map(|t| format!("R{}{}={}@{}", t.1 as char, t.2, u8::from(t.3), t.0)).collect();
+        println!("pins: {}", ev.join(" "));
+    }
     for n in &m.cpu.notes {
         eprintln!("note: {n}");
     }

@@ -24,6 +24,7 @@ use crate::mem::{DataMem, Special};
 use devdesc::Device;
 use std::collections::{BTreeSet, VecDeque};
 
+mod ccp;
 mod flash;
 mod nvm;
 mod nvmq;
@@ -31,6 +32,7 @@ mod i2cq;
 mod mssp;
 mod quart;
 mod spi;
+use ccp::Ccp;
 use i2cq::I2cQ;
 use mssp::Mssp;
 use nvm::Nvm;
@@ -114,6 +116,8 @@ const MSSP_END: u8 = MSSP0 + 2 * mssp::HOOKS;
 /// Q41 I2C n (0-based) uses hook codes I2CQ0 + i2cq::HOOKS * n + sub-code (see `i2cq.rs`); at most 2.
 const I2CQ0: u8 = 202;
 const I2CQ_END: u8 = I2CQ0 + 2 * i2cq::HOOKS;
+/// Q10 CCP n (0-based) uses hook code CCP0 + n (CCPxCON only, see `ccp.rs`); at most 2.
+const CCP0: u8 = 224;
 const NVM0: u8 = 240;
 const NVMQ0: u8 = 242;
 
@@ -265,8 +269,31 @@ pub struct Periph {
     /// What the I2C hosts put on the bus: (MSSP number, cycle, event).
     pub i2c_log: Vec<(u8, u64, I2cEv)>,
     pub notes: BTreeSet<String>,
+    ccps: Vec<Ccp>,
+    /// A compare match with TMR1 clearing happened on the last clock: TMR1 goes to 0 on the next one `[A61]`.
+    t1_clr: bool,
+    ccptmrs: Option<usize>,
+    /// RxyPPS registers: (register, index into `ports`, pin).
+    ppsout: Vec<(usize, usize, u8)>,
+    /// Levels of the PPS output sources (bit = source code of Table 18-2).
+    sig: u32,
+    /// Output source changes scheduled for a later time (CCP compare and PWM edges).
+    sched: Vec<Sched>,
+    /// Changes of the pins driven by a peripheral through RxyPPS: (time in Fosc ticks = 4 * cycle + quarter,
+    /// port letter, pin, level). Only pins whose TRIS bit is clear at the time of the change are logged.
+    pub pin_log: Vec<(u64, u8, u8, bool)>,
     /// Cycle of the latest flag set by `sync` since the core last looked (`take_event`).
     event: Option<u64>,
+}
+
+/// A change of a PPS output source at `tick` (Fosc ticks): `act` 0 clears, 1 sets, 2 toggles; `flag` is set with it.
+/// `pwm` marks edges that stop when Timer2 is switched off.
+struct Sched {
+    tick: u64,
+    code: u8,
+    act: u8,
+    flag: Option<Flag>,
+    pwm: bool,
 }
 
 /// Cycle on which clock number `j` (1-based) of a prescaler `1 << sh` that held `pre0` ticks arrives, when the
@@ -313,7 +340,7 @@ impl Periph {
 
     /// Find the timers the part has and mark their registers as hooked in `m`.
     pub fn bind(dev: &Device, m: &mut DataMem) -> Periph {
-        let mut p = Periph { ports: Vec::new(), drive: Vec::new(), t0: None, t1: None, t2: None, uarts: Vec::new(), quarts: Vec::new(), spis: Vec::new(), mssps: Vec::new(), i2cqs: Vec::new(), adc: None, nvm: None, nvmq: None, stall: 0, fvr: None, tx: Vec::new(), spi_tx: Vec::new(), i2c_log: Vec::new(), notes: BTreeSet::new(), event: None };
+        let mut p = Periph { ports: Vec::new(), drive: Vec::new(), t0: None, t1: None, t2: None, uarts: Vec::new(), quarts: Vec::new(), spis: Vec::new(), mssps: Vec::new(), i2cqs: Vec::new(), adc: None, nvm: None, nvmq: None, stall: 0, fvr: None, tx: Vec::new(), spi_tx: Vec::new(), i2c_log: Vec::new(), notes: BTreeSet::new(), ccps: Vec::new(), t1_clr: false, ccptmrs: None, ppsout: Vec::new(), sig: 0, sched: Vec::new(), pin_log: Vec::new(), event: None };
         let mut hook = |a: usize, k: u8| m.special[a] = Special::Hook(k);
         if let (Some(l), Some(h), Some(c0), Some(c1), Some(flag)) =
             (addr(dev, "TMR0L"), addr(dev, "TMR0H"), addr(dev, "T0CON0"), addr(dev, "T0CON1"), Flag::find(dev, "TMR0IF"))
@@ -397,6 +424,22 @@ impl Periph {
             hook(n.con1, NVMQ0 + nvmq::CON1);
             hook(n.lock, NVMQ0 + nvmq::LOCK);
             p.nvmq = Some(n);
+        }
+        if addr(dev, "ADCPCON").is_none() && addr(dev, "PRODL").is_some() {
+            p.ccptmrs = addr(dev, "CCPTMRS");
+            for n in 1..=2u8 {
+                if let Some(c) = Ccp::find(dev, n) {
+                    hook(c.con, CCP0 + p.ccps.len() as u8 * ccp::HOOKS);
+                    p.ccps.push(c);
+                }
+            }
+        }
+        for (i, port) in p.ports.iter().enumerate() {
+            for bit in 0..8u8 {
+                if let Some(a) = addr(dev, &format!("R{}{bit}PPS", port.letter as char)) {
+                    p.ppsout.push((a, i, bit));
+                }
+            }
         }
         if let Some(a) = addr(dev, "FVRCON") {
             hook(a, FVR0);
@@ -586,8 +629,121 @@ impl Periph {
     }
 
     /// Bring every running timer to cycle `now`.
+    /// Bring every model to cycle `now`. Capture edges on the CCPx pins inside the span are handled at their own cycle
+    /// so that TMR1 is read at that cycle.
     pub fn sync(&mut self, m: &mut DataMem, now: u64) {
+        loop {
+            let mut best: Option<(u64, usize)> = None;
+            for (i, c) in self.ccps.iter().enumerate() {
+                let Some(reg) = c.pps else { continue };
+                if !c.en(m) || !(3..=7).contains(&c.mode(m)) || ccp::timer_of(self.ccptmrs, m, c.n, false) != 1 || m.mem[c.cap] & 15 != 0 {
+                    continue;
+                }
+                for &(at, ..) in &self.drive {
+                    if at > c.scan && at <= now && best.is_none_or(|b| (at, i) < b) && self.pps_pin(m, reg, at) != self.pps_pin(m, reg, at - 1) {
+                        best = Some((at, i));
+                        break;
+                    }
+                }
+            }
+            let Some((e, i)) = best else { break };
+            self.sync_core(m, e);
+            self.capture(m, i, e);
+        }
+        self.sync_core(m, now);
+        for c in &mut self.ccps {
+            c.scan = now;
+        }
+    }
+
+    /// Capture event of CCP `i` at the input edge on cycle `e` (TMR1 is already at cycle `e`).
+    fn capture(&mut self, m: &mut DataMem, i: usize, e: u64) {
+        let c = &self.ccps[i];
+        let reg = c.pps.unwrap();
+        let rising = self.pps_pin(m, reg, e);
+        let mode = c.mode(m);
+        let c = &mut self.ccps[i];
+        c.scan = e;
+        let hit = match mode {
+            3 => true,
+            4 => !rising,
+            5 => rising,
+            _ if rising => {
+                c.edges += 1;
+                if c.edges == if mode == 6 { 4 } else { 16 } {
+                    c.edges = 0;
+                    true
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        };
+        if hit && let Some(t) = &self.t1 {
+            m.mem[c.rl] = t.cnt as u8;
+            m.mem[c.rh] = (t.cnt >> 8) as u8;
+            c.flag.set(m);
+            self.raised(e);
+        }
+    }
+
+    /// Change the PPS output source `code` (`act` 0 clear, 1 set, 2 toggle) at `tick` Fosc ticks, log the pins it drives
+    /// and update the OUT bit of the CCP that owns the source.
+    fn set_sig(&mut self, m: &mut DataMem, code: u8, act: u8, tick: u64) {
+        let cur = self.sig >> code & 1 != 0;
+        let new = match act {
+            0 => false,
+            1 => true,
+            _ => !cur,
+        };
+        if new == cur {
+            return;
+        }
+        self.sig ^= 1 << code;
+        for c in self.ccps.iter().filter(|c| c.sig == code) {
+            if new { m.mem[c.con] |= 0x20 } else { m.mem[c.con] &= !0x20 }
+        }
+        for &(reg, pi, bit) in &self.ppsout {
+            if m.mem[reg] & 31 == code && m.mem[self.ports[pi].tris] >> bit & 1 == 0 {
+                self.pin_log.push((tick, self.ports[pi].letter, bit, new));
+            }
+        }
+    }
+
+    /// Apply the scheduled output changes that are due by cycle `now`, in time order.
+    fn apply_sched(&mut self, m: &mut DataMem, now: u64, ev: &mut Vec<u64>) {
+        self.sched.sort_by_key(|s| s.tick);
+        let due = self.sched.iter().take_while(|s| s.tick / 4 <= now).count();
+        for s in self.sched.drain(..due).collect::<Vec<_>>() {
+            self.set_sig(m, s.code, s.act, s.tick);
+            if let Some(f) = s.flag {
+                f.set(m);
+                ev.push(s.tick / 4);
+            }
+        }
+    }
+
+    fn sync_core(&mut self, m: &mut DataMem, now: u64) {
         let mut ev: Vec<u64> = Vec::new();
+        // Compare CCPs on Timer1: (index, CCPR, MODE).
+        let comps: Vec<(usize, u16, u8)> = self
+            .ccps
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.en(m) && matches!(c.mode(m), 1 | 2 | 8 | 9 | 10 | 11))
+            .filter_map(|(i, c)| {
+                if ccp::timer_of(self.ccptmrs, m, c.n, false) == 1 {
+                    Some((i, c.ccpr(m), c.mode(m)))
+                } else {
+                    self.notes.insert(format!("CCP{} uses a timer other than Timer1/Timer2 (CCPTMRS); it is not modelled", c.n));
+                    None
+                }
+            })
+            .collect();
+        let mut hits: Vec<Sched> = Vec::new();
+        let mut periods: Vec<u64> = Vec::new();
+        let mut t2_pr = 0u8;
+        let mut t2_sh = 0u32;
         if let Some(t) = &mut self.t0 {
             let (base, pre0) = (t.last, t.pre);
             let dt = now - t.last;
@@ -642,13 +798,67 @@ impl Periph {
                     let clocks = prescale(&mut t.pre, u32::from((con >> 4) & 3), ticks);
                     let sh = u32::from((con >> 4) & 3);
                     let ratio = if cs == 2 { 4 } else { 1 };
-                    let total = u64::from(t.cnt) + clocks;
-                    if total >= 65536 {
-                        t.flag.set(m);
-                        let last_wrap = (total / 65536) * 65536 - u64::from(t.cnt);
-                        ev.push(at(base, pre0, sh, last_wrap, ratio));
+                    if comps.is_empty() {
+                        if std::mem::take(&mut self.t1_clr) && clocks > 0 {
+                            t.cnt = 0;
+                        }
+                        let total = u64::from(t.cnt) + clocks;
+                        if total >= 65536 {
+                            t.flag.set(m);
+                            let last_wrap = (total / 65536) * 65536 - u64::from(t.cnt);
+                            ev.push(at(base, pre0, sh, last_wrap, ratio));
+                        }
+                        t.cnt = total as u16;
+                    } else {
+                        // Step from event to event: the next compare match or the rollover, whichever comes first.
+                        let (mut left, mut done) = (clocks, 0u64);
+                        while left > 0 {
+                            if self.t1_clr {
+                                self.t1_clr = false;
+                                t.cnt = 0;
+                                left -= 1;
+                                done += 1;
+                                continue;
+                            }
+                            let to_wrap = 65536 - u64::from(t.cnt);
+                            let to_match = comps
+                                .iter()
+                                .map(|&(_, r, _)| {
+                                    let d = u64::from(r.wrapping_sub(t.cnt));
+                                    if d == 0 { 65536 } else { d }
+                                })
+                                .min()
+                                .unwrap();
+                            let step = left.min(to_wrap).min(to_match);
+                            let wrapped = step == to_wrap;
+                            t.cnt = t.cnt.wrapping_add(step as u16);
+                            done += step;
+                            left -= step;
+                            let cyc = at(base, pre0, sh, done, ratio);
+                            if wrapped {
+                                t.flag.set(m);
+                                ev.push(cyc);
+                            }
+                            let mut clear = false;
+                            for &(i, r, mode) in &comps {
+                                if r == t.cnt {
+                                    // [A61]
+                                    let act = match mode {
+                                        8 => 1,
+                                        9 => 0,
+                                        1 | 2 => 2,
+                                        _ => 3, // pulse modes: flag only [A63]
+                                    };
+                                    if act == 3 {
+                                        self.notes.insert("CCP compare pulse output (MODE 1010/1011) does not drive the pin".into());
+                                    }
+                                    hits.push(Sched { tick: 4 * cyc, code: self.ccps[i].sig, act, flag: Some(self.ccps[i].flag), pwm: false });
+                                    clear |= matches!(mode, 1 | 11);
+                                }
+                            }
+                            self.t1_clr = clear;
+                        }
                     }
-                    t.cnt = total as u16;
                 }
             }
             if m.mem[t.con] & 2 == 0 {
@@ -677,6 +887,8 @@ impl Periph {
                     let pr = m.mem[t.pr];
                     let mut left = clocks;
                     let sh = u32::from((con >> 4) & 7);
+                    t2_pr = pr;
+                    t2_sh = sh;
                     let ratio = if cs == 2 { 4 } else { 1 };
                     while left > 0 {
                         // Jump straight to the next period end when no event can happen before it.
@@ -690,6 +902,9 @@ impl Periph {
                         left -= 1;
                         if t.cnt == pr {
                             t.cnt = 0;
+                            if cs == 1 {
+                                periods.push(at(base, pre0, sh, j, ratio));
+                            }
                             if one_shot {
                                 m.mem[t.con] &= 0x7F;
                                 t.pre = 0;
@@ -713,6 +928,30 @@ impl Periph {
             }
             m.mem[t.tmr] = t.cnt;
         }
+        // PWM: the pin sets at each Timer2 period match and clears when the 10-bit time base reaches the duty.
+        for &c in &periods {
+            for ccp in &self.ccps {
+                if !ccp.en(m) || ccp.mode(m) < 12 {
+                    continue;
+                }
+                if ccp::timer_of(self.ccptmrs, m, ccp.n, true) != 2 {
+                    self.notes.insert(format!("CCP{} PWM uses a timer other than Timer2 (CCPTMRS); it is not modelled", ccp.n));
+                    continue;
+                }
+                let duty = u64::from(ccp.duty(m));
+                let pulse = duty << t2_sh; // Tosc ticks: CCPR * TOSC * prescale
+                let period = (u64::from(t2_pr) + 1) * 4 << t2_sh;
+                if duty == 0 {
+                    continue;
+                }
+                hits.push(Sched { tick: 4 * c, code: ccp.sig, act: 1, flag: None, pwm: true });
+                if pulse < period {
+                    hits.push(Sched { tick: 4 * c + pulse, code: ccp.sig, act: 0, flag: Some(ccp.flag), pwm: true }); // [A62]
+                }
+            }
+        }
+        self.sched.extend(hits);
+        self.apply_sched(m, now, &mut ev);
         if let Some(a) = &mut self.adc {
             while let Some((e, v)) = a.end.filter(|(e, _)| *e <= now) {
                 a.end = None;
@@ -976,7 +1215,24 @@ impl Periph {
                 t.post = 0;
                 m.mem[t.tmr] = v;
             }
+            CCP0..=225 => {
+                let i = usize::from(k - CCP0) / usize::from(ccp::HOOKS);
+                let (con, sig) = (self.ccps[i].con, self.ccps[i].sig);
+                let old = m.mem[con];
+                m.mem[con] = v & 0xDF | old & 0x20; // OUT is read only
+                self.ccps[i].edges = 0;
+                if v & 0x80 == 0 || v & 15 == 0 {
+                    // Clearing the module forces the output latch low (22.3.1).
+                    self.sched.retain(|s| s.code != sig);
+                    self.set_sig(m, sig, 0, 4 * now);
+                } else if (v ^ old) & 15 != 0 {
+                    self.sched.retain(|s| s.code != sig);
+                }
+            }
             T2C => {
+                if v & 0x80 == 0 {
+                    self.sched.retain(|s| !s.pwm); // a stopped Timer2 freezes the PWM pins
+                }
                 let t = self.t2.as_mut().unwrap();
                 m.mem[t.con] = v;
                 t.pre = 0;
@@ -1064,7 +1320,15 @@ impl Periph {
         }
         let tris = m.mem[p.tris];
         let ana = p.ansel.map_or(0, |a| m.mem[a]);
-        (m.mem[p.lat] & !tris | ext & tris & !ana) & m.implemented[p.port]
+        let mut v = m.mem[p.lat] & !tris | ext & tris & !ana;
+        for &(reg, pi, bit) in &self.ppsout {
+            // A pin driven by a modelled peripheral source (RxyPPS, TRIS clear) shows the source level, not the latch.
+            let code = m.mem[reg] & 31;
+            if pi == i && tris >> bit & 1 == 0 && self.ccps.iter().any(|c| c.sig == code) {
+                v = v & !(1 << bit) | u8::from(self.sig >> code & 1 != 0) << bit;
+            }
+        }
+        v & m.implemented[p.port]
     }
 
     /// Level of the pin a PPS input register selects (PORT field at bits 5:3, PIN at 2:0).

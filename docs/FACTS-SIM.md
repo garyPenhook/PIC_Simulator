@@ -328,3 +328,19 @@ NACKed and a read from nobody gives FFh.
   stretching by a client are not modelled.
 * Tests: `crates/picsim/tests/mssp.rs`; `tests/sim/spi_q10` and `tests/sim/i2c_q10` run the library `Spi` and `I2c` modules (compiled with
   `basil`) against clients.
+
+## Q10 CCP1/CCP2 and the pin-output layer (`periph/ccp.rs`, DS40002043F ch.22 p.345-359, 18.2 p.286-287)
+
+* Pin-output layer: `RxyPPS` selects a source (Table 18-2; CCP1 = 0x05, CCP2 = 0x06). A pin with a modelled source and TRIS clear
+  shows the source level on PORTx and every change goes to `Periph::pin_log` as (Fosc tick = 4 * cycle + quarter, port, pin, level);
+  `basil-sim` prints it as `pins:`. Changes made to PPS/TRIS while a source is already high or low are not logged. Other sources
+  (EUSART, MSSP, CWG, ...) are not driven by this layer yet and the pin keeps showing its latch.
+* Modelled: capture (CTS = 0000, the CCPxPPS pin, MODE 3-7, 1:4 and 1:16 prescaler), compare (MODE 1, 2, 8, 9), standard PWM
+  (pin set at the Timer2 period match, cleared after CCPR * TOSC * prescale; FMT alignment; duty 0 never sets). Timer1 is the
+  capture/compare timer and Timer2 (FOSC/4) the PWM timer; other CCPTMRS selections give a note.
+* `[A61]` Compare match on the Timer1 clock that makes TMR1 = CCPRx; with clearing (MODE 1, 11) TMR1 goes to 0 on the next clock,
+  so the period is CCPRx + 1 clocks.
+* `[A62]` In PWM mode CCPxIF is set when the pin clears.
+* `[A63]` Pulse output (MODE 10, 11) sets the flag (and clears TMR1 for 11) but does not drive the pin: the pulse width is not documented.
+* Not modelled: capture sources other than the pin, the ADC auto-conversion trigger from a compare, Timers 3-6, PWM3/PWM4.
+* Tests: `crates/picsim/tests/ccp.rs`.
