@@ -12,3 +12,4 @@ path = "src/main.rs"
 picsim = { path = "../../crates/picsim" }
 devdesc = { path = "../../crates/devdesc" }
 eframe = "0.37"
+rfd = "0.17.2"
