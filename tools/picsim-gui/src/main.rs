@@ -40,6 +40,8 @@ struct App {
     src_view: bool,
     /// The last source line the PC was on (generated code has none; the view stays there).
     last_src: Option<(PathBuf, u32)>,
+    /// Data memory when the last Step/Run began: variables that differ are marked as changed.
+    snap: Option<Vec<u8>>,
 }
 
 fn list_devices(dir: &PathBuf) -> Vec<String> {
@@ -88,6 +90,7 @@ impl App {
             sources: std::collections::HashMap::new(),
             src_view: true,
             last_src: None,
+            snap: None,
         };
         if hex.is_some() {
             a.load();
@@ -97,29 +100,17 @@ impl App {
 
     /// Opens a program given as a .hex, or as a .elf (the .hex built with it is loaded; the ELF gives the source lines).
     fn open_program(&mut self, f: &std::path::Path) {
-        if f.extension().is_some_and(|e| e.eq_ignore_ascii_case("elf")) {
-            let stem = f.file_stem().unwrap_or_default();
-            let cands = [f.with_extension("hex"), f.parent().map(|d| d.join("dist").join(stem).with_extension("hex")).unwrap_or_default()];
-            match cands.into_iter().find(|h| h.is_file()) {
-                Some(h) => self.hex_path = h.display().to_string(),
-                None => {
-                    self.msg = format!("no .hex beside {}", f.display());
-                    return;
-                }
-            }
-        } else {
-            self.hex_path = f.display().to_string();
-        }
+        self.hex_path = f.display().to_string();
         self.load();
     }
 
     fn load(&mut self) {
         self.running = false;
         self.last_stop = None;
-        let res = (|| -> Result<Machine, String> {
+        let res = (|| -> Result<(Machine, String), String> {
             let dev = devdesc::Device::load(&self.devices_dir.join(format!("{}.toml", self.device))).map_err(|e| e.to_string())?;
             let mut m = Machine::new(dev)?;
-            let p = PathBuf::from(&self.hex_path);
+            let p = picsim::lines::program_hex(std::path::Path::new(self.hex_path.trim()))?; // a .elf loads its .hex
             m.load_hex(&std::fs::read_to_string(&p).map_err(|e| format!("{}: {e}", p.display()))?)?;
             for ext in ["S", "_basil.S"] {
                 let asm = if ext == "S" { p.with_extension("S") } else { p.with_file_name(format!("{}_basil.S", p.file_stem().unwrap_or_default().to_string_lossy())) };
@@ -132,13 +123,24 @@ impl App {
                 let f = PathBuf::from(self.stim_path.trim());
                 m.load_stimulus(&std::fs::read_to_string(&f).map_err(|e| format!("{}: {e}", f.display()))?).map_err(|e| format!("{}: {e}", f.display()))?;
             }
-            Ok(m)
+            // Routines, variables and source lines from the ELF: <stem>.elf beside the hex, or one folder up (basil writes the hex into dist/).
+            let note = match picsim::debuginfo::elf_for(std::path::Path::new(self.hex_path.trim())) {
+                Some(e) => match m.load_elf(&e) {
+                    Ok(()) => {
+                        self.elf_dir = e.parent().map(PathBuf::from).unwrap_or_default();
+                        if m.debug.lines.source_files().is_empty() { " - ELF has no BASIC lines (build with basil -g)".to_string() } else { String::new() }
+                    }
+                    Err(er) => format!(" - {er}"),
+                },
+                None => " - no .elf beside the hex: no source view or variables".to_string(),
+            };
+            Ok((m, note))
         })();
         match res {
-            Ok(m) => {
+            Ok((m, note)) => {
                 self.labels.clear();
                 for (n, a) in &m.syms {
-                    if m.cpu.prog.get(*a as usize).is_some_and(|b| *b != 0xFF) && !n.starts_with("T_") {
+                    if m.cpu.prog.get(*a as usize).is_some_and(|b| *b != 0xFF) && !n.starts_with("T_") && !m.debug.vars.iter().any(|v| v.scope.is_none() && v.name == *n) {
                         self.labels.entry(*a).or_insert_with(|| n.clone());
                     }
                 }
@@ -148,37 +150,36 @@ impl App {
                 } else {
                     self.board_cfg = m.cpu.p.board.fresh(); // the stimulus file wired them
                 }
-                // The line table: <stem>.elf beside the hex, or one folder up (basil leaves the hex in dist/).
-                let hp = PathBuf::from(&self.hex_path);
-                let elf = [hp.with_extension("elf"), hp.parent().and_then(|d| d.parent()).map(|d| d.join(hp.file_stem().unwrap_or_default()).with_extension("elf")).unwrap_or_default()].into_iter().find(|e| e.is_file());
                 self.sources.clear();
                 self.last_src = None;
-                let mut note = String::new();
-                match elf.as_ref().map(|e| std::fs::read(e).map_err(|e| e.to_string()).and_then(|b| LineMap::from_elf(&b))) {
-                    Some(Ok(l)) if !l.source_files().is_empty() => {
-                        self.lines = l;
-                        self.elf_dir = elf.as_ref().and_then(|e| e.parent()).map(PathBuf::from).unwrap_or_default();
-                    }
-                    Some(Ok(_)) => {
-                        self.lines = LineMap::default();
-                        note = " - ELF has no BASIC lines (build with basil -g)".into();
-                    }
-                    Some(Err(e)) => {
-                        self.lines = LineMap::default();
-                        note = format!(" - ELF: {e}");
-                    }
-                    None => {
-                        self.lines = LineMap::default();
-                        note = " - no .elf beside the hex: no source view".into();
-                    }
+                self.snap = None;
+                self.lines = m.debug.lines.clone();
+                if !m.debug.vars.is_empty() {
+                    self.tab = 4; // the Variables tab
                 }
-                self.msg = format!("loaded {} ({} symbols){note}", self.hex_path, m.syms.len());
+                self.msg = format!("loaded {} ({} symbols, {} variables){note}", self.hex_path, m.syms.len(), m.debug.vars.len());
                 self.m = Some(m);
             }
             Err(e) => {
                 self.msg = e;
                 self.m = None;
             }
+        }
+    }
+
+    fn snapshot(&mut self) {
+        self.snap = self.m.as_ref().map(|m| m.cpu.m.mem.clone());
+    }
+
+    /// Steps to the next BASIC line. `over` runs calls (and interrupts) to completion; `out` runs until the current
+    /// routine returns. Stops early at a breakpoint, at `__halt`, or after a million instructions.
+    fn step_line(&mut self, over: bool, out: bool) {
+        self.snapshot();
+        let Some(m) = &mut self.m else { return };
+        match m.step_line(over, out, 1_000_000) {
+            None => {}
+            Some(Stop::Cycles) => self.msg = "no stop within a million instructions".into(),
+            Some(s) => self.last_stop = Some(s),
         }
     }
 
@@ -232,7 +233,7 @@ impl eframe::App for App {
                         ui.selectable_value(&mut self.device, d.clone(), d);
                     }
                 });
-                ui.add(egui::TextEdit::singleline(&mut self.hex_path).hint_text("path to .hex").desired_width(320.0));
+                ui.add(egui::TextEdit::singleline(&mut self.hex_path).hint_text("path to .hex or .elf").desired_width(320.0));
                 ui.add(egui::TextEdit::singleline(&mut self.stim_path).hint_text("stimulus .toml (optional)").desired_width(180.0));
                 if ui.button("Browse hex/elf…").clicked()
                     && let Some(f) = rfd::FileDialog::new().add_filter("hex or ELF", &["hex", "elf"]).pick_file()
@@ -250,6 +251,7 @@ impl eframe::App for App {
                 ui.separator();
                 let loaded = self.m.is_some();
                 if ui.add_enabled(loaded && !self.running, egui::Button::new("Run")).clicked() {
+                    self.snapshot();
                     self.running = true;
                     self.last_stop = None;
                 }
@@ -257,11 +259,13 @@ impl eframe::App for App {
                     self.running = false;
                 }
                 if ui.add_enabled(loaded && !self.running, egui::Button::new("Step")).clicked() {
+                    self.snapshot();
                     if let Some(m) = &mut self.m {
                         m.cpu.step();
                     }
                 }
                 if ui.add_enabled(loaded && !self.running, egui::Button::new("Step over")).clicked() {
+                    self.snapshot();
                     if let Some(m) = &mut self.m {
                         let w = u16::from(m.cpu.prog[m.cpu.pc as usize]) | u16::from(m.cpu.prog[m.cpu.pc as usize + 1]) << 8;
                         // CALL (two words) and RCALL step over; everything else is one step
@@ -280,9 +284,20 @@ impl eframe::App for App {
                         }
                     }
                 }
+                let has_src = loaded && !self.lines.is_empty();
+                if ui.add_enabled(has_src && !self.running, egui::Button::new("Line")).on_hover_text("step to the next BASIC line, into calls").clicked() {
+                    self.step_line(false, false);
+                }
+                if ui.add_enabled(has_src && !self.running, egui::Button::new("Line over")).on_hover_text("step to the next BASIC line, over calls").clicked() {
+                    self.step_line(true, false);
+                }
+                if ui.add_enabled(has_src && !self.running, egui::Button::new("Out")).on_hover_text("run until this routine returns").clicked() {
+                    self.step_line(false, true);
+                }
                 if ui.add_enabled(loaded, egui::Button::new("Reset")).clicked() {
                     self.running = false;
                     self.last_stop = None;
+                    self.snap = None;
                     if let Some(m) = &mut self.m {
                         m.reset();
                     }
@@ -382,10 +397,28 @@ impl eframe::App for App {
                 row(ui, "Time", format!("{:.3} ms", m.cpu.cycles as f64 / (f64::from(self.fosc_mhz) * 1e6 / 4.0) * 1e3));
             });
             ui.separator();
-            ui.heading("Return stack");
+            ui.heading(if m.debug.funcs.is_empty() { "Return stack" } else { "Call stack" });
             let sp = usize::from(g(r.stkptr) & 0x7F).min(m.cpu.stack.len() - 1);
+            let dbg = &m.debug;
+            // Routine and BASIC line of a program address.
+            let loc = |a: u32| -> String {
+                let f = dbg.func_at(a).map_or("?", |i| dbg.funcs[i].name.as_str());
+                match dbg.lines.lookup(a) {
+                    Some((p, l)) => format!("{f}  {}:{l}", p.file_name().unwrap_or_default().to_string_lossy()),
+                    None => f.to_string(),
+                }
+            };
+            if !dbg.funcs.is_empty() {
+                ui.monospace(format!("> {}", loc(pc)));
+            }
             for i in (1..=sp).rev().take(12) {
-                ui.monospace(format!("{i:>3}  {:06X}", m.cpu.stack[i]));
+                // The return address follows the CALL; look at the instruction before it.
+                let ret = m.cpu.stack[i];
+                if dbg.funcs.is_empty() {
+                    ui.monospace(format!("{i:>3}  {ret:06X}"));
+                } else {
+                    ui.monospace(format!("{i:>3}  {}", loc(ret.saturating_sub(2))));
+                }
             }
             if !m.cpu.m.unmodelled.is_empty() || !m.cpu.notes.is_empty() {
                 ui.separator();
@@ -400,7 +433,7 @@ impl eframe::App for App {
         });
         egui::Panel::right("data").default_size(360.0).show(ui, |ui| {
             ui.horizontal(|ui| {
-                for (i, t) in ["Memory", "SFRs", "Watch", "Board"].iter().enumerate() {
+                for (i, t) in ["Memory", "SFRs", "Watch", "Board", "Variables"].iter().enumerate() {
                     ui.selectable_value(&mut self.tab, i, *t);
                 }
             });
@@ -438,6 +471,33 @@ impl eframe::App for App {
                         self.board_cfg = m.cpu.p.board.fresh();
                     }
                 }
+                4 => {
+                    if m.debug.vars.is_empty() {
+                        ui.label("No variable information. Build with basil -g and keep the .elf beside the .hex.");
+                    } else {
+                        let f = m.debug.func_at(pc);
+                        ui.label(match f {
+                            Some(i) => format!("in {}", m.debug.funcs[i].name),
+                            None => "in start-up code (globals only)".to_string(),
+                        });
+                        let mem = &m.cpu.m.mem;
+                        let snap = self.snap.as_ref();
+                        egui::ScrollArea::vertical().show(ui, |ui| {
+                            egui::Grid::new("vars").num_columns(3).striped(true).show(ui, |ui| {
+                                for v in m.debug.visible(f) {
+                                    let a = v.addr as usize;
+                                    let changed = snap.is_some_and(|s| s.get(a..a + v.bytes as usize) != mem.get(a..a + v.bytes as usize));
+                                    let col = if changed { egui::Color32::from_rgb(255, 170, 60) } else { ui.visuals().text_color() };
+                                    ui.colored_label(col, format!("{}{}", v.name, if v.param { " (arg)" } else { "" }));
+                                    ui.weak(format!("{} @{:03X}", v.ty, v.addr));
+                                    ui.add(egui::Label::new(egui::RichText::new(v.show(mem)).monospace().color(col)).wrap());
+                                    ui.end_row();
+                                }
+                            });
+                        });
+                        ui.small("orange: changed since the last Step or Run");
+                    }
+                }
                 _ => {
                     ui.horizontal(|ui| {
                         ui.add(egui::TextEdit::singleline(&mut self.watch_in).hint_text("symbol[:bytes]"));
@@ -449,7 +509,7 @@ impl eframe::App for App {
                     });
                     let mut del = None;
                     for (i, (n, l)) in self.watch.iter().enumerate() {
-                        let addr = m.syms.get(n).copied().or_else(|| m.dev.find_sfr(n).map(|s| s.addr));
+                        let addr = m.syms.get(n).copied().or_else(|| m.debug.vars.iter().find(|v| v.scope.is_none() && v.name == *n).map(|v| v.addr)).or_else(|| m.dev.find_sfr(n).map(|s| s.addr));
                         ui.horizontal(|ui| {
                             match addr {
                                 Some(a) => {

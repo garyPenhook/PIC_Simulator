@@ -100,10 +100,19 @@ yet), PIC16 single vector with automatic context save. Vector addresses from `[v
   clicking a disassembly line, registers, return stack, memory and SFR views, watch list, time at a given Fosc.
 * GUI file choice: Browse hex/elf… and Stim… (file dialogs), or drag a `.hex`, `.elf` or stimulus `.toml` onto the window. An `.elf`
   loads the `.hex` beside it (or in `dist/`). The Board panel (LEDs, OLED) is available before a program is loaded and its wiring is kept.
-* GUI source view: the program is compiled with `basil -g`; the GUI reads `<stem>.elf` beside the hex (or one folder up) and
-  `crates/picsim/src/lines.rs` turns its `.debug_line` into address -> BASIC line (`.bas` files only; generated assembly has no line).
-  The Source pane highlights the line the PC is on (library files such as `i2c.bas` included), follows the PC, and a click sets a breakpoint
-  at the line's lowest address. Without `-g` only the disassembly is shown. The optimizer can merge lines, so some lines have no code.
+* Debug information (`crates/picsim/src/debuginfo.rs`, `lines.rs`): build with `basil -g`; the simulator reads `<stem>.elf` beside the hex
+  (or one folder up; basil writes the hex into `dist/`) with `gimli`. From the compiler's own DWARF unit (producer `basil`): routines
+  with address ranges, `__halt` (an empty range, so `--until __halt` and the GUI's run-to-halt work without the `.S` file), global
+  variables, and each routine's parameters and locals, with type (name, size, signedness, array length). From `.debug_line`: address ->
+  BASIC line (`.bas` files only; generated assembly has no line). Routines and globals also become `Machine::syms`; the listing's symbols
+  win. `basil-sim` loads the ELF the same way. Without `-g` only the hex and the `.S` symbols exist.
+* GUI debugging: the Source pane highlights the BASIC line the PC is on (library files such as `i2c.bas` included), follows the PC, and a
+  click sets a breakpoint at the line's lowest address. Buttons: Line (into calls), Line over, Out (run until the routine returns),
+  plus Step and Step over for instructions (`Machine::step_line`). The Variables tab lists the globals and the parameters and locals of
+  the routine the PC is in, typed (`Integer` signed, `Char`/`String` as text, `Float` as binary32, arrays), live while running; values
+  that changed since the last Step or Run are orange. The call stack shows the routine and BASIC line of the PC and of every return
+  address. The optimizer can merge lines, so some lines have no code; library routines the compiler inlines run at the caller's stack
+  depth, so Line over cannot skip them.
 * Later: a Debug Adapter Protocol server for `vscode-extension`.
 
 ## Verifying the simulator

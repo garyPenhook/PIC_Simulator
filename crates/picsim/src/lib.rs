@@ -1,6 +1,7 @@
 //! Simulator of the PIC parts Basil supports. See `docs/SIMULATOR-PLAN.md`.
 
 pub mod config;
+pub mod debuginfo;
 pub mod disasm;
 pub mod hex;
 pub mod lines;

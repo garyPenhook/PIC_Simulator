@@ -107,3 +107,15 @@ fn file_list(hdr: &gimli::LineProgramHeader<EndianSlice<'_, LittleEndian>>) -> V
     }
     out
 }
+
+/// The `.hex` to load for a program given as a `.hex` or a `.elf` (the hex written with it: beside the ELF, or in `dist/`).
+pub fn program_hex(path: &std::path::Path) -> Result<PathBuf, String> {
+    if !path.extension().is_some_and(|e| e.eq_ignore_ascii_case("elf")) {
+        return Ok(path.to_path_buf());
+    }
+    let stem = path.file_stem().unwrap_or_default();
+    [path.with_extension("hex"), path.parent().map(|d| d.join("dist").join(stem).with_extension("hex")).unwrap_or_default()]
+        .into_iter()
+        .find(|h| h.is_file())
+        .ok_or_else(|| format!("no .hex beside {}", path.display()))
+}

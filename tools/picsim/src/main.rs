@@ -1,4 +1,4 @@
-//! `basil-sim prog.hex --device 18F16Q41 [--asm prog.S] [--until __halt] [--dump T_R1:2,T_R2] [--bp SYM,SYM] [--bp-max N] [--config] [--stim FILE]`
+//! `basil-sim prog.hex|prog.elf --device 18F16Q41 [--asm prog.S] [--until __halt] [--dump T_R1:2,T_R2] [--bp SYM,SYM] [--bp-max N] [--config] [--stim FILE]`
 //! `--bp` prints the cycle count each time one of the symbols is reached (at most `--bp-max`, default 20).
 
 use picsim::periph::I2cEv;
@@ -50,6 +50,8 @@ fn run() -> Result<ExitCode, String> {
     let hex = hex.ok_or("usage: basil-sim prog.hex --device PART [--asm prog.S] [--until SYM] [--dump A,B:2]")?;
     let dev = devdesc::Device::load(&root.join(format!("{device}.toml"))).map_err(|e| e.to_string())?;
     let mut m = Machine::new(dev)?;
+    let given = hex.clone();
+    let hex = picsim::lines::program_hex(&hex)?;
     m.load_hex(&std::fs::read_to_string(&hex).map_err(|e| format!("{}: {e}", hex.display()))?)?;
     if show_cfg {
         let line: Vec<String> = m.cpu.cfg.fields().map(|(k, v)| format!("{k}={v}")).collect();
@@ -66,6 +68,12 @@ fn run() -> Result<ExitCode, String> {
     let asm = asm.unwrap_or_else(|| hex.with_extension("S"));
     if let Ok(t) = std::fs::read_to_string(&asm) {
         m.load_symbols_from_asm(&t);
+    }
+    // Routines, variables and `__halt` from the ELF when there is one (basil -g); the listing's symbols win.
+    if let Some(e) = picsim::debuginfo::elf_for(&given) {
+        if let Err(e) = m.load_elf(&e) {
+            eprintln!("note: {e}");
+        }
     }
     let stop_at = match &until {
         Some(s) => Some(*m.syms.get(s).ok_or(format!("symbol {s} not found (no {})", asm.display()))?),
