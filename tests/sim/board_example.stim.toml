@@ -1,0 +1,16 @@
+# LEDs and an OLED on the pins the program uses. Run:  basil-sim prog.hex --stim tests/sim/board_example.stim.toml
+[[led]]
+pin = "RB0"
+name = "heartbeat"
+
+[[led]]
+pin = "RB1"
+active = "low"      # wired from Vdd through the pin
+name = "error"
+
+[[oled]]
+bus = "i2c1"        # hardware MSSP1; use "gpio" for bit-banged I2C
+scl = "RC3"
+sda = "RC4"
+address = 0x3C
+height = 64

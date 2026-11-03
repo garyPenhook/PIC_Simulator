@@ -37,16 +37,28 @@
 //! value = 0x21        # levels of the pins in `mask`
 //! mask = 0xFF         # default 0xFF
 //! at = 0
+//!
+//! [[led]]             # an LED on a pin: on while the pin is an output at the active level
+//! pin = "RB0"         # the PIC pin the LED is wired to
+//! active = "high"     # "high" (default) or "low" (the LED is wired to Vdd through the pin)
+//! name = "LED1"       # optional
+//!
+//! [[oled]]            # an SSD1306 OLED (I2C)
+//! bus = "i2c1"        # "i2c1"/"i2c2": the part's hardware I2C host; "gpio": bit-banged on the pins below
+//! scl = "RC3"         # the PIC pins the OLED is wired to; the code must use the same ones
+//! sda = "RC4"         #   (hardware bus: SSPxCLKPPS/SSPxDATPPS and RxyPPS of both pins; see periph/board.rs)
+//! address = 0x3C      # 7 bits, default 0x3C
+//! height = 64         # 64 (default) or 32
 //! ```
 //! Pins read 0 until driven. Only input pins (TRISx = 1) with ANSELx = 0 show the level; an output pin shows its latch.
 
-use crate::periph::{I2cClient, RxStream, SpiClient};
+use crate::periph::{parse_pin, Bus, I2cClient, Led, Oled, RxStream, SpiClient};
 use devdesc::Device;
 
 /// Largest `at`, `bit` and `gap`: 2^32 instruction cycles. Keeps the receiver's cycle arithmetic far from u64 overflow.
 pub const MAX_CYCLES: u64 = 1 << 32;
 
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Debug, Default, PartialEq)]
 pub struct Stimulus {
     pub uart: Vec<(u8, RxStream)>,
     /// (SPI number, client)
@@ -57,6 +69,8 @@ pub struct Stimulus {
     pub adc: Vec<(u8, u64, u16)>,
     /// (port letter, from cycle, pin mask, levels)
     pub pins: Vec<(u8, u64, u8, u8)>,
+    /// LEDs and OLEDs on the board.
+    pub board: crate::periph::Board,
 }
 
 impl Stimulus {
@@ -94,6 +108,47 @@ impl Stimulus {
                     } else {
                         let mask = int("mask", 0xFF)?.unwrap_or(0xFF) as u8;
                         st.pins.push((letter, at, mask, int("value", 0xFF)?.ok_or("port needs value")? as u8));
+                    }
+                }
+                continue;
+            }
+            if k == "led" || k == "oled" {
+                for e in v.as_array().ok_or(format!("{k} must be [[{k}]] entries"))? {
+                    let t = e.as_table().ok_or(format!("{k} entry must be a table"))?;
+                    let keys: &[&str] = if k == "led" { &["pin", "active", "name"] } else { &["bus", "scl", "sda", "address", "height"] };
+                    for key in t.keys() {
+                        if !keys.contains(&key.as_str()) {
+                            return Err(format!("{k}: unknown key {key}"));
+                        }
+                    }
+                    let pin = |n: &str| -> Result<_, String> {
+                        let s = t.get(n).and_then(|x| x.as_str()).ok_or(format!("{k} needs {n} (a pin such as \"RB0\")"))?;
+                        parse_pin(s).ok_or(format!("{k}.{n} = {s:?} is not a pin (RA0..RH7)"))
+                    };
+                    if k == "led" {
+                        let active_high = match t.get("active").map(|x| x.as_str()) {
+                            None | Some(Some("high")) => true,
+                            Some(Some("low")) => false,
+                            _ => return Err("led.active must be \"high\" or \"low\"".into()),
+                        };
+                        let p = pin("pin")?;
+                        let name = t.get("name").and_then(|x| x.as_str()).map_or_else(|| format!("LED{}", st.board.leds.len() + 1), String::from);
+                        st.board.leds.push(Led::new(&name, p, active_high));
+                    } else {
+                        let bus = match t.get("bus").and_then(|x| x.as_str()) {
+                            Some("gpio") => Bus::Gpio,
+                            Some(b) if b.starts_with("i2c") => Bus::I2c(b[3..].parse().map_err(|_| format!("oled.bus {b:?}: i2c1 or i2c2"))?),
+                            _ => return Err("oled.bus must be \"i2c1\", \"i2c2\" or \"gpio\"".into()),
+                        };
+                        let int = |n: &str, d: i64, max: i64| -> Result<u8, String> {
+                            let v = t.get(n).map_or(Ok(d), |x| x.as_integer().ok_or(format!("oled.{n} must be an integer")))?;
+                            if (0..=max).contains(&v) { Ok(v as u8) } else { Err(format!("oled.{n} must be 0..{max}")) }
+                        };
+                        let height = int("height", 64, 64)?;
+                        if height != 64 && height != 32 {
+                            return Err("oled.height must be 64 or 32".into());
+                        }
+                        st.board.oleds.push(Oled::new(bus, pin("scl")?, pin("sda")?, int("address", 0x3C, 0x7F)?, height));
                     }
                 }
                 continue;
@@ -141,7 +196,7 @@ impl Stimulus {
                     if st.i2c.iter().any(|(p, c)| *p == port && c.address == address) {
                         return Err(format!("i2c: address {address:#x} given twice on port {port}"));
                     }
-                    st.i2c.push((port, I2cClient { address, data, fill }));
+                    st.i2c.push((port, I2cClient { address, data, fill, ..Default::default() }));
                 }
                 continue;
             }
@@ -235,6 +290,15 @@ impl Stimulus {
             if !p.i2c_client(port, c) {
                 return Err(format!("{}: no MSSP{port} in the simulator", dev.device.name));
             }
+        }
+        if !self.board.is_empty() {
+            let letters: Vec<u8> = self.board.leds.iter().map(|l| l.pin.0).chain(self.board.oleds.iter().flat_map(|o| [o.scl.0, o.sda.0])).collect();
+            for l in letters {
+                if !p.has_port(l) {
+                    return Err(format!("{}: no PORT{} in the simulator", dev.device.name, l as char));
+                }
+            }
+            p.set_board(self.board);
         }
         for (letter, at, mask, val) in self.pins {
             if !p.pin_feed(letter, at, mask, val) {

@@ -147,6 +147,40 @@ fn run() -> Result<ExitCode, String> {
         let ev: Vec<String> = m.cpu.p.pin_log.iter().map(|t| format!("R{}{}={}@{}", t.1 as char, t.2, u8::from(t.3), t.0)).collect();
         println!("pins: {}", ev.join(" "));
     }
+    for l in &m.cpu.p.board.leds {
+        let ev: Vec<String> = l.changes.iter().take(40).map(|(c, on)| format!("{}@{c}", u8::from(*on))).collect();
+        println!(
+            "led {} ({}, active {}): {}, on {} of {} cycles, {} changes{}{}",
+            l.name,
+            picsim::periph::pin_name(l.pin),
+            if l.active_high { "high" } else { "low" },
+            if l.on { "ON" } else { "off" },
+            l.on_cycles,
+            m.cpu.cycles,
+            l.changes.len(),
+            if ev.is_empty() { "" } else { ": " },
+            ev.join(" ")
+        );
+    }
+    for (i, o) in m.cpu.p.board.oleds.iter().enumerate() {
+        println!(
+            "oled{} SSD1306 {:#04x} on SCL {} SDA {} ({}): {}, {} data bytes{}",
+            i + 1,
+            o.address,
+            picsim::periph::pin_name(o.scl),
+            picsim::periph::pin_name(o.sda),
+            match o.bus {
+                picsim::periph::Bus::Gpio => "bit-banged".to_string(),
+                picsim::periph::Bus::I2c(n) => format!("I2C{n}"),
+            },
+            if o.on { "display on" } else { "display off" },
+            o.writes,
+            if o.status.is_empty() { String::new() } else { format!("; NOT WIRED: {}", o.status) }
+        );
+        if o.on {
+            print!("{}", o.ascii());
+        }
+    }
     for n in &m.cpu.notes {
         eprintln!("note: {n}");
     }

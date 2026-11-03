@@ -336,11 +336,44 @@ NACKed and a read from nobody gives FFh.
   `basil-sim` prints it as `pins:`. Changes made to PPS/TRIS while a source is already high or low are not logged. Other sources
   (EUSART, MSSP, CWG, ...) are not driven by this layer yet and the pin keeps showing its latch.
 * Modelled: capture (CTS = 0000, the CCPxPPS pin, MODE 3-7, 1:4 and 1:16 prescaler), compare (MODE 1, 2, 8, 9), standard PWM
-  (pin set at the Timer2 period match, cleared after CCPR * TOSC * prescale; FMT alignment; duty 0 never sets). Timer1 is the
-  capture/compare timer and Timer2 (FOSC/4) the PWM timer; other CCPTMRS selections give a note.
+  (pin set at the Timer2 period match, cleared after CCPR * TOSC * prescale; FMT alignment; duty 0 never sets). CCPTMRS picks the timer: Timer1/3/5 for
+  capture and compare, Timer2/4/6 (FOSC/4) for PWM (reserved code 00 and timers the part lacks give a note).
 * `[A61]` Compare match on the Timer1 clock that makes TMR1 = CCPRx; with clearing (MODE 1, 11) TMR1 goes to 0 on the next clock,
   so the period is CCPRx + 1 clocks.
 * `[A62]` In PWM mode CCPxIF is set when the pin clears.
 * `[A63]` Pulse output (MODE 10, 11) sets the flag (and clears TMR1 for 11) but does not drive the pin: the pulse width is not documented.
-* Not modelled: capture sources other than the pin, the ADC auto-conversion trigger from a compare, Timers 3-6, PWM3/PWM4.
+* Timers 3-6 are the same models as Timer1 (3, 5: 16-bit, T3GATE/T3GPPS gate table DS40002043F p.311) and Timer2 (4, 6); their
+  flags are TMRxIF. Hook codes 226-235 and 244-253 are the extra instances.
+* Not modelled: capture sources other than the pin, the ADC auto-conversion trigger from a compare, PWM3/PWM4. A CCPTMRS write
+  while a PWM edge is scheduled does not cancel that edge.
 * Tests: `crates/picsim/tests/ccp.rs`.
+
+## Board parts: LEDs and an SSD1306 OLED (`periph/board.rs`, stimulus `[[led]]` / `[[oled]]`, GUI "Board" tab)
+
+* LED: lit while its pin is an output (TRIS clear) at the active level (`active = "high"` or `"low"`); an input pin leaves it dark.
+  The share of cycles it is lit gives a brightness (PWM/multiplexed LEDs); every change is kept with its cycle (`basil-sim` prints
+  `led NAME (RB0, active high): ON, on N of M cycles, K changes: 1@123 0@456 ...`).
+* OLED (SSD1306, 128 x 64 or 128 x 32, address default 0x3C): the pins are chosen in the stimulus file (`scl`, `sda`) or in the GUI
+  and the program must use the same ones.
+  * `bus = "i2c1"`/`"i2c2"` (hardware I2C host): the OLED acknowledges only when `SSPxCLKPPS`/`SSPxDATPPS` (Q41: `I2CxSCLPPS`/
+    `I2CxSDAPPS`) select its SCL/SDA pins and `RxyPPS` of both pins holds the bus output code: Q10 MSSP1 SCL 0x0F, SDA 0x10,
+    MSSP2 0x11/0x12 (DS40002043F Table 18-2 p.287, "PPS input and output select the same pin" 18.3); Q41 I2C1 SCL 0x21, SDA 0x22
+    (DS40002214G Table 21-2 p.323). Otherwise the address gets a NACK and `status` names the register that is wrong.
+  * `bus = "gpio"` (bit-banged): the two pins are watched after every instruction. Start/Stop are SDA edges while SCL is high, a bit
+    is SDA at the rising SCL edge, the OLED pulls SDA low for the acknowledge (and for the bits of a read, which returns 0). A line is
+    low when the PIC drives it low (TRIS clear and LAT clear) or the OLED holds it; external pull-ups are assumed, so a released
+    pin reads 1 (an input pin with no OLED on it still reads 0 until driven, as before).
+  * Commands (SSD1306 data sheet Rev 1.1, `docs/pdf/SSD1306-Rev1.1.pdf`, Table 9-1 p.28-32): display on/off, contrast, addressing mode
+    0/1/2 with the pointer rules of 10.1.3 (p.34-35; page mode returns to the column start address, not 0), column/page range, page
+    and column start, start line, display offset and multiplex ratio (Tables 10-1..10-3 p.37-38: COM c shows line c + offset and RAM
+    row line + start line, modulo the ratio), segment remap (applies to data written afterwards, 10.1.8), COM scan direction, invert,
+    entire display on, charge pump 8Dh (accepted; the display lights without it, as on modules with an external VCC). Scrolling
+    commands take their arguments and are ignored with a note.
+  * Reads: "Under serial mode, only write operations are allowed" (PDF p.17), "No data read is provided in serial mode operation"
+    (9.1, p.33) and "No status read is provided for serial mode" (10.1.21, p.43). The status register of Table 9-2 therefore does not
+    exist on I2C. The OLED acknowledges the read address (8.1.5 a: it responds to the address including R/W#) and drives nothing: the
+    host reads 0xFF and a note is printed.
+* `[A64]` The data sheet defines no behaviour for the data phase after a read address (only that read mode exists); acknowledging the
+  address and leaving SDA high is the model's choice. The 8Dh charge pump command is from the application note at the end of the same PDF.
+* Pin changes in the GUI re-attach the part: the OLED starts blank, like a power-up. Reset keeps the wiring.
+* Tests: `crates/picsim/tests/board.rs` (hardware bus through the MSSP model, bit-banged lines driven by the test, wrong-pin cases).

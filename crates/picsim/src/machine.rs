@@ -59,6 +59,7 @@ impl Machine {
             {
                 let _ = st.apply(&self.dev, &mut c.p); // it applied once on this device, so it applies again
             }
+            c.p.set_board(self.cpu.p.board.fresh());
             self.cpu = c;
         }
     }

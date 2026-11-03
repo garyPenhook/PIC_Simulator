@@ -413,7 +413,7 @@ impl I2cQ {
     fn client_write(&mut self, b: u8, t: u64, log: &mut Vec<(u8, u64, I2cEv)>) -> bool {
         if self.expect_addr {
             self.expect_addr = false;
-            self.sel = self.i2c.iter().position(|c| c.address == b >> 1).map(|i| (i, b & 1 != 0));
+            self.sel = self.i2c.iter().position(|c| c.address == b >> 1 && !c.absent).map(|i| (i, b & 1 != 0));
             let ack = self.sel.is_some();
             log.push((self.num, t, I2cEv::Addr(b, ack)));
             ack

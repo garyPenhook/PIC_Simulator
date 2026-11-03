@@ -4,9 +4,9 @@
 //! * CCPxCON: EN bit 7, OUT bit 5 (read only, follows the output latch), FMT bit 4, MODE[3:0] (Table 22-6, p.356).
 //!   MODE 0001 toggle + clear timer, 0010 toggle, 1000 set, 1001 clear, 1010/1011 pulse (not modelled), 0011 every edge,
 //!   0100 falling, 0101 rising, 0110 every 4th rising, 0111 every 16th rising, 11xx PWM.
-//! * Timer selection (CCPTMRS, p.359, reset 0x55): Cn = 01 -> Timer1 for capture/compare and Timer2 for PWM. The other
-//!   timers (3-6) are not modelled; such a CCP is left idle with a note.
-//! * Capture copies TMR1 into CCPRx on the selected edge and sets CCPxIF; only CTS = 0000 (the CCPxPPS pin) is
+//! * Timer selection (CCPTMRS, p.359, reset 0x55): Cn = 01 -> Timer1 for capture/compare and Timer2 for PWM. Cn = 10 -> Timer3/Timer4, 11 -> Timer5/Timer6;
+//!   00 is reserved and leaves the CCP idle with a note.
+//! * Capture copies the capture timer (TMR1/3/5) into CCPRx on the selected edge and sets CCPxIF; only CTS = 0000 (the CCPxPPS pin) is
 //!   modelled (p.346-347). The prescaler counter is cleared when the module is written (p.347, 22.2.4).
 //! * Compare: the 16-bit CCPRx is compared with TMR1; MODE 0001 and 1011 clear TMR1 without a Timer1 interrupt
 //!   (20.11, p.314). Clearing CCPxCON forces the compare output latch low (22.3.1, p.349).

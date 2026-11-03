@@ -615,6 +615,7 @@ impl Pic18 {
         let _ = at;
         let now = self.cycles;
         self.p.sync(&mut self.m, now);
+        self.p.board_poll(&self.m, now);
         self.irq_check(ic0);
         if !self.p.notes.is_empty() {
             let n = std::mem::take(&mut self.p.notes);

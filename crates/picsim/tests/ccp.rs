@@ -202,3 +202,107 @@ fn q41_is_unchanged() {
     m.cpu.write(a, 0x8C);
     assert_eq!(m.cpu.read(a), 0x8C, "no CCP model on the Q41: a plain register");
 }
+
+// ---- Timers 3-6 (DS40002043F ch.20, 21, 22.1; CCPTMRS p.359) ----
+
+#[test]
+fn timer3_and_timer5_roll_over_and_set_their_own_flags() {
+    for n in [3, 5] {
+        let mut m = machine("");
+        w(&mut m, &format!("T{n}CLK"), 1);
+        w(&mut m, &format!("TMR{n}H"), 0xFF);
+        w(&mut m, &format!("TMR{n}L"), 0xF0);
+        w(&mut m, &format!("T{n}CON"), 0x01);
+        let start = m.cpu.cycles;
+        run_to(&mut m, start + 10);
+        assert_eq!(r(&mut m, &format!("TMR{n}H")), 0xFF);
+        run_to(&mut m, start + 40);
+        assert_eq!(r(&mut m, &format!("TMR{n}H")), 0x00, "Timer{n} wrapped");
+        assert!(r(&mut m, &format!("TMR{n}L")) < 40);
+        assert_eq!(r(&mut m, "TMR1L"), 0, "Timer1 is untouched");
+    }
+}
+
+#[test]
+fn timer4_and_timer6_use_their_own_period_register() {
+    for n in [4, 6] {
+        let mut m = machine("");
+        w(&mut m, &format!("T{n}PR"), 9);
+        w(&mut m, &format!("T{n}CLKCON"), 1);
+        w(&mut m, &format!("T{n}CON"), 0x80);
+        let start = m.cpu.cycles;
+        run_to(&mut m, start + 25);
+        let t = r(&mut m, &format!("T{n}TMR"));
+        assert!(t <= 9, "Timer{n} counts 0..PR: {t}");
+        assert_eq!(r(&mut m, "T2TMR"), 0, "Timer2 is off");
+    }
+}
+
+#[test]
+fn compare_on_timer3_through_ccptmrs() {
+    let mut m = machine("");
+    w(&mut m, "RC2PPS", 0x05);
+    w(&mut m, "TRISC", 0xFB);
+    w(&mut m, "CCPTMRS", 0x56); // C1TSEL = 10: Timer3
+    w(&mut m, "T3CLK", 1);
+    w(&mut m, "CCPR1L", 49);
+    w(&mut m, "CCP1CON", 0x81); // toggle + clear the timer
+    w(&mut m, "T3CON", 0x01);
+    let start = m.cpu.cycles;
+    run_to(&mut m, start + 520);
+    let log = m.cpu.p.pin_log.clone();
+    assert!(log.len() >= 9, "{log:?}");
+    for k in 1..log.len() {
+        assert_eq!(log[k].0 - log[k - 1].0, 4 * 50, "Timer3 period CCPR + 1 clocks");
+    }
+    assert_eq!(r(&mut m, "TMR1L"), 0, "Timer1 stays off");
+    assert!(m.cpu.p.notes.iter().all(|n| !n.contains("CCP1")), "{:?}", m.cpu.p.notes);
+}
+
+#[test]
+fn pwm_on_timer4_through_ccptmrs() {
+    let mut m = machine("");
+    w(&mut m, "RC2PPS", 0x05);
+    w(&mut m, "TRISC", 0xFB);
+    w(&mut m, "CCPTMRS", 0x56); // C1TSEL = 10: PWM on Timer4
+    w(&mut m, "T4PR", 0x3F);
+    w(&mut m, "T4CLKCON", 1);
+    w(&mut m, "CCPR1L", 0x20);
+    w(&mut m, "CCP1CON", 0x8C);
+    w(&mut m, "T4CON", 0x80);
+    let start = m.cpu.cycles;
+    run_to(&mut m, start + 400);
+    let log = m.cpu.p.pin_log.clone();
+    assert!(log.len() >= 8, "{log:?}");
+    assert_eq!(log[1].0 - log[0].0, 32, "pulse width");
+    assert_eq!(log[2].0 - log[0].0, 256, "period");
+    // Timer2 running does not drive a CCP that selected Timer4.
+    let mut m = machine("");
+    w(&mut m, "RC2PPS", 0x05);
+    w(&mut m, "TRISC", 0xFB);
+    w(&mut m, "CCPTMRS", 0x56);
+    w(&mut m, "T2PR", 0x3F);
+    w(&mut m, "T2CLKCON", 1);
+    w(&mut m, "CCPR1L", 0x20);
+    w(&mut m, "CCP1CON", 0x8C);
+    w(&mut m, "T2CON", 0x80);
+    let s = m.cpu.cycles;
+    run_to(&mut m, s + 400);
+    assert!(m.cpu.p.pin_log.is_empty());
+}
+
+#[test]
+fn capture_reads_timer5() {
+    let mut m = machine("[[pin]]\nport = \"C\"\nbit = 2\nlevel = 1\nat = 300\n");
+    w(&mut m, "ANSELC", 0);
+    w(&mut m, "TRISC", 0xFF);
+    w(&mut m, "CCPTMRS", 0x57); // C1TSEL = 11: Timer5
+    w(&mut m, "T5CLK", 1);
+    w(&mut m, "CCP1CON", 0x85);
+    w(&mut m, "T5CON", 0x01);
+    let start = m.cpu.cycles;
+    run_to(&mut m, 400);
+    let cap = u64::from(r(&mut m, "CCPR1H")) << 8 | u64::from(r(&mut m, "CCPR1L"));
+    let expect = 300 - start;
+    assert!((expect.saturating_sub(2)..=expect + 2).contains(&cap), "captured {cap}, edge {expect}");
+}

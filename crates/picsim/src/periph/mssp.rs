@@ -61,6 +61,10 @@ pub struct I2cClient {
     pub address: u8,
     pub data: VecDeque<u8>,
     pub fill: u8,
+    /// 0 = from the stimulus file; n = board part n-1 (`board.rs`).
+    pub tag: u8,
+    /// The part is not wired as the code expects: it does not answer.
+    pub absent: bool,
 }
 
 /// What the host put on the I2C bus. `ack` is the receiver's answer: the client for an address or a byte written, the host for a byte read.
@@ -234,7 +238,7 @@ impl Mssp {
     fn client_write(&mut self, b: u8, t: u64, log: &mut Vec<(u8, u64, I2cEv)>) -> bool {
         if self.expect_addr {
             self.expect_addr = false;
-            self.sel = self.i2c.iter().position(|c| c.address == b >> 1).map(|i| (i, b & 1 != 0));
+            self.sel = self.i2c.iter().position(|c| c.address == b >> 1 && !c.absent).map(|i| (i, b & 1 != 0));
             let ack = self.sel.is_some();
             log.push((self.num, t, I2cEv::Addr(b, ack)));
             ack

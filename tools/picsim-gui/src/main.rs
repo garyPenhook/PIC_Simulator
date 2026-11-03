@@ -1,6 +1,7 @@
 //! `basil-sim-gui [prog.hex] [--device 18F16Q41]`: run, step and inspect a program on a simulated PIC18.
 
 use eframe::egui;
+use picsim::periph::{Board, Bus, Led, Oled, Pin, pin_name};
 use picsim::{Machine, Stop, disasm::disasm};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -24,6 +25,10 @@ struct App {
     goto_in: String,
     labels: BTreeMap<u32, String>,
     last_stop: Option<Stop>,
+    stim_path: String,
+    /// LEDs and OLED wired in the Board tab, kept when another program is loaded.
+    board_cfg: Board,
+    led_duty: Vec<f32>,
 }
 
 fn list_devices(dir: &PathBuf) -> Vec<String> {
@@ -63,6 +68,9 @@ impl App {
             goto_in: String::new(),
             labels: BTreeMap::new(),
             last_stop: None,
+            stim_path: String::new(),
+            board_cfg: Board::default(),
+            led_duty: Vec::new(),
         };
         if hex.is_some() {
             a.load();
@@ -85,6 +93,10 @@ impl App {
                     break;
                 }
             }
+            if !self.stim_path.trim().is_empty() {
+                let f = PathBuf::from(self.stim_path.trim());
+                m.load_stimulus(&std::fs::read_to_string(&f).map_err(|e| format!("{}: {e}", f.display()))?).map_err(|e| format!("{}: {e}", f.display()))?;
+            }
             Ok(m)
         })();
         match res {
@@ -94,6 +106,12 @@ impl App {
                     if m.cpu.prog.get(*a as usize).is_some_and(|b| *b != 0xFF) && !n.starts_with("T_") {
                         self.labels.entry(*a).or_insert_with(|| n.clone());
                     }
+                }
+                let mut m = m;
+                if m.cpu.p.board.is_empty() {
+                    m.cpu.p.set_board(self.board_cfg.fresh()); // keep the parts wired in an earlier session
+                } else {
+                    self.board_cfg = m.cpu.p.board.fresh(); // the stimulus file wired them
                 }
                 self.msg = format!("loaded {} ({} symbols)", self.hex_path, m.syms.len());
                 self.m = Some(m);
@@ -143,6 +161,7 @@ impl eframe::App for App {
                     }
                 });
                 ui.add(egui::TextEdit::singleline(&mut self.hex_path).hint_text("path to .hex").desired_width(320.0));
+                ui.add(egui::TextEdit::singleline(&mut self.stim_path).hint_text("stimulus .toml (optional)").desired_width(180.0));
                 if ui.button("Load").clicked() {
                     self.load();
                 }
@@ -203,6 +222,41 @@ impl eframe::App for App {
             return;
         };
         let pc = m.cpu.pc;
+        if !m.cpu.p.board.is_empty() {
+            let duty = m.cpu.p.board.take_window();
+            self.led_duty = duty;
+            egui::Panel::bottom("board").show(ui, |ui| {
+                let b = &m.cpu.p.board;
+                ui.horizontal_wrapped(|ui| {
+                    for (l, d) in b.leds.iter().zip(&self.led_duty) {
+                        ui.vertical(|ui| {
+                            let (r, _) = ui.allocate_exact_size(egui::vec2(26.0, 26.0), egui::Sense::hover());
+                            let v = (60.0 + 195.0 * d.clamp(0.0, 1.0)) as u8;
+                            ui.painter().circle_filled(r.center(), 11.0, egui::Color32::from_rgb(v, (f32::from(v) * 0.15) as u8, (f32::from(v) * 0.1) as u8));
+                            ui.small(format!("{} {}", l.name, pin_name(l.pin)));
+                        });
+                    }
+                    for o in &b.oleds {
+                        ui.vertical(|ui| {
+                            let h = usize::from(o.height);
+                            let (r, _) = ui.allocate_exact_size(egui::vec2(128.0 * 3.0, h as f32 * 3.0), egui::Sense::hover());
+                            ui.painter().rect_filled(r, 0.0, egui::Color32::BLACK);
+                            let on = egui::Color32::from_rgb(120, 200, 255);
+                            for y in 0..h {
+                                for x in 0..128 {
+                                    if o.pixel(x, y) {
+                                        let p = r.min + egui::vec2(x as f32 * 3.0, y as f32 * 3.0);
+                                        ui.painter().rect_filled(egui::Rect::from_min_size(p, egui::vec2(3.0, 3.0)), 0.0, on);
+                                    }
+                                }
+                            }
+                            let st = if o.status.is_empty() { String::new() } else { format!(" - NOT WIRED: {}", o.status) };
+                            ui.small(format!("OLED {} SCL {} SDA {}{st}", match o.bus { Bus::Gpio => "GPIO".to_string(), Bus::I2c(n) => format!("I2C{n}") }, pin_name(o.scl), pin_name(o.sda)));
+                        });
+                    }
+                });
+            });
+        }
         egui::Panel::left("regs").default_size(230.0).show(ui, |ui| {
             ui.heading("CPU");
             let r = m.cpu.m.regs.clone();
@@ -250,7 +304,7 @@ impl eframe::App for App {
         });
         egui::Panel::right("data").default_size(360.0).show(ui, |ui| {
             ui.horizontal(|ui| {
-                for (i, t) in ["Memory", "SFRs", "Watch"].iter().enumerate() {
+                for (i, t) in ["Memory", "SFRs", "Watch", "Board"].iter().enumerate() {
                     ui.selectable_value(&mut self.tab, i, *t);
                 }
             });
@@ -278,6 +332,95 @@ impl eframe::App for App {
                             ui.monospace(format!("{n:<14} {a:04X}  {v:02X}  {v:08b}"));
                         }
                     });
+                }
+                3 => {
+                    let pins = m.cpu.p.pins(&m.cpu.m);
+                    let mut changed = false;
+                    let mut del = None;
+                    let pin_box = |ui: &mut egui::Ui, id: String, p: &mut Pin| -> bool {
+                        let before = *p;
+                        egui::ComboBox::from_id_salt(id).width(64.0).selected_text(pin_name(*p)).show_ui(ui, |ui| {
+                            for q in &pins {
+                                ui.selectable_value(p, *q, pin_name(*q));
+                            }
+                        });
+                        *p != before
+                    };
+                    ui.heading("LEDs");
+                    for (i, l) in m.cpu.p.board.leds.iter_mut().enumerate() {
+                        ui.horizontal(|ui| {
+                            ui.add(egui::TextEdit::singleline(&mut l.name).desired_width(70.0));
+                            changed |= pin_box(ui, format!("led{i}"), &mut l.pin);
+                            changed |= ui.checkbox(&mut l.active_high, "active high").changed();
+                            if ui.small_button("x").clicked() {
+                                del = Some(i);
+                            }
+                        });
+                    }
+                    if let Some(i) = del {
+                        m.cpu.p.board.leds.remove(i);
+                        changed = true;
+                    }
+                    if ui.button("Add LED").clicked() {
+                        let n = m.cpu.p.board.leds.len() + 1;
+                        let p = pins.first().copied().unwrap_or((b'A', 0));
+                        m.cpu.p.board.leds.push(Led::new(&format!("LED{n}"), p, true));
+                        changed = true;
+                    }
+                    ui.separator();
+                    ui.heading("OLED (SSD1306, I2C)");
+                    let mut remove = false;
+                    for (i, o) in m.cpu.p.board.oleds.iter_mut().enumerate() {
+                        egui::ComboBox::from_id_salt(format!("bus{i}")).selected_text(match o.bus { Bus::Gpio => "bit-banged GPIO".to_string(), Bus::I2c(n) => format!("hardware I2C{n}") }).show_ui(ui, |ui| {
+                            for (b, t) in [(Bus::I2c(1), "hardware I2C1"), (Bus::I2c(2), "hardware I2C2"), (Bus::Gpio, "bit-banged GPIO")] {
+                                if ui.selectable_value(&mut o.bus, b, t).changed() {
+                                    changed = true;
+                                }
+                            }
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("SCL");
+                            changed |= pin_box(ui, format!("scl{i}"), &mut o.scl);
+                            ui.label("SDA");
+                            changed |= pin_box(ui, format!("sda{i}"), &mut o.sda);
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("address");
+                            let mut a = u32::from(o.address);
+                            if ui.add(egui::DragValue::new(&mut a).range(0..=127).hexadecimal(2, false, true)).changed() {
+                                o.address = a as u8;
+                                changed = true;
+                            }
+                            for h in [64u8, 32] {
+                                if ui.radio_value(&mut o.height, h, format!("{h} rows")).changed() {
+                                    changed = true;
+                                }
+                            }
+                            if ui.small_button("remove").clicked() {
+                                remove = true;
+                            }
+                        });
+                        if !o.status.is_empty() {
+                            ui.colored_label(egui::Color32::from_rgb(255, 150, 80), format!("not answering: {}", o.status));
+                        }
+                    }
+                    if remove {
+                        m.cpu.p.board.oleds.clear();
+                        changed = true;
+                    }
+                    if m.cpu.p.board.oleds.is_empty() && ui.button("Add OLED").clicked() {
+                        let a = pins.iter().find(|p| **p == (b'C', 3)).copied().unwrap_or(pins[0]);
+                        let d = pins.iter().find(|p| **p == (b'C', 4)).copied().unwrap_or(pins[0]);
+                        m.cpu.p.board.oleds.push(Oled::new(Bus::I2c(1), a, d, 0x3C, 64));
+                        changed = true;
+                    }
+                    if changed {
+                        // A pin or address changed: re-attach the parts (the OLED starts blank, as after a power-up).
+                        let b = m.cpu.p.board.clone();
+                        m.cpu.p.set_board(b);
+                        self.board_cfg = m.cpu.p.board.fresh();
+                    }
+                    ui.small("The pins must be the ones the program uses. Hardware I2C also needs the program's PPS setup (SSPxCLKPPS/SSPxDATPPS and RxyPPS) to match.");
                 }
                 _ => {
                     ui.horizontal(|ui| {
