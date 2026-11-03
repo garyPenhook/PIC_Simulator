@@ -207,8 +207,20 @@ pub fn elf_for(program: &std::path::Path) -> Option<std::path::PathBuf> {
     [Some(program.with_extension("elf")), program.parent().and_then(|d| d.parent()).map(|d| d.join(stem).with_extension("elf"))].into_iter().flatten().find(|e| e.is_file())
 }
 
-/// The part an ELF was built for, from the `pic18f27q10.inc` file the assembler records (`18F27Q10`).
+/// The part an ELF was built for (`18F27Q10`): from the `.note.microchip` section the linker writes (vendor "Microchip", then the
+/// part), else from the `pic18f27q10.inc` file name the assembler records.
 pub fn device_of(elf: &[u8]) -> Option<String> {
+    let vendor = b"Microchip\0";
+    let mut from = 0;
+    while let Some(i) = elf[from..].windows(vendor.len()).position(|w| w == vendor) {
+        let rest = &elf[from + i + vendor.len()..];
+        let skip = rest.iter().take_while(|b| **b == 0).count();
+        let name: Vec<u8> = rest[skip..].iter().copied().take_while(u8::is_ascii_alphanumeric).collect();
+        if name.len() >= 6 && name.len() < 16 && name.starts_with(b"1") && name.iter().any(u8::is_ascii_uppercase) {
+            return String::from_utf8(name).ok();
+        }
+        from += i + vendor.len();
+    }
     let key = b"pic18f";
     let mut from = 0;
     while let Some(i) = elf[from..].windows(key.len()).position(|w| w == key) {

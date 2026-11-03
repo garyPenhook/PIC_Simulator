@@ -195,8 +195,8 @@ impl Machine {
         Stop::Cycles
     }
 
-    /// Bytes of a variable (little endian) read without side effects.
+    /// Bytes of a variable (little endian) as the CPU would read them, without side effects.
     pub fn peek(&self, addr: u32, len: usize) -> Vec<u8> {
-        (0..len).map(|i| self.cpu.m.mem.get(addr as usize + i).copied().unwrap_or(0)).collect()
+        (0..len).map(|i| self.cpu.peek(addr + i as u32)).collect()
     }
 }

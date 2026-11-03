@@ -59,3 +59,13 @@ fn device_is_read_from_the_elf() {
     assert_eq!(picsim::debuginfo::device_of(b"\0/xc8/pic/include/pic18.inc\0PIC18F-Q_DFP/1.31\0pic18f27q10.inc\0X").as_deref(), Some("18F27Q10"));
     assert_eq!(picsim::debuginfo::device_of(b"nothing here"), None);
 }
+
+#[test]
+fn device_is_read_from_the_microchip_note() {
+    // as written by the linker into .note.microchip of a -g build (no .inc names in that ELF)
+    let note = b"\n\0\0\0\t\0\0\0\0\0\0\0Microchip\0\0\018F27Q10\0\0\0\0_stray_";
+    assert_eq!(picsim::debuginfo::device_of(note).as_deref(), Some("18F27Q10"));
+    // the real ELF of a -g build (tests/data/zed_g.elf)
+    assert_eq!(picsim::debuginfo::device_of(include_bytes!("data/zed_g.elf")).as_deref(), Some("18F27Q10"));
+    assert_eq!(picsim::debuginfo::device_of(include_bytes!("data/i2c_q10_g.elf")).as_deref(), Some("18F27Q10"));
+}

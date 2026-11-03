@@ -50,6 +50,8 @@ struct App {
     /// Data memory when the last Step/Run began: variables that differ are marked as changed.
     snap: Option<Vec<u8>>,
     job: Option<Job>,
+    /// (time, cycles) at the last rate sample, and the measured simulated cycles per second.
+    rate: (std::time::Instant, u64, f64),
 }
 
 fn list_devices(dir: &PathBuf) -> Vec<String> {
@@ -78,7 +80,7 @@ impl App {
             m: None,
             msg: String::new(),
             running: false,
-            speed: 4.0,
+            speed: 6.0,
             fosc_mhz: 64.0,
             view_addr: 0,
             follow: true,
@@ -100,6 +102,7 @@ impl App {
             last_src: None,
             snap: None,
             job: None,
+            rate: (std::time::Instant::now(), 0, 0.0),
         };
         if hex.is_some() {
             a.load();
@@ -313,6 +316,7 @@ impl eframe::App for App {
                 let idle = !self.running && self.job.is_none();
                 if ui.add_enabled(loaded && idle, egui::Button::new("Run")).clicked() {
                     self.snapshot();
+                    self.rate = (std::time::Instant::now(), self.m.as_ref().map_or(0, |m| m.cpu.cycles), 0.0);
                     self.running = true;
                     self.last_stop = None;
                 }
@@ -367,8 +371,16 @@ impl eframe::App for App {
                 ui.label("Fosc MHz");
                 ui.add(egui::DragValue::new(&mut self.fosc_mhz).range(0.03..=64.0));
             });
+            // Simulated cycles per second while running, against what the part does at the chosen Fosc.
+            if self.running && let Some(m) = &self.m {
+                let dt = self.rate.0.elapsed().as_secs_f64();
+                if dt >= 0.5 {
+                    self.rate = (std::time::Instant::now(), m.cpu.cycles, m.cpu.cycles.saturating_sub(self.rate.1) as f64 / dt);
+                }
+            }
+            let real = f64::from(self.fosc_mhz) * 1e6 / 4.0;
             ui.label(match (&self.last_stop, self.running) {
-                (_, true) => "running".to_string(),
+                (_, true) => format!("running at {:.1}% of real time ({:.2} Mcycles/s); a wait on a UART or timer flag shows as one line for a long time", 100.0 * self.rate.2 / real, self.rate.2 / 1e6),
                 _ if self.job.is_some() => "stepping... (Pause cancels)".to_string(),
                 (Some(s), _) => format!("{} — stopped: {s:?}", self.msg),
                 _ => self.msg.clone(),
@@ -506,8 +518,8 @@ impl eframe::App for App {
                     egui::ScrollArea::vertical().show_rows(ui, 14.0, rows, |ui, range| {
                         for row in range {
                             let a = row * 16;
-                            let bytes: String = (0..16).map(|i| format!("{:02X}", m.cpu.m.mem[a + i])).collect::<Vec<_>>().join(" ");
-                            let asc: String = (0..16).map(|i| { let b = m.cpu.m.mem[a + i]; if (32..127).contains(&b) { b as char } else { '.' } }).collect();
+                            let bytes: String = (0..16).map(|i| format!("{:02X}", m.cpu.peek((a + i) as u32))).collect::<Vec<_>>().join(" ");
+                            let asc: String = (0..16).map(|i| { let b = m.cpu.peek((a + i) as u32); if (32..127).contains(&b) { b as char } else { '.' } }).collect();
                             ui.monospace(format!("{a:04X}  {bytes}  {asc}"));
                         }
                     });
@@ -519,7 +531,7 @@ impl eframe::App for App {
                     list.sort_by(|x, y| x.1.cmp(&y.1));
                     egui::ScrollArea::vertical().show_rows(ui, 14.0, list.len(), |ui, range| {
                         for (a, n) in &list[range] {
-                            let v = m.cpu.m.mem[*a as usize];
+                            let v = m.cpu.peek(*a);
                             ui.monospace(format!("{n:<14} {a:04X}  {v:02X}  {v:08b}"));
                         }
                     });

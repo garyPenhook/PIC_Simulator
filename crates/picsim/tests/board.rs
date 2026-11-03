@@ -310,3 +310,17 @@ fn scrolling_runs_on_the_pic_clock_time() {
     let o = &m.cpu.p.board.oleds[0];
     assert!(o.pixel(2, 0) || o.pixel(1, 0), "{}", o.ascii());
 }
+
+/// A display must see a port's pin levels as the CPU would read them, without the CPU having read the port.
+#[test]
+fn peek_shows_live_port_levels() {
+    let dev = Device::load(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../../devices/18F27Q10.toml")).unwrap();
+    let mut m = Machine::new(dev).unwrap();
+    let port = m.dev.find_sfr("PORTB").unwrap().addr;
+    let ansel = m.dev.find_sfr("ANSELB").unwrap().addr;
+    m.cpu.m.mem[ansel as usize] = 0; // digital pins
+    assert!(m.cpu.p.pin_feed(b'B', 0, 0x01, 0x01)); // RB0 driven high from cycle 0 (TRISB resets to inputs)
+    assert_eq!(m.cpu.m.mem[port as usize] & 1, 0, "the stored byte is stale until the program reads the port");
+    assert_eq!(m.cpu.peek(port) & 1, 1);
+    assert_eq!(m.peek(port, 1)[0] & 1, 1);
+}

@@ -1177,6 +1177,15 @@ impl Periph {
     }
 
     /// Plain registers (TMR0H, T0CON0/1, T1CON, ...) read the stored byte.
+    /// The value a register shows right now, for a display: the registers the CPU computes on a read (port pin levels)
+    /// without any side effect. `None` for the rest (their stored byte is current, or a read would pop a FIFO).
+    pub fn peek_hook(&self, k: u8, m: &DataMem, now: u64) -> Option<u8> {
+        match k {
+            PORT0..=0x6F => Some(self.port_levels(usize::from(k - PORT0), m, now)),
+            _ => None,
+        }
+    }
+
     pub fn is_stored(k: u8) -> bool {
         !(k == NVM0 + nvm::CON2 || k == NVMQ0 + nvmq::LOCK || (matches!(k, T0L | PORT0..=0x6F) || matches!(t1_dec(k), Some((_, 0 | 1 | 4))) || matches!(t2_dec(k), Some((_, 0)))) || (UART0..40).contains(&k) && (k - UART0) % UART_HOOKS == 3
             || (QUART0..QUART_END).contains(&k) && (k - QUART0) % quart::HOOKS == quart::RXB

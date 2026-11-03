@@ -254,6 +254,18 @@ impl Pic18 {
         a
     }
 
+    /// A register as a display shows it: what the CPU would read, without side effects (no FIFO pops, no flags cleared).
+    pub fn peek(&self, a: u32) -> u8 {
+        let i = a as usize;
+        let Some(&stored) = self.m.mem.get(i) else { return 0 };
+        match self.m.special[i] {
+            Special::Hook(k) => self.p.peek_hook(k, &self.m, self.cycles).unwrap_or(stored),
+            Special::Pcl => self.pc as u8,
+            Special::Tos(k) => (self.tos() >> (8 * u32::from(k))) as u8,
+            _ => stored,
+        }
+    }
+
     pub fn read(&mut self, a: u32) -> u8 {
         self.m.note_access(a);
         let i = a as usize;
