@@ -28,9 +28,12 @@ mod flash;
 mod nvm;
 mod nvmq;
 mod quart;
+mod spi;
 use nvm::Nvm;
 use nvmq::NvmQ;
 use quart::QUart;
+use spi::Spi;
+pub use spi::SpiClient;
 
 /// A flag bit in a PIRx register.
 #[derive(Clone, Copy, Debug)]
@@ -97,6 +100,9 @@ const QUART_END: u8 = QUART0 + 5 * quart::HOOKS;
 const T1G: u8 = 40;
 /// PORTx (index into `ports`) uses hook code PORT0 + index: a read gives the pin levels, a write goes to LATx.
 const PORT0: u8 = 48;
+/// Q41 SPI n (0-based) uses hook codes SPI0 + spi::HOOKS * n + sub-code (see `spi.rs`); at most 2.
+const SPI0: u8 = 160;
+const SPI_END: u8 = SPI0 + 2 * spi::HOOKS;
 const NVM0: u8 = 240;
 const NVMQ0: u8 = 242;
 
@@ -232,6 +238,7 @@ pub struct Periph {
     t2: Option<Timer2>,
     uarts: Vec<Uart>,
     quarts: Vec<QUart>,
+    spis: Vec<Spi>,
     adc: Option<Adc>,
     nvm: Option<Nvm>,
     nvmq: Option<NvmQ>,
@@ -240,6 +247,8 @@ pub struct Periph {
     fvr: Option<usize>,
     /// Bytes the transmitters started to send: (EUSART number 1-based, cycle it started, byte).
     pub tx: Vec<(u8, u64, u8)>,
+    /// Bytes the SPI hosts sent: (SPI number, cycle the byte started, byte).
+    pub spi_tx: Vec<(u8, u64, u8)>,
     pub notes: BTreeSet<String>,
     /// Cycle of the latest flag set by `sync` since the core last looked (`take_event`).
     event: Option<u64>,
@@ -289,7 +298,7 @@ impl Periph {
 
     /// Find the timers the part has and mark their registers as hooked in `m`.
     pub fn bind(dev: &Device, m: &mut DataMem) -> Periph {
-        let mut p = Periph { ports: Vec::new(), drive: Vec::new(), t0: None, t1: None, t2: None, uarts: Vec::new(), quarts: Vec::new(), adc: None, nvm: None, nvmq: None, stall: 0, fvr: None, tx: Vec::new(), notes: BTreeSet::new(), event: None };
+        let mut p = Periph { ports: Vec::new(), drive: Vec::new(), t0: None, t1: None, t2: None, uarts: Vec::new(), quarts: Vec::new(), spis: Vec::new(), adc: None, nvm: None, nvmq: None, stall: 0, fvr: None, tx: Vec::new(), spi_tx: Vec::new(), notes: BTreeSet::new(), event: None };
         let mut hook = |a: usize, k: u8| m.special[a] = Special::Hook(k);
         if let (Some(l), Some(h), Some(c0), Some(c1), Some(flag)) =
             (addr(dev, "TMR0L"), addr(dev, "TMR0H"), addr(dev, "T0CON0"), addr(dev, "T0CON1"), Flag::find(dev, "TMR0IF"))
@@ -409,7 +418,27 @@ impl Periph {
                 p.quarts.push(q);
             }
         }
+        for n in 1..=2u8 {
+            if let Some((q, regs)) = Spi::find(dev, n) {
+                let k = SPI0 + spi::HOOKS * p.spis.len() as u8;
+                for (i, a) in regs.into_iter().enumerate() {
+                    hook(a, k + i as u8);
+                }
+                p.spis.push(q);
+            }
+        }
         p
+    }
+
+    /// Set the byte-level client that answers SPI `num` (1-based). False when the part has no such SPI.
+    pub fn spi_client(&mut self, num: u8, c: SpiClient) -> bool {
+        match self.spis.iter_mut().find(|s| s.num == num) {
+            Some(s) => {
+                s.client = c;
+                true
+            }
+            None => false,
+        }
     }
 
     /// Queue characters for the receiver of EUSART `num` (1-based). False when the part has no such EUSART.
@@ -669,6 +698,9 @@ impl Periph {
         for q in &mut self.quarts {
             q.sync(m, now, &mut ev, &mut self.tx, &mut self.notes);
         }
+        for q in &mut self.spis {
+            q.sync(m, now, &mut ev, &mut self.spi_tx, &mut self.notes);
+        }
         if let Some(n) = &mut self.nvm
             && let Some(e) = n.sync(m, now)
         {
@@ -720,6 +752,10 @@ impl Periph {
                 let i = usize::from(k - QUART0) / usize::from(quart::HOOKS);
                 self.quarts[i].read_rxb(m)
             }
+            SPI0..SPI_END => {
+                let i = usize::from(k - SPI0) / usize::from(spi::HOOKS);
+                self.spis[i].read_rxb(m, now)
+            }
             UART0..=39 => {
                 let u = &mut self.uarts[usize::from(k - UART0) / usize::from(UART_HOOKS)];
                 // `[A10]` An empty FIFO reads the last character again (the data sheet does not say).
@@ -736,7 +772,8 @@ impl Periph {
     /// Plain registers (TMR0H, T0CON0/1, T1CON, ...) read the stored byte.
     pub fn is_stored(k: u8) -> bool {
         !(k == NVM0 + nvm::CON2 || k == NVMQ0 + nvmq::LOCK || matches!(k, T0L | T1L | T1H | T2T | T1G | PORT0..=0x6F) || (UART0..40).contains(&k) && (k - UART0) % UART_HOOKS == 3
-            || (QUART0..QUART_END).contains(&k) && (k - QUART0) % quart::HOOKS == quart::RXB)
+            || (QUART0..QUART_END).contains(&k) && (k - QUART0) % quart::HOOKS == quart::RXB
+            || (SPI0..SPI_END).contains(&k) && (k - SPI0) % spi::HOOKS == spi::RXB)
     }
 
     /// A write: `v` is already masked to the implemented bits. The caller has synced to the writing cycle.
@@ -753,6 +790,10 @@ impl Periph {
                 self.flash_event(now);
             }
             UART0..=39 => self.uart_write(k, v, now, m),
+            SPI0..SPI_END => {
+                let i = usize::from(k - SPI0) / usize::from(spi::HOOKS);
+                self.spis[i].write((k - SPI0) % spi::HOOKS, v, now, m);
+            }
             QUART0..QUART_END => {
                 let i = usize::from(k - QUART0) / usize::from(quart::HOOKS);
                 self.quarts[i].write((k - QUART0) % quart::HOOKS, v, now, m, &mut self.tx);

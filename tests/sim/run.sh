@@ -34,3 +34,10 @@ for l in "ADQ_A0 = 2748" "ADQ_A1 = 0 " "ADQ_A2 = 291"; do
     echo "$out" | grep -q "^$l" || { echo "FAIL adc_q41: missing '$l'"; echo "$out"; exit 1; }
 done
 echo "PASS adc_q41"
+cp tests/sim/spi_q41.bas "$w/"
+"${BASIL:-./target/release/basil}" --keep-vars "$w/spi_q41.bas" >/dev/null
+out=$(./target/release/basil-sim "$w/spi_q41.hex" --device 18F16Q41 --stim tests/sim/spi_q41.stim.toml --dump SQ1_SQ_INIT,SQ1_SQ_R0,SQ1_SQ_R1,SQ1_SQ_R2,SQ1_SQ_ST 2>/dev/null)
+for l in "SQ1_SQ_INIT = 1 " "SQ1_SQ_R0 = 239" "SQ1_SQ_R1 = 64" "SQ1_SQ_R2 = 24" "SQ1_SQ_ST = 0 " "spi1: 9F 00 FF"; do
+    echo "$out" | grep -q "^$l" || { echo "FAIL spi_q41: missing '$l'"; echo "$out"; exit 1; }
+done
+echo "PASS spi_q41"

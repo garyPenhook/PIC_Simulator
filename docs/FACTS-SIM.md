@@ -267,3 +267,19 @@ Q10, DS40002043F 12.1 p.142-156; Q41, DS40002214G 10.3 p.88-98.
   program flash reads and the self-write the way the data sheet describes, so the sim (which passes) cannot be checked against it there.
 * Not compared: write times against hardware (the `[A30]`-`[A38]` times stay data sheet maxima), errata 1.9.1.
 
+
+## SPI of the PIC18-Q41 (S5, `periph/spi.rs`, DS40002214G ch.35)
+
+Host mode only; the outside world is a byte-level client from `[[spi]]` in the stimulus file (`data`, `fill`, `port`); the bytes the host
+sends are printed by `basil-sim` as `spiN: ...`. Chip select (SS_out, SSET), SS_in, PPS routing and client mode are not modelled.
+
+* Sourced: transfer conditions by TXR/RXR and BMODE (Table 35-1 p.575), counter and TWIDTH (35.7.6-7 p.594-595), SCK = clock / (2 (BAUD + 1))
+  (Eq. 35-1 p.579), start delay at least half a baud period unless FST (35.3.6.3 p.581), registers locked while EN = 1 (35.2.1 p.571), flags
+  SPIxRXIF / SPIxTXIF / SPIxIF (35.6 p.586), STATUS and INTF bits (35.7.8, 35.7.12 p.596, 600).
+* `[A40]` both FIFOs are two bytes deep (Figure 35-3 shows occupancy up to 2; the depth is not stated).
+* `[A41]` a byte leaves the TxFIFO and enters the RxFIFO when its transfer ends.
+* `[A42]` only CLKSEL = 0 (FOSC) is modelled; start delay `ceil((BAUD + 3) / 4)` cycles (1 with FST), no gap between back-to-back bytes,
+  a byte of w bits takes `ceil(w (BAUD + 1) / 2)` cycles.
+* `[A43]` bytes narrower than 8 bits use the low w bits; SDIP inverts the client's reply; LSBF and CKP/CKE/SMP do not change the data.
+* `[A44]` a TXB write with EN = 0 is dropped.
+* Tests: `crates/picsim/tests/spi.rs`; `tests/sim/spi_q41.bas` runs the library `Spi` module against a client.

@@ -116,6 +116,12 @@ fn run() -> Result<ExitCode, String> {
             println!("tx{n}: {}", String::from_utf8_lossy(&bytes).escape_debug());
         }
     }
+    for n in 1..=2u8 {
+        let bytes: Vec<String> = m.cpu.p.spi_tx.iter().filter(|t| t.0 == n).map(|t| format!("{:02X}", t.2)).collect();
+        if !bytes.is_empty() {
+            println!("spi{n}: {}", bytes.join(" "));
+        }
+    }
     for n in &m.cpu.notes {
         eprintln!("note: {n}");
     }
