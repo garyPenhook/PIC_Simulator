@@ -133,9 +133,11 @@ impl Machine {
     pub fn line_step(&mut self, s: &LineStep, budget: u32) -> Option<Option<Stop>> {
         let halt = self.syms.get("__halt").copied();
         for _ in 0..budget {
+            let before = self.stack_depth();
             self.cpu.step();
             let pc = self.cpu.pc;
-            if Some(pc) == halt {
+            // Arriving at `__halt` by a CALL is a call into the routine that starts there, not the end of the program.
+            if Some(pc) == halt && self.stack_depth() <= before {
                 return Some(Some(Stop::Halt));
             }
             if self.breakpoints.contains(&pc) {
@@ -170,9 +172,15 @@ impl Machine {
     pub fn run(&mut self, until: Option<u32>, max_cycles: u64) -> Stop {
         let limit = self.cpu.cycles.saturating_add(max_cycles);
         let mut first = true;
+        let mut depth = self.stack_depth();
         while self.cpu.cycles < limit {
             let pc = self.cpu.pc;
-            if Some(pc) == until {
+            // `__halt` is the address after the program body, where a routine may start: reaching it by a CALL
+            // (the stack grew) is a call, not the end of the program.
+            let d = self.stack_depth();
+            let called = d > depth;
+            depth = d;
+            if Some(pc) == until && !called {
                 return Stop::Halt;
             }
             if !first && self.breakpoints.contains(&pc) {

@@ -90,3 +90,33 @@ fn stops_at_a_breakpoint_and_at_halt() {
     }
     assert_eq!(r, Some(Stop::Halt));
 }
+
+/// A real program (tests/data/zed_g.*) whose first library routine starts exactly at `__halt`: calling it must not count as halting.
+fn zed() -> Machine {
+    let dev = Device::load(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../../devices/18F27Q10.toml")).unwrap();
+    let mut m = Machine::new(dev).unwrap();
+    m.load_hex(include_str!("data/zed_g.hex")).unwrap();
+    m.load_debug(DebugInfo::from_elf(include_bytes!("data/zed_g.elf")).unwrap());
+    m
+}
+
+#[test]
+fn calling_the_routine_at_halt_is_not_a_halt() {
+    let mut m = zed();
+    let halt = m.syms["__halt"];
+    // a library routine starts right at __halt and is called during start-up
+    assert!(m.debug.lines.lookup(halt).is_some_and(|(f, _)| f.ends_with("serial.bas")));
+    let mut r = None;
+    for _ in 0..200 {
+        r = m.step_line(false, false, 5_000_000);
+        if r.is_some() {
+            break;
+        }
+    }
+    assert_eq!(r, None, "stopped at {:#x} (halt {halt:#x})", m.cpu.pc);
+    // and a plain run goes on into the main loop instead of stopping
+    let mut m = zed();
+    assert_eq!(m.run(Some(m.syms["__halt"]), 5_000_000), Stop::Cycles);
+    // the main loop, `DelayMs(10)` at line 369
+    assert_eq!(line(&m).map(|(f, _)| f).as_deref(), Some("main.bas"));
+}
