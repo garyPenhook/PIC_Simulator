@@ -1,0 +1,9 @@
+# RC0 (channel 16) steps from 0xABC to 0x123 at cycle 600; channel 17 is not driven.
+[[adc]]
+channel = 16
+value = 0xABC
+
+[[adc]]
+channel = 16
+value = 0x123
+at = 600

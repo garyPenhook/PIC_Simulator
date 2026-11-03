@@ -1,0 +1,9 @@
+[package]
+name = "picsim"
+version = "0.1.0"
+edition = "2024"
+description = "Cycle-exact simulator of the PIC parts Basil supports (see docs/SIMULATOR-PLAN.md)"
+
+[dependencies]
+devdesc = { path = "../../../Basic_Compiler/crates/devdesc" }
+toml = "1"

@@ -1,0 +1,14 @@
+[package]
+name = "picsim-gui"
+version = "0.1.0"
+edition = "2024"
+description = "Graphical front end of the PIC simulator"
+
+[[bin]]
+name = "basil-sim-gui"
+path = "src/main.rs"
+
+[dependencies]
+picsim = { path = "../../crates/picsim" }
+devdesc = { path = "../../../Basic_Compiler/crates/devdesc" }
+eframe = "0.37"
