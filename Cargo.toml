@@ -1,3 +1,3 @@
 [workspace]
-members = ["crates/picsim", "tools/picsim", "tools/picsim-gui"]
+members = ["crates/devdesc", "crates/picsim", "tools/picsim", "tools/picsim-gui"]
 resolver = "3"

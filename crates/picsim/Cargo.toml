@@ -5,5 +5,5 @@ edition = "2024"
 description = "Cycle-exact simulator of the PIC parts Basil supports (see docs/SIMULATOR-PLAN.md)"
 
 [dependencies]
-devdesc = { path = "../../../Basic_Compiler/crates/devdesc" }
+devdesc = { path = "../devdesc" }
 toml = "1"

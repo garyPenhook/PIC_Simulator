@@ -23,7 +23,7 @@ fn run() -> Result<ExitCode, String> {
     let mut stim = None::<PathBuf>;
     let (mut hex, mut device, mut asm, mut until, mut dump, mut max) =
         (None::<PathBuf>, String::from("18F27Q10"), None::<PathBuf>, Some(String::from("__halt")), Vec::new(), 2_000_000_000u64);
-    let mut root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../Basic_Compiler/devices");
+    let mut root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../devices");
     while let Some(a) = args.next() {
         let mut val = |n: &str| args.next().ok_or(format!("{n} needs a value"));
         match a.as_str() {

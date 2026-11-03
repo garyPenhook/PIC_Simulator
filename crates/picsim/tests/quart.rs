@@ -5,7 +5,7 @@ use picsim::Machine;
 use std::path::Path;
 
 fn machine(stim: &str) -> Machine {
-    let dev = Device::load(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../Basic_Compiler/devices/18F16Q41.toml")).unwrap();
+    let dev = Device::load(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../../devices/18F16Q41.toml")).unwrap();
     let mut m = Machine::new(dev).unwrap();
     m.load_stimulus(stim).unwrap();
     m

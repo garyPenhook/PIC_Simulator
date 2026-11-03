@@ -5,7 +5,7 @@ use picsim::Machine;
 use std::path::Path;
 
 fn machine(stim: &str) -> Machine {
-    let dev = Device::load(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../Basic_Compiler/devices/18F27Q10.toml")).unwrap();
+    let dev = Device::load(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../../devices/18F27Q10.toml")).unwrap();
     let mut m = Machine::new(dev).unwrap();
     m.load_stimulus(stim).unwrap();
     m
@@ -104,7 +104,7 @@ fn nine_bit_address_detect() {
 
 #[test]
 fn stimulus_errors() {
-    let dev = Device::load(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../Basic_Compiler/devices/18F27Q10.toml")).unwrap();
+    let dev = Device::load(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../../devices/18F27Q10.toml")).unwrap();
     let mut m = Machine::new(dev).unwrap();
     for bad in ["[[uart]]\nat = 1\n", "[[uart]]\nbytes = \"a\"\ncolour = 1\n", "[[uart]]\ndata = [256]\n", "[adc]\n", "[[uart]]\nport = 9\nbytes = \"a\"\n"] {
         assert!(m.load_stimulus(bad).is_err(), "{bad}");
@@ -123,7 +123,7 @@ fn stimulus_survives_reset() {
 
 #[test]
 fn huge_timing_values_are_rejected() {
-    let dev = Device::load(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../Basic_Compiler/devices/18F27Q10.toml")).unwrap();
+    let dev = Device::load(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../../devices/18F27Q10.toml")).unwrap();
     let mut m = Machine::new(dev).unwrap();
     for k in ["at", "bit", "gap"] {
         assert!(m.load_stimulus(&format!("[[uart]]\n{k} = 9000000000\nbytes = \"a\"\n")).is_err(), "{k}");

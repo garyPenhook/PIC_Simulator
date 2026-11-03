@@ -1,0 +1,31 @@
+# Numbers read BY HAND from the PIC16(L)F183XX data sheet DS40001799F (PIC16LF18313), used by `devgen check` to
+# cross-check the description generated from the Microchip pack. Do not generate this file.
+# Program memory, user IDs and configuration are counted in 14-bit WORDS for this family (one address per
+# word), not bytes as on PIC18. The data sheet calls the 256 bytes at F000h-F0FFh "EEPROM" (NVMREGS = 1).
+# Device ID read from the data sheet: 3068h (12392); the description must carry 12392.
+
+[source]
+datasheet = "DS40001799F"
+reference = "Family Types table (p.1, p.3), Table 11-3 p.122, DEVID Register 5-5 p.57, Fig. 4-1 p.22, 3.2 p.20"
+
+[memory]
+program_bytes = 2048     # 2048 words (Family Types table)
+sram_bytes    = 256      # data SRAM (Family Types table)
+eeprom_bytes  = 256       # EEPROM, F000h-F0FFh (Table 11-3; "256B of EEPROM", p.1 of the data sheet)
+hw_stack_levels = 16      # 16-level hardware stack (3.2 / 4.4)
+config_bytes  = 4         # 4 configuration words, 8007h-800Ah (Table 11-3)
+user_id_bytes = 4         # 4 user ID words, 8000h-8003h (Table 11-3)
+
+[vectors]
+reset          = 0        # 0000h  (Fig. 4-1)
+interrupt_high = 4        # 0004h  (single interrupt vector)
+interrupt_low  = 4        # same vector
+
+# Peripheral counts from the Family Types table, checked by counting SFRs whose name matches the pattern.
+[counts]
+"TX#STA"    = 1   # EUSART
+"SSP#CON1"  = 1   # MSSP (I2C/SPI)
+"CCP#CON"   = 2   # CCP
+"PWM#CON"   = 2   # 10-bit PWM
+"CM#CON0"   = 1   # comparators
+"CWG#CON0"  = 1   # complementary waveform generators

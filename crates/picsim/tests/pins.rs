@@ -5,7 +5,7 @@ use picsim::Machine;
 use std::path::Path;
 
 fn machine(stim: &str) -> Machine {
-    let dev = Device::load(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../Basic_Compiler/devices/18F27Q10.toml")).unwrap();
+    let dev = Device::load(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../../devices/18F27Q10.toml")).unwrap();
     let mut m = Machine::new(dev).unwrap();
     m.load_stimulus(stim).unwrap();
     m
@@ -66,7 +66,7 @@ fn timer1_gate_value_follows_the_t1g_pin() {
 
 #[test]
 fn bad_stimulus_is_rejected() {
-    let dev = Device::load(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../Basic_Compiler/devices/18F27Q10.toml")).unwrap();
+    let dev = Device::load(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../../devices/18F27Q10.toml")).unwrap();
     for t in ["[[pin]]\nport = \"b\"\nbit = 0\nlevel = 1\n", "[[pin]]\nport = \"B\"\nbit = 8\nlevel = 1\n", "[[pin]]\nport = \"B\"\nbit = 1\nlevel = 2\n", "[[port]]\nport = \"B\"\nvalue = 256\n", "[[pin]]\nport = \"B\"\nbit = 1\nlevel = 1\nbogus = 1\n", "[[pin]]\nport = \"G\"\nbit = 1\nlevel = 1\n"] {
         assert!(Machine::new(dev.clone()).unwrap().load_stimulus(t).is_err(), "{t}");
     }

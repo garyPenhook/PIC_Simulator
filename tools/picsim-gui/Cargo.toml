@@ -10,5 +10,5 @@ path = "src/main.rs"
 
 [dependencies]
 picsim = { path = "../../crates/picsim" }
-devdesc = { path = "../../../Basic_Compiler/crates/devdesc" }
+devdesc = { path = "../../crates/devdesc" }
 eframe = "0.37"

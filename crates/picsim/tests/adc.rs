@@ -5,7 +5,7 @@ use picsim::Machine;
 use std::path::Path;
 
 fn machine(stim: &str) -> Machine {
-    let dev = Device::load(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../Basic_Compiler/devices/18F27Q10.toml")).unwrap();
+    let dev = Device::load(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../../devices/18F27Q10.toml")).unwrap();
     let mut m = Machine::new(dev).unwrap();
     m.load_stimulus(stim).unwrap();
     m
@@ -113,7 +113,7 @@ fn fvr_ready_follows_enable() {
 
 #[test]
 fn bad_adc_stimulus_is_rejected() {
-    let dev = Device::load(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../Basic_Compiler/devices/18F27Q10.toml")).unwrap();
+    let dev = Device::load(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../../devices/18F27Q10.toml")).unwrap();
     let mut m = Machine::new(dev).unwrap();
     assert!(m.load_stimulus("[[adc]]\nchannel = 64\nvalue = 1\n").is_err());
     assert!(m.load_stimulus("[[adc]]\nchannel = 1\n").is_err());
@@ -123,7 +123,7 @@ fn bad_adc_stimulus_is_rejected() {
 // ---- Q41 (DS40002214G ch.40, PIC18F16Q41): 12 bits, ADPRE/ADACQ 13 bits in Fosc clocks, 14 TAD + 2 TCY ----
 
 fn machine_q41(stim: &str) -> Machine {
-    let dev = Device::load(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../Basic_Compiler/devices/18F16Q41.toml")).unwrap();
+    let dev = Device::load(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../../devices/18F16Q41.toml")).unwrap();
     let mut m = Machine::new(dev).unwrap();
     m.load_stimulus(stim).unwrap();
     m
