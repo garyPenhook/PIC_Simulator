@@ -98,8 +98,13 @@ yet), PIC16 single vector with automatic context save. Vector addresses from `[v
 * `exec-test.py --engine=sim|mdb`; `' expect:`, `' cycles:`, `' dma:` lines work unchanged.
 * GUI: `tools/picsim-gui` (`basil-sim-gui`, egui): load a hex, Run/Pause/Step/Step over/Reset, breakpoints by
   clicking a disassembly line, registers, return stack, memory and SFR views, watch list, time at a given Fosc.
-* Later: source-level stepping from the `-g` DWARF (`src/dwarf.rs`), and a Debug Adapter Protocol server for
-  `vscode-extension`.
+* GUI file choice: Browse hex/elf… and Stim… (file dialogs), or drag a `.hex`, `.elf` or stimulus `.toml` onto the window. An `.elf`
+  loads the `.hex` beside it (or in `dist/`). The Board panel (LEDs, OLED) is available before a program is loaded and its wiring is kept.
+* GUI source view: the program is compiled with `basil -g`; the GUI reads `<stem>.elf` beside the hex (or one folder up) and
+  `crates/picsim/src/lines.rs` turns its `.debug_line` into address -> BASIC line (`.bas` files only; generated assembly has no line).
+  The Source pane highlights the line the PC is on (library files such as `i2c.bas` included), follows the PC, and a click sets a breakpoint
+  at the line's lowest address. Without `-g` only the disassembly is shown. The optimizer can merge lines, so some lines have no code.
+* Later: a Debug Adapter Protocol server for `vscode-extension`.
 
 ## Verifying the simulator
 

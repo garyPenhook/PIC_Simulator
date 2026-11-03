@@ -3,6 +3,7 @@
 pub mod config;
 pub mod disasm;
 pub mod hex;
+pub mod lines;
 pub mod machine;
 pub mod mem;
 pub mod periph;

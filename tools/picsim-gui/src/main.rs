@@ -1,6 +1,7 @@
 //! `basil-sim-gui [prog.hex] [--device 18F16Q41]`: run, step and inspect a program on a simulated PIC18.
 
 use eframe::egui;
+use picsim::lines::LineMap;
 use picsim::periph::{Board, Bus, Led, Oled, Pin, pin_name};
 use picsim::{Machine, Stop, disasm::disasm};
 use std::collections::BTreeMap;
@@ -30,6 +31,15 @@ struct App {
     board_cfg: Board,
     pre_pins: (String, Vec<Pin>),
     led_duty: Vec<f32>,
+    /// Address -> BASIC source line, from the ELF beside the hex (built with `basil -g`).
+    lines: LineMap,
+    /// Directory of the ELF: where a source file is looked for when its recorded path is gone.
+    elf_dir: PathBuf,
+    sources: std::collections::HashMap<PathBuf, Vec<String>>,
+    /// Show the BASIC source instead of the disassembly.
+    src_view: bool,
+    /// The last source line the PC was on (generated code has none; the view stays there).
+    last_src: Option<(PathBuf, u32)>,
 }
 
 fn list_devices(dir: &PathBuf) -> Vec<String> {
@@ -73,11 +83,34 @@ impl App {
             board_cfg: Board::default(),
             pre_pins: (String::new(), Vec::new()),
             led_duty: Vec::new(),
+            lines: LineMap::default(),
+            elf_dir: PathBuf::new(),
+            sources: std::collections::HashMap::new(),
+            src_view: true,
+            last_src: None,
         };
         if hex.is_some() {
             a.load();
         }
         a
+    }
+
+    /// Opens a program given as a .hex, or as a .elf (the .hex built with it is loaded; the ELF gives the source lines).
+    fn open_program(&mut self, f: &std::path::Path) {
+        if f.extension().is_some_and(|e| e.eq_ignore_ascii_case("elf")) {
+            let stem = f.file_stem().unwrap_or_default();
+            let cands = [f.with_extension("hex"), f.parent().map(|d| d.join("dist").join(stem).with_extension("hex")).unwrap_or_default()];
+            match cands.into_iter().find(|h| h.is_file()) {
+                Some(h) => self.hex_path = h.display().to_string(),
+                None => {
+                    self.msg = format!("no .hex beside {}", f.display());
+                    return;
+                }
+            }
+        } else {
+            self.hex_path = f.display().to_string();
+        }
+        self.load();
     }
 
     fn load(&mut self) {
@@ -115,7 +148,31 @@ impl App {
                 } else {
                     self.board_cfg = m.cpu.p.board.fresh(); // the stimulus file wired them
                 }
-                self.msg = format!("loaded {} ({} symbols)", self.hex_path, m.syms.len());
+                // The line table: <stem>.elf beside the hex, or one folder up (basil leaves the hex in dist/).
+                let hp = PathBuf::from(&self.hex_path);
+                let elf = [hp.with_extension("elf"), hp.parent().and_then(|d| d.parent()).map(|d| d.join(hp.file_stem().unwrap_or_default()).with_extension("elf")).unwrap_or_default()].into_iter().find(|e| e.is_file());
+                self.sources.clear();
+                self.last_src = None;
+                let mut note = String::new();
+                match elf.as_ref().map(|e| std::fs::read(e).map_err(|e| e.to_string()).and_then(|b| LineMap::from_elf(&b))) {
+                    Some(Ok(l)) if !l.source_files().is_empty() => {
+                        self.lines = l;
+                        self.elf_dir = elf.as_ref().and_then(|e| e.parent()).map(PathBuf::from).unwrap_or_default();
+                    }
+                    Some(Ok(_)) => {
+                        self.lines = LineMap::default();
+                        note = " - ELF has no BASIC lines (build with basil -g)".into();
+                    }
+                    Some(Err(e)) => {
+                        self.lines = LineMap::default();
+                        note = format!(" - ELF: {e}");
+                    }
+                    None => {
+                        self.lines = LineMap::default();
+                        note = " - no .elf beside the hex: no source view".into();
+                    }
+                }
+                self.msg = format!("loaded {} ({} symbols){note}", self.hex_path, m.syms.len());
                 self.m = Some(m);
             }
             Err(e) => {
@@ -159,14 +216,12 @@ impl eframe::App for App {
         let dropped: Vec<PathBuf> = ui.ctx().input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).collect());
         for f in dropped {
             match f.extension().and_then(|e| e.to_str()).map(str::to_lowercase).as_deref() {
-                Some("hex") => {
-                    self.hex_path = f.display().to_string();
+                Some("hex" | "elf") => {
                     if !self.running {
-                        self.load();
+                        self.open_program(&f);
                     }
                 }
                 Some("toml") => self.stim_path = f.display().to_string(),
-                Some("elf") => self.msg = "ELF is not supported: drop the .hex".into(),
                 _ => {}
             }
         }
@@ -179,11 +234,10 @@ impl eframe::App for App {
                 });
                 ui.add(egui::TextEdit::singleline(&mut self.hex_path).hint_text("path to .hex").desired_width(320.0));
                 ui.add(egui::TextEdit::singleline(&mut self.stim_path).hint_text("stimulus .toml (optional)").desired_width(180.0));
-                if ui.button("Browse hex…").clicked()
-                    && let Some(f) = rfd::FileDialog::new().add_filter("Intel hex", &["hex"]).pick_file()
+                if ui.button("Browse hex/elf…").clicked()
+                    && let Some(f) = rfd::FileDialog::new().add_filter("hex or ELF", &["hex", "elf"]).pick_file()
                 {
-                    self.hex_path = f.display().to_string();
-                    self.load();
+                    self.open_program(&f);
                 }
                 if ui.button("Stim…").clicked()
                     && let Some(f) = rfd::FileDialog::new().add_filter("stimulus", &["toml"]).pick_file()
@@ -422,6 +476,10 @@ impl eframe::App for App {
         egui::CentralPanel::default().show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.heading("Program");
+                if !self.lines.is_empty() {
+                    ui.selectable_value(&mut self.src_view, true, "Source");
+                    ui.selectable_value(&mut self.src_view, false, "Disassembly");
+                }
                 ui.checkbox(&mut self.follow, "follow PC");
                 ui.add(egui::TextEdit::singleline(&mut self.goto_in).hint_text("goto 0x…").desired_width(80.0));
                 if ui.button("Go").clicked() {
@@ -431,6 +489,10 @@ impl eframe::App for App {
                     }
                 }
             });
+            if self.src_view && !self.lines.is_empty() {
+                source_pane(ui, &self.lines, &self.elf_dir, &mut self.sources, &mut self.last_src, m, pc, self.follow);
+                return;
+            }
             let prog = &m.cpu.prog;
             let word = |a: u32| -> u16 { prog.get(a as usize).map_or(0xFF, |b| u16::from(*b)) | prog.get(a as usize + 1).map_or(0xFF, |b| u16::from(*b)) << 8 };
             // Decode forward from the window start; start the window a few instructions before the PC so that
@@ -473,6 +535,64 @@ impl eframe::App for App {
             }
             ui.small("click an instruction to toggle a breakpoint");
         });
+    }
+}
+
+/// The BASIC source with the line the PC is on highlighted; a click toggles a breakpoint on that line.
+#[allow(clippy::too_many_arguments)]
+fn source_pane(ui: &mut egui::Ui, lines: &LineMap, dir: &std::path::Path, cache: &mut std::collections::HashMap<PathBuf, Vec<String>>, last: &mut Option<(PathBuf, u32)>, m: &mut Machine, pc: u32, follow: bool) {
+    if let Some((f, l)) = lines.lookup(pc) {
+        *last = Some((f.clone(), l));
+    }
+    let on_line = lines.lookup(pc).is_some();
+    let Some((file, cur)) = last.clone() else {
+        ui.label("The PC is in generated start-up code, not on a BASIC line yet. Step or Run.");
+        return;
+    };
+    if !cache.contains_key(&file) {
+        let name = file.file_name().unwrap_or_default();
+        let found = [file.clone(), dir.join(name), dir.join("..").join(name)].into_iter().find_map(|p| std::fs::read_to_string(p).ok());
+        cache.insert(file.clone(), found.map_or_else(|| vec![format!("(source {} not found)", file.display())], |t| t.lines().map(str::to_string).collect()));
+    }
+    let src = &cache[&file];
+    let bp_lines: Vec<u32> = m.breakpoints.iter().filter_map(|a| lines.lookup(*a).filter(|(f, _)| **f == file).map(|(_, l)| l)).collect();
+    ui.horizontal(|ui| {
+        ui.monospace(format!("{}:{cur}", file.file_name().unwrap_or_default().to_string_lossy()));
+        if !on_line {
+            ui.weak("(PC is in generated code; showing the last source line)");
+        }
+    });
+    let mut toggle = None;
+    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+        for (i, t) in src.iter().enumerate() {
+            let n = i as u32 + 1;
+            let bp = bp_lines.contains(&n);
+            let mut rt = egui::RichText::new(format!("{} {n:>4}  {t}", if bp { "●" } else { " " })).monospace();
+            if n == cur {
+                rt = rt.background_color(egui::Color32::from_rgb(70, 90, 20)).color(egui::Color32::WHITE);
+            } else if bp {
+                rt = rt.color(egui::Color32::from_rgb(255, 110, 110));
+            }
+            let r = ui.add(egui::Label::new(rt).sense(egui::Sense::click()));
+            if n == cur && follow {
+                r.scroll_to_me(Some(egui::Align::Center));
+            }
+            if r.clicked() {
+                toggle = Some(n);
+            }
+        }
+    });
+    if let Some(n) = toggle {
+        match lines.first_addr(&file, n) {
+            Some(a) => {
+                if let Some(p) = m.breakpoints.iter().position(|x| lines.lookup(*x).is_some_and(|(f, l)| *f == file && l == n)) {
+                    m.breakpoints.remove(p);
+                } else {
+                    m.breakpoints.push(a);
+                }
+            }
+            None => {} // a comment or blank line: no code there
+        }
     }
 }
 

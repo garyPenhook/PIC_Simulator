@@ -6,4 +6,6 @@ description = "Cycle-exact simulator of the PIC parts Basil supports (see docs/S
 
 [dependencies]
 devdesc = { path = "../devdesc" }
+gimli = { version = "0.34.0", default-features = false, features = ["read"] }
+object = { version = "0.40.0", default-features = false, features = ["elf", "read_core"] }
 toml = "1"

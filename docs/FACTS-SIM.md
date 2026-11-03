@@ -386,5 +386,6 @@ NACKed and a read from nobody gives FFh.
 * `[A64]` The data sheet defines no behaviour for the data phase after a read address (only that read mode exists); acknowledging the
   address and leaving SDA high is the model's choice. The 8Dh charge pump command is from the application note at the end of the same PDF.
 * `[A65]` Charge pump order not enforced; `[A66]` Fosc fixed at 370 kHz; `[A67]` vertical scroll direction read from A3h note 4 (the data sheet shows it only in Figure 10-10).
+* The GUI Board panel is shown before a program is loaded (pins of the selected device) and the wiring is applied on Load.
 * Pin changes in the GUI re-attach the part: the OLED starts blank, like a power-up. Reset keeps the wiring.
 * Tests: `crates/picsim/tests/board.rs` (hardware bus through the MSSP model, bit-banged lines driven by the test, wrong-pin cases).
