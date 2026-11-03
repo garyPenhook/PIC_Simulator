@@ -25,8 +25,10 @@ use devdesc::Device;
 use std::collections::{BTreeSet, VecDeque};
 
 mod nvm;
+mod nvmq;
 mod quart;
 use nvm::Nvm;
+use nvmq::NvmQ;
 use quart::QUart;
 
 /// A flag bit in a PIRx register.
@@ -95,6 +97,7 @@ const T1G: u8 = 40;
 /// PORTx (index into `ports`) uses hook code PORT0 + index: a read gives the pin levels, a write goes to LATx.
 const PORT0: u8 = 48;
 const NVM0: u8 = 240;
+const NVMQ0: u8 = 242;
 
 /// EUSART1 transmitter of the Q10 style (TX1REG, TX1STA, BAUD1CON, SP1BRGL/H; DS40002043F ch.29 p.503-505).
 /// * TXREG moves to the shift register at once when that is idle, otherwise it is held and moves in the cycle
@@ -230,6 +233,7 @@ pub struct Periph {
     quarts: Vec<QUart>,
     adc: Option<Adc>,
     nvm: Option<Nvm>,
+    nvmq: Option<NvmQ>,
     fvr: Option<usize>,
     /// Bytes the transmitters started to send: (EUSART number 1-based, cycle it started, byte).
     pub tx: Vec<(u8, u64, u8)>,
@@ -265,7 +269,7 @@ impl Periph {
 
     /// Find the timers the part has and mark their registers as hooked in `m`.
     pub fn bind(dev: &Device, m: &mut DataMem) -> Periph {
-        let mut p = Periph { ports: Vec::new(), drive: Vec::new(), t0: None, t1: None, t2: None, uarts: Vec::new(), quarts: Vec::new(), adc: None, nvm: None, fvr: None, tx: Vec::new(), notes: BTreeSet::new(), event: None };
+        let mut p = Periph { ports: Vec::new(), drive: Vec::new(), t0: None, t1: None, t2: None, uarts: Vec::new(), quarts: Vec::new(), adc: None, nvm: None, nvmq: None, fvr: None, tx: Vec::new(), notes: BTreeSet::new(), event: None };
         let mut hook = |a: usize, k: u8| m.special[a] = Special::Hook(k);
         if let (Some(l), Some(h), Some(c0), Some(c1), Some(flag)) =
             (addr(dev, "TMR0L"), addr(dev, "TMR0H"), addr(dev, "T0CON0"), addr(dev, "T0CON1"), Flag::find(dev, "TMR0IF"))
@@ -341,6 +345,14 @@ impl Periph {
             hook(n.con1, NVM0 + nvm::CON1);
             hook(n.con2, NVM0 + nvm::CON2);
             p.nvm = Some(n);
+        }
+        if addr(dev, "NVMLOCK").is_some()
+            && let Some(n) = NvmQ::find(dev)
+        {
+            hook(n.con0, NVMQ0 + nvmq::CON0);
+            hook(n.con1, NVMQ0 + nvmq::CON1);
+            hook(n.lock, NVMQ0 + nvmq::LOCK);
+            p.nvmq = Some(n);
         }
         if let Some(a) = addr(dev, "FVRCON") {
             hook(a, FVR0);
@@ -642,6 +654,11 @@ impl Periph {
         {
             ev.push(e);
         }
+        if let Some(n) = &mut self.nvmq
+            && let Some(e) = n.sync(m, now)
+        {
+            ev.push(e);
+        }
         for e in ev {
             self.raised(e);
         }
@@ -678,7 +695,7 @@ impl Periph {
                 if m.mem[t.con] & 2 != 0 { m.mem[t.h] } else { (t.cnt >> 8) as u8 }
             }
             T2T => self.t2.as_ref().unwrap().cnt,
-            k if k == NVM0 + nvm::CON2 => 0,
+            k if k == NVM0 + nvm::CON2 || k == NVMQ0 + nvmq::LOCK => 0,
             QUART0..QUART_END => {
                 let i = usize::from(k - QUART0) / usize::from(quart::HOOKS);
                 self.quarts[i].read_rxb(m)
@@ -698,14 +715,18 @@ impl Periph {
 
     /// Plain registers (TMR0H, T0CON0/1, T1CON, ...) read the stored byte.
     pub fn is_stored(k: u8) -> bool {
-        !(k == NVM0 + nvm::CON2 || matches!(k, T0L | T1L | T1H | T2T | T1G | PORT0..=0x6F) || (UART0..40).contains(&k) && (k - UART0) % UART_HOOKS == 3
+        !(k == NVM0 + nvm::CON2 || k == NVMQ0 + nvmq::LOCK || matches!(k, T0L | T1L | T1H | T2T | T1G | PORT0..=0x6F) || (UART0..40).contains(&k) && (k - UART0) % UART_HOOKS == 3
             || (QUART0..QUART_END).contains(&k) && (k - QUART0) % quart::HOOKS == quart::RXB)
     }
 
     /// A write: `v` is already masked to the implemented bits. The caller has synced to the writing cycle.
     pub fn write(&mut self, k: u8, v: u8, now: u64, m: &mut DataMem) {
         match k {
-            NVM0..=255 => {
+            NVMQ0..=244 => {
+                let n = self.nvmq.as_mut().unwrap();
+                n.write(k - NVMQ0, v, now, m, &mut self.notes);
+            }
+            NVM0..=241 => {
                 let n = self.nvm.as_mut().unwrap();
                 n.write(k - NVM0, v, now, m, &mut self.notes);
             }

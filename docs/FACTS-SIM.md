@@ -216,3 +216,18 @@ lacks keeps the register's unprogrammed default (0xFF). `basil-sim --config` pri
   10 000 = Fosc 4 MHz; the models do not know Fosc). `[A31]` unlock tracking ignores instructions between the writes.
   `[A32]` not modelled: PFM read/write, sector operations, WRTD write protect, EEPROM content across power-on reset.
 * Errata DS80000832G 1.6.1 (NVMERR stays set across Resets) is not modelled; the search of the errata found no other NVM item.
+
+## Data EEPROM of the Q41 (S5, `periph/nvmq.rs`, DS40002214G ch.10)
+
+* NVMCON1.NVMCMD picks the operation, NVMCON0.GO starts it (Table 10-1 p.87-88). Read 000 and read with post increment 001 need
+  no unlock and set no NVMIF; the byte is in NVMDATL on the next instruction (10.4.1 p.101). Write 011 / write with post
+  increment 100 need NVMLOCK = 55h, AAh before GO, erase first, let the CPU run, and on completion clear GO and set NVMIF
+  (PIR0.4) (10.2 p.88, 10.4.2 p.102-103).
+* While GO is set, writes to the NVM registers are blocked and GO cannot be cleared by software (10.1 p.88).
+* WRERR (NVMCON1.7): a write while locked, to an unimplemented area, or a page operation on the DFM sets it and the GO attempt
+  fails (10.5.2 p.106, 10.4.5 p.104). Software can clear it but not set it. NVMLOCK reads zero (10.5.3 p.107).
+* Time: MEM24 gives 11 ms maximum and no typical value (48.3.5 p.895). `[A33]` `NvmQ::write_cycles` = 10 000 cycles (Fosc 4 MHz).
+  `[A34]` post increment adds 1 on the DFM, at completion for writes (the data sheet does not say when). `[A35]` unlock tracking
+  ignores instructions between the writes. `[A36]` not modelled: PFM and page operations, WRTn protection, WRERR after a Reset
+  during a write, blocking of NVMADR/NVMDAT writes while GO is set.
+* Errata DS80000901H: the search found no NVM item. `exec_q41/lib_eeprom` passes (30439 cycles, not yet compared with MDB).
