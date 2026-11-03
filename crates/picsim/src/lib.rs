@@ -11,4 +11,4 @@ pub mod periph;
 pub mod pic18;
 pub mod stimulus;
 
-pub use machine::{Machine, Stop};
+pub use machine::{LineStep, Machine, Stop};

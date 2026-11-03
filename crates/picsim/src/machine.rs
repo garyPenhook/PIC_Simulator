@@ -18,6 +18,15 @@ pub enum Stop {
     Breakpoint(u32),
 }
 
+/// State of a source-line step that runs over several calls of `Machine::line_step`.
+#[derive(Clone, Debug)]
+pub struct LineStep {
+    over: bool,
+    out: bool,
+    here: Option<(std::path::PathBuf, u32)>,
+    d0: u8,
+}
+
 pub struct Machine {
     pub cpu: Pic18,
     pub dev: Device,
@@ -113,39 +122,48 @@ impl Machine {
         self.cpu.m.mem[self.cpu.m.regs.stkptr as usize] & 0x7F
     }
 
-    /// Steps to the next BASIC line (needs the ELF's line table). `over` runs calls and interrupts to completion; `out`
-    /// runs until the current routine returns. Stops early at a breakpoint or `__halt`, or after `limit` instructions
-    /// (`Stop::Cycles`). Returns `None` when it stopped on a new line (or after the return, for `out`).
-    pub fn step_line(&mut self, over: bool, out: bool, limit: u32) -> Option<Stop> {
-        let here = self.debug.lines.lookup(self.cpu.pc).map(|(f, l)| (f.clone(), l));
-        let d0 = self.stack_depth();
+    /// Starts a source-line step (see `line_step`).
+    pub fn begin_line_step(&self, over: bool, out: bool) -> LineStep {
+        LineStep { over, out, here: self.debug.lines.lookup(self.cpu.pc).map(|(f, l)| (f.clone(), l)), d0: self.stack_depth() }
+    }
+
+    /// Runs a source-line step for at most `budget` instructions. `None`: not finished, call again. `Some(None)`: stopped on
+    /// a new line (or, for `out`, after the routine returned). `Some(Some(stop))`: a breakpoint or `__halt` came first.
+    /// `over` runs calls and interrupts to completion; `out` runs until the current routine returns.
+    pub fn line_step(&mut self, s: &LineStep, budget: u32) -> Option<Option<Stop>> {
         let halt = self.syms.get("__halt").copied();
-        for _ in 0..limit {
+        for _ in 0..budget {
             self.cpu.step();
             let pc = self.cpu.pc;
             if Some(pc) == halt {
-                return Some(Stop::Halt);
+                return Some(Some(Stop::Halt));
             }
             if self.breakpoints.contains(&pc) {
-                return Some(Stop::Breakpoint(pc));
+                return Some(Some(Stop::Breakpoint(pc)));
             }
             let d = self.stack_depth();
-            if out {
-                if d < d0 {
-                    return None;
+            if s.out {
+                if d < s.d0 {
+                    return Some(None);
                 }
                 continue;
             }
-            if over && d > d0 {
+            if s.over && d > s.d0 {
                 continue;
             }
             if let Some((f, l)) = self.debug.lines.lookup(pc)
-                && here.as_ref().is_none_or(|(hf, hl)| hf != f || *hl != l)
+                && s.here.as_ref().is_none_or(|(hf, hl)| hf != f || *hl != l)
             {
-                return None;
+                return Some(None);
             }
         }
-        Some(Stop::Cycles)
+        None
+    }
+
+    /// A source-line step in one go, giving up after `limit` instructions (`Stop::Cycles`).
+    pub fn step_line(&mut self, over: bool, out: bool, limit: u32) -> Option<Stop> {
+        let s = self.begin_line_step(over, out);
+        self.line_step(&s, limit).unwrap_or(Some(Stop::Cycles))
     }
 
     /// Run until `until` (a program address), a breakpoint, SLEEP, or `max_cycles` more cycles.

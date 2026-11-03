@@ -53,3 +53,9 @@ fn values_are_shown_by_type() {
     assert!(var(Kind::Float, 4, 4, false).show(&[0, 0, f[0], f[1], f[2], f[3]]).starts_with("1.5 "));
     assert_eq!(var(Kind::Unsigned, 1, 1, false).show(&[0]), "(outside RAM)");
 }
+
+#[test]
+fn device_is_read_from_the_elf() {
+    assert_eq!(picsim::debuginfo::device_of(b"\0/xc8/pic/include/pic18.inc\0PIC18F-Q_DFP/1.31\0pic18f27q10.inc\0X").as_deref(), Some("18F27Q10"));
+    assert_eq!(picsim::debuginfo::device_of(b"nothing here"), None);
+}

@@ -7,6 +7,13 @@ use picsim::{Machine, Stop, disasm::disasm};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+/// A step that runs over several frames so the window stays responsive; Pause cancels it.
+enum Job {
+    Line(picsim::LineStep),
+    /// Run to a program address (Step over a call).
+    Until(u32),
+}
+
 struct App {
     devices_dir: PathBuf,
     devices: Vec<String>,
@@ -42,6 +49,7 @@ struct App {
     last_src: Option<(PathBuf, u32)>,
     /// Data memory when the last Step/Run began: variables that differ are marked as changed.
     snap: Option<Vec<u8>>,
+    job: Option<Job>,
 }
 
 fn list_devices(dir: &PathBuf) -> Vec<String> {
@@ -91,6 +99,7 @@ impl App {
             src_view: true,
             last_src: None,
             snap: None,
+            job: None,
         };
         if hex.is_some() {
             a.load();
@@ -107,6 +116,17 @@ impl App {
     fn load(&mut self) {
         self.running = false;
         self.last_stop = None;
+        // The part the ELF was built for wins over the device box (the wrong part has the wrong SFRs and pins).
+        let mut dev_note = String::new();
+        if let Some(e) = picsim::debuginfo::elf_for(std::path::Path::new(self.hex_path.trim()))
+            && let Ok(b) = std::fs::read(&e)
+            && let Some(d) = picsim::debuginfo::device_of(&b)
+            && let Some(x) = self.devices.iter().find(|x| x.eq_ignore_ascii_case(&d))
+            && *x != self.device
+        {
+            dev_note = format!(" - device set to {x} from the ELF (was {})", self.device);
+            self.device = x.clone();
+        }
         let res = (|| -> Result<(Machine, String), String> {
             let dev = devdesc::Device::load(&self.devices_dir.join(format!("{}.toml", self.device))).map_err(|e| e.to_string())?;
             let mut m = Machine::new(dev)?;
@@ -134,7 +154,7 @@ impl App {
                 },
                 None => " - no .elf beside the hex: no source view or variables".to_string(),
             };
-            Ok((m, note))
+            Ok((m, format!("{dev_note}{note}")))
         })();
         match res {
             Ok((m, note)) => {
@@ -153,7 +173,8 @@ impl App {
                 self.sources.clear();
                 self.last_src = None;
                 self.snap = None;
-                self.lines = m.debug.lines.clone();
+                // BASIC lines only: an ELF built without -g has just the assembly's lines.
+                self.lines = if m.debug.lines.source_files().is_empty() { LineMap::default() } else { m.debug.lines.clone() };
                 if !m.debug.vars.is_empty() {
                     self.tab = 4; // the Variables tab
                 }
@@ -175,11 +196,8 @@ impl App {
     /// routine returns. Stops early at a breakpoint, at `__halt`, or after a million instructions.
     fn step_line(&mut self, over: bool, out: bool) {
         self.snapshot();
-        let Some(m) = &mut self.m else { return };
-        match m.step_line(over, out, 1_000_000) {
-            None => {}
-            Some(Stop::Cycles) => self.msg = "no stop within a million instructions".into(),
-            Some(s) => self.last_stop = Some(s),
+        if let Some(m) = &self.m {
+            self.job = Some(Job::Line(m.begin_line_step(over, out)));
         }
     }
 
@@ -205,14 +223,56 @@ fn hex_u32(s: &str) -> Option<u32> {
 
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Work in slices of about 30 ms, so a long step or a fast Run never freezes the window.
+        let t0 = std::time::Instant::now();
+        let slice = std::time::Duration::from_millis(30);
+        if let Some(job) = self.job.take() {
+            let mut keep = Some(job);
+            if let Some(m) = self.m.as_mut() {
+                while let Some(j) = keep.as_ref() {
+                    // None: not finished. Some(None): arrived. Some(Some(stop)): a breakpoint or the halt came first.
+                    let finished: Option<Option<Stop>> = match j {
+                        Job::Line(s) => m.line_step(s, 20_000),
+                        Job::Until(t) => match m.run(Some(*t), 20_000) {
+                            Stop::Cycles => None,
+                            Stop::Halt => Some(None), // the target address
+                            s => Some(Some(s)),
+                        },
+                    };
+                    if let Some(r) = finished {
+                        self.last_stop = r;
+                        keep = None;
+                    } else if t0.elapsed() > slice {
+                        break;
+                    }
+                }
+            } else {
+                keep = None;
+            }
+            if keep.is_some() {
+                ctx.request_repaint();
+            }
+            self.job = keep;
+        }
         if self.running {
             let n = 10f64.powf(f64::from(self.speed)) as u64;
-            self.advance(n);
+            let mut left = n;
+            while left > 0 && self.running {
+                let chunk = left.min(20_000);
+                self.advance(chunk);
+                left -= chunk;
+                if t0.elapsed() > slice {
+                    break;
+                }
+            }
             ctx.request_repaint();
         }
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        if self.job.is_some() {
+            ui.ctx().request_repaint(); // keep the slices coming
+        }
         // A file dropped on the window: .hex loads as the program, .toml is the stimulus.
         let dropped: Vec<PathBuf> = ui.ctx().input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).collect());
         for f in dropped {
@@ -250,21 +310,23 @@ impl eframe::App for App {
                 }
                 ui.separator();
                 let loaded = self.m.is_some();
-                if ui.add_enabled(loaded && !self.running, egui::Button::new("Run")).clicked() {
+                let idle = !self.running && self.job.is_none();
+                if ui.add_enabled(loaded && idle, egui::Button::new("Run")).clicked() {
                     self.snapshot();
                     self.running = true;
                     self.last_stop = None;
                 }
-                if ui.add_enabled(self.running, egui::Button::new("Pause")).clicked() {
+                if ui.add_enabled(!idle, egui::Button::new("Pause")).clicked() {
                     self.running = false;
+                    self.job = None;
                 }
-                if ui.add_enabled(loaded && !self.running, egui::Button::new("Step")).clicked() {
+                if ui.add_enabled(loaded && idle, egui::Button::new("Step")).clicked() {
                     self.snapshot();
                     if let Some(m) = &mut self.m {
                         m.cpu.step();
                     }
                 }
-                if ui.add_enabled(loaded && !self.running, egui::Button::new("Step over")).clicked() {
+                if ui.add_enabled(loaded && idle, egui::Button::new("Step over")).clicked() {
                     self.snapshot();
                     if let Some(m) = &mut self.m {
                         let w = u16::from(m.cpu.prog[m.cpu.pc as usize]) | u16::from(m.cpu.prog[m.cpu.pc as usize + 1]) << 8;
@@ -275,9 +337,7 @@ impl eframe::App for App {
                             _ => None,
                         };
                         match next {
-                            Some(t) => {
-                                m.run(Some(t), 50_000_000);
-                            }
+                            Some(t) => self.job = Some(Job::Until(t)),
                             None => {
                                 m.cpu.step();
                             }
@@ -285,18 +345,19 @@ impl eframe::App for App {
                     }
                 }
                 let has_src = loaded && !self.lines.is_empty();
-                if ui.add_enabled(has_src && !self.running, egui::Button::new("Line")).on_hover_text("step to the next BASIC line, into calls").clicked() {
+                if ui.add_enabled(has_src && idle, egui::Button::new("Line")).on_hover_text("step to the next BASIC line, into calls").clicked() {
                     self.step_line(false, false);
                 }
-                if ui.add_enabled(has_src && !self.running, egui::Button::new("Line over")).on_hover_text("step to the next BASIC line, over calls").clicked() {
+                if ui.add_enabled(has_src && idle, egui::Button::new("Line over")).on_hover_text("step to the next BASIC line, over calls").clicked() {
                     self.step_line(true, false);
                 }
-                if ui.add_enabled(has_src && !self.running, egui::Button::new("Out")).on_hover_text("run until this routine returns").clicked() {
+                if ui.add_enabled(has_src && idle, egui::Button::new("Out")).on_hover_text("run until this routine returns").clicked() {
                     self.step_line(false, true);
                 }
                 if ui.add_enabled(loaded, egui::Button::new("Reset")).clicked() {
                     self.running = false;
                     self.last_stop = None;
+                    self.job = None;
                     self.snap = None;
                     if let Some(m) = &mut self.m {
                         m.reset();
@@ -308,6 +369,7 @@ impl eframe::App for App {
             });
             ui.label(match (&self.last_stop, self.running) {
                 (_, true) => "running".to_string(),
+                _ if self.job.is_some() => "stepping... (Pause cancels)".to_string(),
                 (Some(s), _) => format!("{} — stopped: {s:?}", self.msg),
                 _ => self.msg.clone(),
             });
@@ -549,6 +611,9 @@ impl eframe::App for App {
                     }
                 }
             });
+            if self.lines.is_empty() {
+                ui.colored_label(egui::Color32::from_rgb(255, 150, 80), "No BASIC line information in this build. Build with basil -g (VS Code: Build Debug, Ctrl+F7; F7 has no line information) and load dist/<name>.hex or .elf: then Source, Variables, Line stepping and the call stack work.");
+            }
             if self.src_view && !self.lines.is_empty() {
                 source_pane(ui, &self.lines, &self.elf_dir, &mut self.sources, &mut self.last_src, m, pc, self.follow);
                 return;

@@ -812,8 +812,6 @@ impl Periph {
     fn sync_core(&mut self, m: &mut DataMem, now: u64) {
         let mut ev: Vec<u64> = Vec::new();
         // Compare CCPs with the timer they use: (index, CCPR, MODE, timer number).
-        let have1: Vec<u8> = self.t1.iter().map(|t| t.n).collect();
-        let have2: Vec<u8> = self.t2.iter().map(|t| t.n).collect();
         let comps: Vec<(usize, u16, u8, u8)> = self
             .ccps
             .iter()
@@ -821,7 +819,7 @@ impl Periph {
             .filter(|(_, c)| c.en(m) && matches!(c.mode(m), 1 | 2 | 8 | 9 | 10 | 11))
             .filter_map(|(i, c)| {
                 let n = ccp::timer_of(self.ccptmrs, m, c.n, false);
-                if have1.contains(&n) {
+                if self.t1.iter().any(|t| t.n == n) {
                     Some((i, c.ccpr(m), c.mode(m), n))
                 } else {
                     self.notes.insert(format!("CCP{} selects a capture/compare timer this part does not have (CCPTMRS); it is not modelled", c.n));
@@ -1022,7 +1020,7 @@ impl Periph {
                     continue;
                 }
                 let want = ccp::timer_of(self.ccptmrs, m, ccp.n, true);
-                if !have2.contains(&want) {
+                if !self.t2.iter().any(|t| t.n == want) {
                     self.notes.insert(format!("CCP{} PWM selects a timer this part does not have (CCPTMRS); it is not modelled", ccp.n));
                     continue;
                 }

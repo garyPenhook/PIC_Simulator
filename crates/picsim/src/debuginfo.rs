@@ -206,3 +206,18 @@ pub fn elf_for(program: &std::path::Path) -> Option<std::path::PathBuf> {
     let stem = program.file_stem()?;
     [Some(program.with_extension("elf")), program.parent().and_then(|d| d.parent()).map(|d| d.join(stem).with_extension("elf"))].into_iter().flatten().find(|e| e.is_file())
 }
+
+/// The part an ELF was built for, from the `pic18f27q10.inc` file the assembler records (`18F27Q10`).
+pub fn device_of(elf: &[u8]) -> Option<String> {
+    let key = b"pic18f";
+    let mut from = 0;
+    while let Some(i) = elf[from..].windows(key.len()).position(|w| w == key) {
+        let start = from + i + 3; // after "pic"
+        let name: Vec<u8> = elf[start..].iter().copied().take_while(u8::is_ascii_alphanumeric).collect();
+        if elf[start + name.len()..].starts_with(b".inc") && name.len() < 16 {
+            return String::from_utf8(name).ok().map(|n| n.to_ascii_uppercase());
+        }
+        from += i + key.len();
+    }
+    None
+}
