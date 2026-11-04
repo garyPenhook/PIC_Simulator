@@ -544,7 +544,7 @@ impl Periph {
                 }
             }
             if !p.clcs.is_empty() {
-                p.clcin = (0..8).filter_map(|k| addr(dev, &format!("CLCIN{k}PPS"))).collect();
+                p.clcin = (0..8).map(|k| addr(dev, &format!("CLCIN{k}PPS")).unwrap_or(usize::MAX)).collect();
                 p.clcdata = addr(dev, "CLCDATA");
             }
             for n in 3..=4u8 {
@@ -859,7 +859,7 @@ impl Periph {
     /// Level of CLC data input `src` (DyS code, DS40002043F p.409) of cell `n` at cycle `now`.
     fn clc_input(&mut self, m: &DataMem, src: u8, now: u64, n: u8) -> bool {
         let code = match src {
-            0..=7 => return self.clcin.get(usize::from(src)).is_some_and(|&r| self.pps_pin(m, r, now)),
+            0..=7 => return self.clcin.get(usize::from(src)).is_some_and(|&r| r != usize::MAX && self.pps_pin(m, r, now)),
             24..=27 => src - 19, // CCP1, CCP2, PWM3, PWM4 = source codes 5..8
             28 | 29 => src - 15, // CMP1 = 0x0D, CMP2 = 0x0E
             33..=40 => 0x18 + src - 33,
@@ -946,7 +946,7 @@ impl Periph {
         self.in_clc = false;
     }
 
-    /// Pin stimulus changes between the last look and `now` are evaluated in order, then the state at `now`.
+    /// Pin stimulus changes between the last look and `now` are evaluated in order (the state at `now` follows in `sync`).
     fn clc_scan(&mut self, m: &mut DataMem, now: u64) {
         let from = self.clc_scan;
         if !self.clc_active(m) {
@@ -958,7 +958,6 @@ impl Periph {
         for t in at {
             self.clc_eval(m, 4 * t);
         }
-        self.clc_eval(m, 4 * now);
         self.clc_scan = now;
     }
 

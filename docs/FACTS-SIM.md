@@ -389,7 +389,7 @@ NACKed and a read from nobody gives FFh.
 * Functions (Figure 26-3 p.411): 000 (g1&g2)|(g3&g4); 001 (g1|g2)^(g3|g4); 010 g1&g2&g3&g4; 011 S-R S=g1|g2 R=g3|g4; 100 D-FF D=g2 CLK=g1 S=g4 R=g3;
   101 D-FF D=g4|g2 CLK=g1 R=g3; 110 J-K J=g2 K=g4 CLK=g1 R=g3; 111 latch D=g2 LE=g3 S=g4 R=g1. CLCxIF on the rising (INTP) or falling (INTN) edge of the output (26.2).
 * `[A83]` Evaluated after every instruction and on every change of a modelled input (pin stimulus times, PPS source changes); no propagation delay (39.4.20 not used).
-  `[A84]` R wins over S when both are 1 (not stated). `[A85]` Disabling clears the flip-flop; enabling takes the present clock level as the previous one.
+  `[A84]` R wins over S when both are 1 (not stated). `[A85]` Disabling clears the flip-flop; enabling takes the present clock level as the previous one; enabling or disabling can itself be an output edge that sets CLCxIF per INTP/INTN (not described). A loop of cells that does not settle logs its edges on every pass.
   `[A86]` Inputs modelled: CLCIN0-7 pins, CCP1/2, PWM3/4, CMP1/2, CWG1A/B, CLC outputs. Others read low and add a note. `[A87]` Loops are iterated at most 8 times.
 * Not modelled: Timer1 gate from a comparator, ADC auto-trigger, Timer2/4/6 reset from a comparator, wake from Sleep.
 * Tests: `crates/picsim/tests/cmp.rs`.
