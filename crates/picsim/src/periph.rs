@@ -26,6 +26,7 @@ use std::collections::{BTreeSet, VecDeque};
 
 mod board;
 mod ccp;
+mod cwg;
 mod flash;
 mod nvm;
 mod nvmq;
@@ -35,6 +36,7 @@ mod quart;
 mod spi;
 pub use board::{parse_pin, pin_name, Board, Bus, Led, Oled, Pin};
 use ccp::{Ccp, Pwm};
+use cwg::Cwg;
 use i2cq::I2cQ;
 use mssp::Mssp;
 use nvm::Nvm;
@@ -151,6 +153,9 @@ const I2CQ_END: u8 = I2CQ0 + 2 * i2cq::HOOKS;
 const CCP0: u8 = 224;
 /// Q10 PWM3/PWM4 (PWMxCON only) use hook codes PWM0 + n.
 const PWM0: u8 = 236;
+/// Q10 CWG1 registers use hook codes CWG0 + cwg sub-code (see `cwg.rs`).
+const CWG0: u8 = 41; // 41..=47 (T1G is 40, the ports start at 48)
+const CWG_END: u8 = CWG0 + cwg::HOOKS - 1;
 const NVM0: u8 = 240;
 const NVMQ0: u8 = 242;
 
@@ -320,6 +325,7 @@ pub struct Periph {
     pub notes: BTreeSet<String>,
     ccps: Vec<Ccp>,
     pwms: Vec<Pwm>,
+    cwg: Option<Cwg>,
     /// A compare match with TMR1 clearing happened on the last clock: TMR1 goes to 0 on the next one `[A61]`.
     ccptmrs: Option<usize>,
     /// RxyPPS registers: (register, index into `ports`, pin).
@@ -396,7 +402,7 @@ impl Periph {
 
     /// Find the timers the part has and mark their registers as hooked in `m`.
     pub fn bind(dev: &Device, m: &mut DataMem) -> Periph {
-        let mut p = Periph { ports: Vec::new(), drive: Vec::new(), t0: None, t1: Vec::new(), t2: Vec::new(), uarts: Vec::new(), quarts: Vec::new(), spis: Vec::new(), mssps: Vec::new(), i2cqs: Vec::new(), adc: None, nvm: None, nvmq: None, stall: 0, fvr: None, tx: Vec::new(), spi_tx: Vec::new(), i2c_log: Vec::new(), notes: BTreeSet::new(), ccps: Vec::new(), pwms: Vec::new(), ccptmrs: None, ppsout: Vec::new(), i2c_pps: Vec::new(), board: Board::default(), pullup: Vec::new(), forced: Vec::new(), sig: 0, sched: Vec::new(), pin_log: Vec::new(), event: None };
+        let mut p = Periph { ports: Vec::new(), drive: Vec::new(), t0: None, t1: Vec::new(), t2: Vec::new(), uarts: Vec::new(), quarts: Vec::new(), spis: Vec::new(), mssps: Vec::new(), i2cqs: Vec::new(), adc: None, nvm: None, nvmq: None, stall: 0, fvr: None, tx: Vec::new(), spi_tx: Vec::new(), i2c_log: Vec::new(), notes: BTreeSet::new(), ccps: Vec::new(), pwms: Vec::new(), cwg: None, ccptmrs: None, ppsout: Vec::new(), i2c_pps: Vec::new(), board: Board::default(), pullup: Vec::new(), forced: Vec::new(), sig: 0, sched: Vec::new(), pin_log: Vec::new(), event: None };
         let mut hook = |a: usize, k: u8| m.special[a] = Special::Hook(k);
         if let (Some(l), Some(h), Some(c0), Some(c1), Some(flag)) =
             (addr(dev, "TMR0L"), addr(dev, "TMR0H"), addr(dev, "T0CON0"), addr(dev, "T0CON1"), Flag::find(dev, "TMR0IF"))
@@ -492,6 +498,12 @@ impl Periph {
                     hook(c.con, CCP0 + p.ccps.len() as u8 * ccp::HOOKS);
                     p.ccps.push(c);
                 }
+            }
+            if let Some(c) = Cwg::find(dev) {
+                for (reg, sub) in [(c.con0, cwg::CON0), (c.con1, cwg::CON1), (c.as0, cwg::AS0), (c.as1, cwg::AS1), (c.str_, cwg::STR), (c.dbr, cwg::DBR), (c.dbf, cwg::DBF)] {
+                    hook(reg, CWG0 + sub);
+                }
+                p.cwg = Some(c);
             }
             for n in 3..=4u8 {
                 if let Some(w) = Pwm::find(dev, n) {
@@ -794,17 +806,156 @@ impl Periph {
                 self.pin_log.push((tick, self.ports[pi].letter, bit, new));
             }
         }
+        if self.cwg.as_ref().is_some_and(|c| c.source(m) == Some(code)) {
+            self.cwg_edge(m, new, tick);
+        }
+    }
+
+    /// Apply the outputs the CWG asks for at `tick`; delayed changes (dead band) go to the schedule. Pending delayed
+    /// changes are dropped first: an input that turned round before the dead band ended shows no pulse (25.8).
+    fn cwg_apply(&mut self, m: &mut DataMem, tick: u64, ch: [cwg::Change; 4]) {
+        self.sched.retain(|s| !(1..=4).contains(&s.code));
+        for (y, c) in ch.into_iter().enumerate() {
+            let code = y as u8 + 1;
+            let bit = 1u8 << y;
+            let Some(l) = c.level else {
+                self.cwg.as_mut().unwrap().hiz |= bit;
+                continue;
+            };
+            self.cwg.as_mut().unwrap().hiz &= !bit;
+            if c.delay == 0 {
+                self.set_sig(m, code, u8::from(l), tick);
+            } else {
+                self.sched.push(Sched { tick: tick + c.delay, code, act: u8::from(l), flag: None, pwm: false });
+            }
+        }
+    }
+
+    /// Shutdown sources: the AS0E pin (low) is looked at; the others are not modelled `[A76]`. Sets SHUTDOWN and CWG1IF when a source is
+    /// active, clears SHUTDOWN by hardware when the sources are gone and REN = 1. Returns true when a source is active.
+    fn cwg_sources(&mut self, m: &mut DataMem, now: u64) -> bool {
+        let Some(c) = &self.cwg else { return false };
+        let (as0, as1, pps) = (c.as0, m.mem[c.as1], c.pps);
+        if as1 & 0xFE != 0 {
+            self.notes.insert("CWG1 auto-shutdown sources other than the CWG1PPS pin (AS0E) are not modelled".to_string());
+        }
+        let active = as1 & 1 != 0 && pps.is_some_and(|r| !self.pps_pin(m, r, now));
+        let c = self.cwg.as_mut().unwrap();
+        if active && c.en(m) && m.mem[as0] & 0x80 == 0 {
+            m.mem[as0] |= 0x80;
+            c.flag.set(m);
+            c.reset_seq();
+            self.raised(now);
+        } else if !active && m.mem[as0] & 0xC0 == 0xC0 {
+            m.mem[as0] &= !0x80; // REN = 1: hardware restart
+            c.wait_rise_set();
+        }
+        active
+    }
+
+    /// The CWG data input went to `new` at `tick` (Fosc ticks).
+    fn cwg_edge(&mut self, m: &mut DataMem, new: bool, tick: u64) {
+        self.cwg_sources(m, tick / 4);
+        let ch = self.cwg.as_mut().unwrap().edge(m, new);
+        self.cwg_apply(m, tick, ch);
+    }
+
+    /// A write to a CWG1 register (hook sub-code `k - CWG0`).
+    fn cwg_write(&mut self, k: u8, v: u8, now: u64, m: &mut DataMem) {
+        let tick = 4 * now;
+        let c = self.cwg.as_mut().unwrap();
+        let sub = k - CWG0;
+        match sub {
+            cwg::CON0 => {
+                let old = m.mem[c.con0];
+                m.mem[c.con0] = v & 0xC7;
+                if v & 0x80 == 0 {
+                    c.disable();
+                } else if old & 0x80 == 0 {
+                    let lvl = c.source(m).is_some_and(|src| self.sig >> src & 1 != 0);
+                    c.enable(m, lvl);
+                } else {
+                    if v & 0x40 != 0 && old & 0x40 == 0 {
+                        c.ld_set();
+                    }
+                    if (v ^ old) & 7 == 1 && v & 6 == 2 {
+                        c.dir_change();
+                    }
+                }
+                if m.mem[c.ism] & 15 == 0 || m.mem[c.ism] & 15 > 4 {
+                    self.notes.insert("CWG1 data input other than CCP1, CCP2, PWM3 and PWM4 is not modelled; the CWG sees it low".to_string());
+                }
+                if m.mem[self.cwg.as_ref().unwrap().clk] & 1 != 0 {
+                    self.notes.insert("CWG1 clock HFINTOSC is counted as Fosc".to_string());
+                }
+            }
+            cwg::CON1 => {
+                m.mem[c.con1] = v & 0x0F | m.mem[c.con1] & 0x20;
+            }
+            cwg::AS0 => {
+                let old = m.mem[c.as0];
+                let keep = if v & 0x80 != 0 { 0x80 } else { 0 };
+                m.mem[c.as0] = v & 0x7F | keep;
+                if v & 0x80 == 0 && old & 0x80 != 0 {
+                    // Software clear: refused while a source is active; outputs wait for the next rising edge.
+                    let active = self.cwg_sources(m, now);
+                    let c = self.cwg.as_mut().unwrap();
+                    if active {
+                        m.mem[c.as0] |= 0x80;
+                    } else {
+                        c.wait_rise_set();
+                    }
+                } else if v & 0x80 != 0 && old & 0x80 == 0 {
+                    c.flag.set(m);
+                    c.reset_seq();
+                    self.raised(now);
+                    if v & 0x40 != 0 && !self.cwg_sources(m, now) {
+                        // Auto-restart: SHUTDOWN clears itself, the outputs wait for the next rising edge.
+                        let c = self.cwg.as_mut().unwrap();
+                        m.mem[c.as0] &= !0x80;
+                        c.wait_rise_set();
+                    }
+                }
+            }
+            cwg::AS1 => {
+                m.mem[c.as1] = v;
+            }
+            cwg::STR => {
+                m.mem[c.str_] = v; // asynchronous steering takes effect at the end of this cycle (below)
+            }
+            cwg::DBR | cwg::DBF => {
+                let reg = if sub == cwg::DBR { c.dbr } else { c.dbf };
+                m.mem[reg] = v & 63;
+                if m.mem[c.con0] & 0x80 == 0 {
+                    c.load_buffers(m);
+                }
+            }
+            _ => unreachable!(),
+        }
+        if matches!(sub, cwg::CON0 | cwg::AS0 | cwg::AS1 | cwg::CON1 | cwg::STR) {
+            if matches!(sub, cwg::CON0 | cwg::AS1) {
+                self.cwg_sources(m, now);
+            }
+            let ch = self.cwg.as_ref().unwrap().now(m);
+            self.cwg_apply(m, tick + 3, ch);
+        }
     }
 
     /// Apply the scheduled output changes that are due by cycle `now`, in time order.
     fn apply_sched(&mut self, m: &mut DataMem, now: u64, ev: &mut Vec<u64>) {
-        self.sched.sort_by_key(|s| s.tick);
-        let due = self.sched.iter().take_while(|s| s.tick / 4 <= now).count();
-        for s in self.sched.drain(..due).collect::<Vec<_>>() {
-            self.set_sig(m, s.code, s.act, s.tick);
-            if let Some(f) = s.flag {
-                f.set(m);
-                ev.push(s.tick / 4);
+        // A change can schedule another one (CWG dead band) that is also due: go on until nothing is.
+        loop {
+            self.sched.sort_by_key(|s| s.tick);
+            let due = self.sched.iter().take_while(|s| s.tick / 4 <= now).count();
+            if due == 0 {
+                break;
+            }
+            for s in self.sched.drain(..due).collect::<Vec<_>>() {
+                self.set_sig(m, s.code, s.act, s.tick);
+                if let Some(f) = s.flag {
+                    f.set(m);
+                    ev.push(s.tick / 4);
+                }
             }
         }
     }
@@ -1344,6 +1495,7 @@ impl Periph {
                     self.sched.retain(|s| s.code != sig);
                 }
             }
+            CWG0..=CWG_END => self.cwg_write(k, v, now, m),
             PWM0..=237 => {
                 let i = usize::from(k - PWM0);
                 let (con, sig) = (self.pwms[i].con, self.pwms[i].sig);
@@ -1454,7 +1606,7 @@ impl Periph {
         for &(reg, pi, bit) in &self.ppsout {
             // A pin driven by a modelled peripheral source (RxyPPS, TRIS clear) shows the source level, not the latch.
             let code = m.mem[reg] & 31;
-            if pi == i && tris >> bit & 1 == 0 && (self.ccps.iter().any(|c| c.sig == code) || self.pwms.iter().any(|c| c.sig == code)) {
+            if pi == i && tris >> bit & 1 == 0 && (self.ccps.iter().any(|c| c.sig == code) || self.pwms.iter().any(|c| c.sig == code) || ((1..=4).contains(&code) && self.cwg.as_ref().is_some_and(|c| c.hiz >> (code - 1) & 1 == 0))) {
                 v = v & !(1 << bit) | u8::from(self.sig >> code & 1 != 0) << bit;
             }
         }

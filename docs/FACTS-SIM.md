@@ -348,6 +348,27 @@ NACKed and a read from nobody gives FFh.
   while a PWM edge is scheduled does not cancel that edge.
 * Tests: `crates/picsim/tests/ccp.rs`.
 
+## Q10 CWG1 (`periph/cwg.rs`, DS40002043F ch.25 p.377-405)
+
+* Data input CWG1ISM 1-4 = CCP1, CCP2, PWM3, PWM4 (Table 25-1); outputs CWG1A..D are PPS codes 0x01-0x04 (Table 18-2). Other inputs (pin, CMP, DSM, CLC)
+  are not modelled and add a note. Hook codes 41-47 are the CWG1 registers.
+* Modes (CWG1CON0 MODE): 0 asynchronous and 1 synchronous steering (STRy = 1 follows the input with POLy, STRy = 0 shows OVRy; only STR is
+  synchronised, at the next rising edge), 2/3 forward/reverse full bridge, 4 half bridge, 5 push-pull. 6/7 reserved: outputs inactive.
+* Dead band (half bridge; full bridge after a direction change): DBR delays the turn-on of A/C, DBF that of B/D; an input that turns round
+  first shows no pulse. Count buffers: loaded on write with EN = 0; with EN = 1 at the rising edge after the first falling edge following LD = 1.
+* Auto-shutdown: SHUTDOWN set by software or by the AS0E pin source (low); CWG1IF set on the change; LSAC/LSBD override levels (tri-state lets the
+  pin show its latch); steering modes override only STRy = 1 pins; software clear refused while a source is active; outputs resume at the next
+  rising edge; REN = 1 clears SHUTDOWN by hardware.
+* `[A73]` Dead band is exactly DBx Fosc periods (the data sheet says DBx to DBx + 1); CS = 1 (HFINTOSC) is counted as Fosc with a note.
+* `[A74]` After EN goes 1 the modulated modes keep the inactive level until the first rising edge; steering follows the input at once.
+* `[A75]` EN = 0 drives all four outputs low.
+* `[A76]` The AS0E pin is sampled on CWG register writes and input edges only; AS1E-AS7E (Timer2/4/6, CMP, CLC) are not modelled (note).
+* `[A77]` POLy = 1 inverts (register description p.398); 25.6.2 says the opposite and is not followed.
+* `[A78]` A full-bridge direction change (MODE[0] written while EN = 1) takes effect at the next rising edge; the new modulated output waits DBR
+  (forward to reverse) or DBF (reverse to forward).
+* A write to a CWG register while a dead-band turn-on is pending drops it and applies the steady-state levels at once.
+* Tests: `crates/picsim/tests/cwg.rs`.
+
 ## Board parts: LEDs and an SSD1306 OLED (`periph/board.rs`, stimulus `[[led]]` / `[[oled]]`, GUI "Board" tab)
 
 * LED: lit while its pin is an output (TRIS clear) at the active level (`active = "high"` or `"low"`); an input pin leaves it dark.
