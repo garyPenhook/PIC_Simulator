@@ -4,7 +4,7 @@
 //! Interrupts, resets other than the first, SLEEP and the Q41 hardware context are later milestones (S3).
 
 use crate::mem::{DataMem, Special};
-use crate::periph::Periph;
+use crate::periph::{Periph, ResetKind};
 use devdesc::Device;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -54,6 +54,13 @@ pub struct Pic18 {
     wide_fsr: bool,
     stk_mask: u8,
     pc_mask: u32,
+    /// The device description, to rebuild the peripherals on a reset that is not a power-on reset.
+    dev: Device,
+    /// Stimulus text applied again to the rebuilt peripherals after such a reset (set by `Machine::load_stimulus`).
+    pub stim: Option<String>,
+    /// MCLR-column reset values (Table 9-3): register address, bits set, bits cleared; `u`, `q`, `x` bits are left alone.
+    mclr: Vec<(usize, u8, u8)>,
+    pcon0: Option<usize>,
 }
 
 /// What the vectored interrupt controller saves on entry (DS40002214G 11.6 p.120-121).
@@ -157,6 +164,26 @@ impl Pic18 {
             wide_fsr,
             stk_mask: (depth + 1).next_power_of_two() as u8 - 1,
             pc_mask: (dev.memory.program.size - 1) | 1,
+            dev: dev.clone(),
+            stim: None,
+            mclr: dev
+                .sfr
+                .iter()
+                .filter(|s| s.width == 8 && s.mclr.len() == 8 && s.name != "STATUS" && s.name != "PCON0")
+                .map(|s| {
+                    let (mut set, mut clr) = (0u8, 0u8);
+                    for (i, c) in s.mclr.chars().enumerate() {
+                        match c {
+                            '1' => set |= 0x80 >> i,
+                            '0' => clr |= 0x80 >> i,
+                            _ => {}
+                        }
+                    }
+                    (s.addr as usize, set, clr)
+                })
+                .filter(|&(_, set, clr)| set | clr != 0)
+                .collect(),
+            pcon0: dev.find_sfr("PCON0").map(|s| s.addr as usize),
         };
         p.pc_mask = (dev.memory.program.size.next_power_of_two() - 1) & !1;
         Ok(p)
@@ -183,7 +210,9 @@ impl Pic18 {
                 self.m.mem[a] = v & self.m.implemented[a];
             }
         }
-        if self.cfg.get("WDTE").is_some_and(|w| w != 0) {
+        let (wdte, cps, cws, ccs) = (self.cfg.get("WDTE"), self.cfg.get("WDTCPS"), self.cfg.get("WDTCWS"), self.cfg.get("WDTCCS"));
+        let modelled = self.p.wdt_config(wdte.unwrap_or(0) as u8, cps.unwrap_or(0x1F) as u8, cws.unwrap_or(7) as u8, ccs.unwrap_or(7) as u8);
+        if !modelled && self.cfg.get("WDTE").is_some_and(|w| w != 0) {
             self.notes.insert("watchdog enabled by WDTE: a timeout reset is not modelled (CLRWDT does nothing)".into());
         }
     }
@@ -627,6 +656,10 @@ impl Pic18 {
         let _ = at;
         let now = self.cycles;
         self.p.sync(&mut self.m, now);
+        if let Some(k) = self.p.take_reset() {
+            self.reset_cond(k);
+            return (self.cycles - start) as u32;
+        }
         self.p.board_poll(&self.m, now);
         self.irq_check(ic0);
         if !self.p.notes.is_empty() {
@@ -792,7 +825,10 @@ impl Pic18 {
             0x00 => match w & 0xFF {
                 0x00 => {}
                 0x03 => self.state = State::Sleeping,
-                0x04 => {} // CLRWDT: watchdog is not modelled before S3
+                0x04 => {
+                    let now = self.cycles;
+                    self.p.clrwdt(&self.m, now);
+                }
                 0x05 => {
                     let pc = self.pc;
                     self.push(pc);
@@ -1013,11 +1049,48 @@ impl Pic18 {
         self.m.mem[self.m.regs.bsr as usize] = b;
     }
 
+    /// A reset that is not a power-on reset (RESET instruction, watchdog): the registers take their MCLR-column reset values, the
+    /// cause bits of STATUS and PCON0 change as in Table 9-3 (DS40002043F p.89-90), the program counter and the stack pointer go to
+    /// the reset state, data RAM and the program stay, and the peripherals start over (rebuilt, the stimulus applied again; the
+    /// logs, the notes and the board stay). `[A91]`-`[A93]` in FACTS-SIM.md.
+    pub fn reset_cond(&mut self, kind: ResetKind) {
+        for &(a, set, clr) in &self.mclr {
+            self.m.mem[a] = (self.m.mem[a] & !clr | set) & self.m.implemented[a];
+        }
+        let status = self.m.regs.status as usize;
+        match kind {
+            ResetKind::Wdt => {
+                self.m.mem[status] &= !0x40; // nTO
+                self.clear_pcon(0x10); // RWDT
+            }
+            ResetKind::WdtWindow => self.clear_pcon(0x20), // WDTWV
+            ResetKind::Instruction => self.clear_pcon(0x04), // RI
+        }
+        self.apply_config();
+        self.pc = self.dev.vectors.reset;
+        self.state = State::Running;
+        self.in_service.clear();
+        self.ctx.clear();
+        self.shadow = (0, 0, 0);
+        let mut np = Periph::bind(&self.dev, &mut self.m);
+        if let Some(t) = &self.stim
+            && let Ok(st) = crate::stimulus::Stimulus::parse(t)
+        {
+            let _ = st.apply(&self.dev, &mut np);
+        }
+        let old = std::mem::replace(&mut self.p, np);
+        self.p.carry_over(old);
+        self.apply_config(); // the new peripherals need the watchdog configuration
+    }
+
+    fn clear_pcon(&mut self, bit: u8) {
+        if let Some(a) = self.pcon0 {
+            self.m.mem[a] &= !bit;
+        }
+    }
+
     fn reset(&mut self) {
-        // Software RESET: register reset values and peripheral state arrive with S3; the core restarts.
-        self.pc = 0;
-        self.cycles += 0;
-        self.notes.insert("RESET executed: only the PC is reset".into());
+        self.reset_cond(ResetKind::Instruction);
     }
 
     fn undefined(&mut self, w: u16, at: u32) {

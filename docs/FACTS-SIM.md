@@ -435,3 +435,22 @@ NACKed and a read from nobody gives FFh.
 * The GUI Board panel is shown before a program is loaded (pins of the selected device) and the wiring is applied on Load.
 * Pin changes in the GUI re-attach the part: the OLED starts blank, like a power-up. Reset keeps the wiring.
 * Tests: `crates/picsim/tests/board.rs` (hardware bus through the MSSP model, bit-banged lines driven by the test, wrong-pin cases).
+
+## WWDT and resets (DS40002043F ch.10 p.96-106, 9.5-9.12 p.88-90; `periph/wdt.rs`, `Pic18::reset_cond`, `tests/wdt.rs`)
+
+* Modes by WDTE (Table 10-1): 3 on, 2 on while awake, 1 on with WDTCON0.SEN, 0 off. Period 2^(WDTPS+5) clocks of 31 kHz LFINTOSC (WDTCS = 000) or 31.25 kHz
+  MFINTOSC (001); WDTPS 19-31 give 2^5. WDTCPS, WDTCWS, WDTCCS other than all-ones make WDTPS, WINDOW, WDTCS read only. WDTCON0 reset value PS = 01011 (2 s).
+* Window: WDTTMR[7:3] counts 32nds of the period; WINDOW 110..000 close the first 4, 8, 12, 16, 20, 24, 28 counts; 111 is not windowed. In windowed mode a CLRWDT
+  needs the WWDT armed (read of WDTCON0; WDTTMR.STATE) and an open window, otherwise it is a window violation. Cleared by a valid CLRWDT, by being off, by
+  any write to WDTCON0/WDTCON1 and by any reset.
+* Table 9-3 (p.89-90) for the resets: WDT time-out: STATUS.nTO = 0, PCON0.RWDT = 0; window violation: PCON0.WDTWV = 0 (STATUS unchanged); RESET instruction: PCON0.RI = 0.
+  Registers take the MCLR column of the pack (`u`, `q`, `x` bits unchanged); configuration-dependent ones (OSCCON/OSCFRQ/WDTCON) are set again from the configuration words.
+  PC = reset vector, data RAM and program stay.
+* `[A88]` The time base is exactly 31 kHz (31.25 kHz) with no tolerance; Fosc comes from the stimulus `fosc_mhz` (default 64): 516.13 cycles per clock at 64 MHz. The watchdog is
+  looked at after every instruction, so the reset happens at the end of the instruction in which the deadline passes.
+* `[A89]` PSCNT (WDTPSL/WDTPSH/WDTTMR[1:0]) = elapsed clocks modulo 2^WDTPS (debug registers; the data sheet gives no more).
+* `[A90]` A valid CLRWDT in windowed mode disarms the WWDT again; the read of WDTCON0 arms it in every mode; a write to WDTCON0/1 disarms it.
+* `[A91]` The table, not the prose of 9.5 (TO, PD and RWDT "change"), decides which bits a reset changes: a time-out clears nTO and RWDT, a violation only WDTWV. PD is not touched.
+* `[A92]` After a reset other than the power-on reset the peripherals are rebuilt (all their state starts over) and the stimulus is applied again from its start (a `[[uart]]` stream
+  or I2C client begins again; pin and analog levels are by absolute cycle and stay right). The logs (`tx`, `pin_log`, ...), the notes and the board stay. The reset takes no time.
+* `[A93]` SLEEP still stops the run: the WWDT neither runs nor wakes the part in Sleep. MCLR pin, brown-out and stack over/underflow resets are not modelled.

@@ -59,6 +59,7 @@ impl Machine {
     pub fn load_stimulus(&mut self, text: &str) -> Result<(), String> {
         crate::stimulus::Stimulus::parse(text)?.apply(&self.dev, &mut self.cpu.p)?;
         self.stimulus = Some(text.to_string());
+        self.cpu.stim = self.stimulus.clone();
         Ok(())
     }
 
@@ -72,6 +73,7 @@ impl Machine {
                 let _ = st.apply(&self.dev, &mut c.p); // it applied once on this device, so it applies again
             }
             c.p.set_board(self.cpu.p.board.fresh());
+            c.stim = self.stimulus.clone();
             self.cpu = c;
         }
     }

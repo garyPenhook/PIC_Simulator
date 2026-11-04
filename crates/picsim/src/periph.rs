@@ -27,6 +27,7 @@ use std::collections::{BTreeSet, VecDeque};
 mod board;
 mod ccp;
 mod clc;
+mod wdt;
 mod cmp;
 mod cwg;
 mod flash;
@@ -39,6 +40,7 @@ mod spi;
 pub use board::{parse_pin, pin_name, Board, Bus, Led, Oled, Pin};
 use ccp::{Ccp, Pwm};
 use clc::Clc;
+use wdt::Wdt;
 use cmp::Cmp;
 use cwg::Cwg;
 use i2cq::I2cQ;
@@ -49,6 +51,17 @@ use quart::QUart;
 use spi::Spi;
 pub use mssp::{I2cClient, I2cEv};
 pub use spi::SpiClient;
+
+/// Why the part resets without a power-on (DS40002043F Table 9-3 p.89-90).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ResetKind {
+    /// WWDT time-out.
+    Wdt,
+    /// CLRWDT outside the open window, or without arming.
+    WdtWindow,
+    /// The RESET instruction.
+    Instruction,
+}
 
 /// A flag bit in a PIRx register.
 #[derive(Clone, Copy, Debug)]
@@ -164,6 +177,18 @@ const CWG_END: u8 = CWG0 + cwg::HOOKS - 1;
 const CMP0: u8 = 184;
 const CMP_END: u8 = CMP0 + 2 * cmp::HOOKS;
 const CMOUT_HOOK: u8 = 222;
+/// Q10 WWDT registers (sub-codes of `wdt.rs`) use the codes that are left over: 157..=159 and 238, 239.
+fn wdt_hook(sub: u8) -> u8 {
+    [157, 158, 159, 238, 239][usize::from(sub)]
+}
+
+fn wdt_dec(k: u8) -> Option<u8> {
+    match k {
+        157..=159 => Some(k - 157),
+        238 | 239 => Some(k - 238 + 3),
+        _ => None,
+    }
+}
 const NVM0: u8 = 240;
 const NVMQ0: u8 = 242;
 
@@ -342,6 +367,9 @@ pub struct Periph {
     clcdata: Option<usize>,
     in_clc: bool,
     clc_scan: u64,
+    wdt: Option<Wdt>,
+    /// A reset the watchdog or CLRWDT asks for; the core takes it after the instruction (`take_reset`).
+    reset_req: Option<ResetKind>,
     /// Stimulus: (from cycle, port letter, pin, volts), stable-sorted by cycle.
     analog: Vec<(u64, u8, u8, f64)>,
     /// A compare match with TMR1 clearing happened on the last clock: TMR1 goes to 0 on the next one `[A61]`.
@@ -420,7 +448,7 @@ impl Periph {
 
     /// Find the timers the part has and mark their registers as hooked in `m`.
     pub fn bind(dev: &Device, m: &mut DataMem) -> Periph {
-        let mut p = Periph { ports: Vec::new(), drive: Vec::new(), t0: None, t1: Vec::new(), t2: Vec::new(), uarts: Vec::new(), quarts: Vec::new(), spis: Vec::new(), mssps: Vec::new(), i2cqs: Vec::new(), adc: None, nvm: None, nvmq: None, stall: 0, fvr: None, tx: Vec::new(), spi_tx: Vec::new(), i2c_log: Vec::new(), notes: BTreeSet::new(), ccps: Vec::new(), pwms: Vec::new(), cwg: None, cmps: Vec::new(), cmout: None, clcs: Vec::new(), clcin: Vec::new(), clcdata: None, in_clc: false, clc_scan: 0, analog: Vec::new(), ccptmrs: None, ppsout: Vec::new(), i2c_pps: Vec::new(), board: Board::default(), pullup: Vec::new(), forced: Vec::new(), sig: 0, sched: Vec::new(), pin_log: Vec::new(), event: None };
+        let mut p = Periph { ports: Vec::new(), drive: Vec::new(), t0: None, t1: Vec::new(), t2: Vec::new(), uarts: Vec::new(), quarts: Vec::new(), spis: Vec::new(), mssps: Vec::new(), i2cqs: Vec::new(), adc: None, nvm: None, nvmq: None, stall: 0, fvr: None, tx: Vec::new(), spi_tx: Vec::new(), i2c_log: Vec::new(), notes: BTreeSet::new(), ccps: Vec::new(), pwms: Vec::new(), cwg: None, cmps: Vec::new(), cmout: None, clcs: Vec::new(), clcin: Vec::new(), clcdata: None, in_clc: false, clc_scan: 0, wdt: None, reset_req: None, analog: Vec::new(), ccptmrs: None, ppsout: Vec::new(), i2c_pps: Vec::new(), board: Board::default(), pullup: Vec::new(), forced: Vec::new(), sig: 0, sched: Vec::new(), pin_log: Vec::new(), event: None };
         let mut hook = |a: usize, k: u8| m.special[a] = Special::Hook(k);
         if let (Some(l), Some(h), Some(c0), Some(c1), Some(flag)) =
             (addr(dev, "TMR0L"), addr(dev, "TMR0H"), addr(dev, "T0CON0"), addr(dev, "T0CON1"), Flag::find(dev, "TMR0IF"))
@@ -546,6 +574,12 @@ impl Periph {
             if !p.clcs.is_empty() {
                 p.clcin = (0..8).map(|k| addr(dev, &format!("CLCIN{k}PPS")).unwrap_or(usize::MAX)).collect();
                 p.clcdata = addr(dev, "CLCDATA");
+            }
+            if let Some(w) = Wdt::find(dev) {
+                for (reg, sub) in [(w.con0, wdt::CON0), (w.con1, wdt::CON1), (w.psl, wdt::PSL), (w.psh, wdt::PSH), (w.tmr, wdt::TMR)] {
+                    hook(reg, wdt_hook(sub));
+                }
+                p.wdt = Some(w);
             }
             for n in 3..=4u8 {
                 if let Some(w) = Pwm::find(dev, n) {
@@ -789,6 +823,7 @@ impl Periph {
         self.clc_scan(m, now);
         self.sync_core(m, now);
         self.clc_eval(m, 4 * now);
+        self.wdt_tick(m, now);
         for c in &mut self.ccps {
             c.scan = now;
         }
@@ -854,6 +889,97 @@ impl Periph {
             self.cwg_edge(m, new, tick);
         }
         self.clc_eval(m, tick);
+    }
+
+    /// Set the watchdog's configuration (WDTE, WDTCPS, WDTCWS, WDTCCS fields of the configuration words).
+    pub fn wdt_config(&mut self, wdte: u8, cps: u8, cws: u8, ccs: u8) -> bool {
+        let Some(w) = &mut self.wdt else { return false };
+        (w.wdte, w.ps_fixed, w.win_fixed, w.cs_fixed) = (wdte, cps != 0x1F, cws != 7, ccs != 7);
+        true
+    }
+
+    /// After a reset that rebuilt the peripherals: what the run has observed so far (logs, notes) and the board stay.
+    pub fn carry_over(&mut self, old: Periph) {
+        self.tx = old.tx;
+        self.spi_tx = old.spi_tx;
+        self.i2c_log = old.i2c_log;
+        self.pin_log = old.pin_log;
+        self.notes.extend(old.notes);
+        self.set_board(old.board);
+    }
+
+    /// The reset the watchdog asked for, if any.
+    pub fn take_reset(&mut self) -> Option<ResetKind> {
+        self.reset_req.take()
+    }
+
+    fn wdt_fosc(&mut self) {
+        let f = if self.board.fosc_mhz > 0.0 { self.board.fosc_mhz } else { 64.0 };
+        if let Some(w) = &mut self.wdt {
+            w.fosc_mhz = f;
+        }
+    }
+
+    /// The watchdog at cycle `now`: held clear while off, a time-out asks for a reset.
+    fn wdt_tick(&mut self, m: &DataMem, now: u64) {
+        self.wdt_fosc();
+        let Some(w) = &mut self.wdt else { return };
+        let (c0, c1) = (m.mem[w.con0], m.mem[w.con1]);
+        let on = w.on(c0);
+        if !on || !w.was_on {
+            (w.start, w.armed) = (now, false);
+        }
+        w.was_on = on;
+        if on && now >= w.deadline(c0, c1) {
+            self.reset_req.get_or_insert(ResetKind::Wdt);
+        }
+    }
+
+    /// CLRWDT at cycle `now`: a valid one clears the watchdog, one in a closed window (or unarmed in windowed mode) asks for a reset.
+    pub fn clrwdt(&mut self, m: &DataMem, now: u64) {
+        self.wdt_fosc();
+        let Some(w) = &mut self.wdt else { return };
+        let (c0, c1) = (m.mem[w.con0], m.mem[w.con1]);
+        if !w.on(c0) {
+            return;
+        }
+        if w.violation(now, c0, c1) {
+            self.reset_req.get_or_insert(ResetKind::WdtWindow);
+        } else {
+            (w.start, w.armed) = (now, false);
+        }
+    }
+
+    /// Value of WDTPSL / WDTPSH / WDTTMR (`sub`) at cycle `now`.
+    fn wdt_value(&self, sub: u8, m: &DataMem, now: u64) -> u8 {
+        let w = self.wdt.as_ref().unwrap();
+        let (c0, c1) = (m.mem[w.con0], m.mem[w.con1]);
+        let psc = (w.clocks(now, c1) & ((1u64 << Wdt::n(c0)) - 1)) as u32;
+        match sub {
+            wdt::PSL => psc as u8,
+            wdt::PSH => (psc >> 8) as u8,
+            _ => w.window_value(now, c0, c1) << 3 | u8::from(w.armed) << 2 | (psc >> 16) as u8 & 3,
+        }
+    }
+
+    /// A write to WDTCON0 / WDTCON1 (the other watchdog registers are read only): read-only fields keep their value, the WWDT is cleared.
+    fn wdt_write(&mut self, sub: u8, v: u8, now: u64, m: &mut DataMem) {
+        let w = self.wdt.as_mut().unwrap();
+        match sub {
+            wdt::CON0 => {
+                let keep = if w.ps_fixed { 0x3E } else { 0 };
+                m.mem[w.con0] = v & !keep | m.mem[w.con0] & keep;
+            }
+            wdt::CON1 => {
+                let keep = if w.cs_fixed { 0x70 } else { 0 } | if w.win_fixed { 0x07 } else { 0 };
+                m.mem[w.con1] = v & !keep | m.mem[w.con1] & keep;
+                if m.mem[w.con1] >> 4 & 7 > 1 {
+                    self.notes.insert("WDTCS reserved value: the watchdog runs from LFINTOSC".to_string());
+                }
+            }
+            _ => return,
+        }
+        (w.start, w.armed) = (now, false);
     }
 
     /// Level of CLC data input `src` (DyS code, DS40002043F p.409) of cell `n` at cycle `now`.
@@ -1503,6 +1629,15 @@ impl Periph {
                 m.mem[self.ports[usize::from(k - PORT0)].port] = v;
                 v
             }
+            k if wdt_dec(k).is_some() => {
+                let sub = wdt_dec(k).unwrap();
+                if sub == wdt::CON0 {
+                    self.wdt.as_mut().unwrap().armed = true;
+                    m.mem[self.wdt.as_ref().unwrap().con0]
+                } else {
+                    self.wdt_value(sub, m, now)
+                }
+            }
             k if matches!(t1_dec(k), Some((_, 4))) => {
                 let i = t1_dec(k).unwrap().0;
                 let g = m.mem[self.t1[i].gcon] & !4;
@@ -1563,6 +1698,7 @@ impl Periph {
     pub fn peek_hook(&self, k: u8, m: &DataMem, now: u64) -> Option<u8> {
         match k {
             PORT0..=0x6F => Some(self.port_levels(usize::from(k - PORT0), m, now)),
+            k if wdt_dec(k).is_some_and(|s| s >= wdt::PSL) && self.wdt.is_some() => Some(self.wdt_value(wdt_dec(k).unwrap(), m, now)),
             _ => None,
         }
     }
@@ -1572,7 +1708,8 @@ impl Periph {
             || (QUART0..QUART_END).contains(&k) && (k - QUART0) % quart::HOOKS == quart::RXB
             || (SPI0..SPI_END).contains(&k) && (k - SPI0) % spi::HOOKS == spi::RXB
             || (I2CQ0..I2CQ_END).contains(&k) && (k - I2CQ0) % i2cq::HOOKS == i2cq::RXB
-            || (MSSP0..MSSP_END).contains(&k) && (k - MSSP0) % mssp::HOOKS == mssp::BUF)
+            || (MSSP0..MSSP_END).contains(&k) && (k - MSSP0) % mssp::HOOKS == mssp::BUF
+            || wdt_dec(k).is_some_and(|s| s != wdt::CON1))
     }
 
     /// A write: `v` is already masked to the implemented bits. The caller has synced to the writing cycle.
@@ -1588,6 +1725,7 @@ impl Periph {
                 self.stall += n.write(k - NVM0, v, now, m, prog, &mut self.notes);
                 self.flash_event(now);
             }
+            k if wdt_dec(k).is_some() => self.wdt_write(wdt_dec(k).unwrap(), v, now, m),
             UART0..=39 => self.uart_write(k, v, now, m),
             SPI0..SPI_END => {
                 let i = usize::from(k - SPI0) / usize::from(spi::HOOKS);
