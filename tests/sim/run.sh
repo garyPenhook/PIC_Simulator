@@ -55,3 +55,10 @@ for l in "IQ10_IQ_INIT = 1 " "IQ10_IQ_S1 = 0 " "IQ10_IQ_S2 = 0 " "IQ10_IQ_R0 = 2
     echo "$out" | grep -q "^$l" || { echo "FAIL i2c_q10: missing '$l'"; echo "$out"; exit 1; }
 done
 echo "PASS i2c_q10"
+cp tests/sim/blink_q10.bas "$w/"
+"${BASIL:-./target/release/basil}" "$w/blink_q10.bas" >/dev/null
+out=$(./target/release/basil-sim "$w/blink_q10.hex" --device 18F27Q10 --stim tests/sim/blink.stim.toml --max-cycles 40000000 2>/dev/null)
+for l in "led heartbeat (RB0, active high): ON, on 23999990 of 40000000 cycles, 5 changes" "led error (RB1, active low): off, on 16000010 of 40000000 cycles, 6 changes"; do
+    echo "$out" | grep -qF "$l" || { echo "FAIL blink_q10: missing '$l'"; echo "$out"; exit 1; }
+done
+echo "PASS blink_q10"

@@ -1,0 +1,11 @@
+# The two LEDs the blink program drives. No OLED. See blink_q10.bas.
+fosc_mhz = 64
+
+[[led]]
+pin = "RB0"
+name = "heartbeat"
+
+[[led]]
+pin = "RB1"
+active = "low"
+name = "error"

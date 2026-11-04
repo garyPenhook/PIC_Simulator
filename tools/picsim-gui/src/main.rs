@@ -26,6 +26,8 @@ struct App {
     fosc_mhz: f32,
     view_addr: u32,
     follow: bool,
+    /// Source view: while the PC is in a library routine, show the line of the program that called it.
+    stay_home: bool,
     tab: usize,
     mem_filter: String,
     watch: Vec<(String, usize)>,
@@ -84,6 +86,7 @@ impl App {
             fosc_mhz: 64.0,
             view_addr: 0,
             follow: true,
+            stay_home: true,
             tab: 0,
             mem_filter: String::new(),
             watch: Vec::new(),
@@ -615,6 +618,9 @@ impl eframe::App for App {
                     ui.selectable_value(&mut self.src_view, false, "Disassembly");
                 }
                 ui.checkbox(&mut self.follow, "follow PC");
+                if self.src_view && !self.lines.is_empty() {
+                    ui.checkbox(&mut self.stay_home, "stay in my code").on_hover_text("while the PC is in a library routine (DelaySeconds ...), show the line of your program that called it");
+                }
                 ui.add(egui::TextEdit::singleline(&mut self.goto_in).hint_text("goto 0x…").desired_width(80.0));
                 if ui.button("Go").clicked() {
                     if let Some(a) = hex_u32(&self.goto_in) {
@@ -627,7 +633,8 @@ impl eframe::App for App {
                 ui.colored_label(egui::Color32::from_rgb(255, 150, 80), "No BASIC line information in this build. Build with basil -g (VS Code: Build Debug, Ctrl+F7; F7 has no line information) and load dist/<name>.hex or .elf: then Source, Variables, Line stepping and the call stack work.");
             }
             if self.src_view && !self.lines.is_empty() {
-                source_pane(ui, &self.lines, &self.elf_dir, &mut self.sources, &mut self.last_src, m, pc, self.follow);
+                let home = std::path::Path::new(self.hex_path.trim()).file_stem().map(|s| s.to_string_lossy().trim_end_matches("_debug").to_ascii_lowercase());
+                source_pane(ui, &self.lines, &self.elf_dir, &mut self.sources, &mut self.last_src, m, pc, self.follow, if self.stay_home { home } else { None });
                 return;
             }
             let prog = &m.cpu.prog;
@@ -677,11 +684,22 @@ impl eframe::App for App {
 
 /// The BASIC source with the line the PC is on highlighted; a click toggles a breakpoint on that line.
 #[allow(clippy::too_many_arguments)]
-fn source_pane(ui: &mut egui::Ui, lines: &LineMap, dir: &std::path::Path, cache: &mut std::collections::HashMap<PathBuf, Vec<String>>, last: &mut Option<(PathBuf, u32)>, m: &mut Machine, pc: u32, follow: bool) {
-    if let Some((f, l)) = lines.lookup(pc) {
-        *last = Some((f.clone(), l));
+fn source_pane(ui: &mut egui::Ui, lines: &LineMap, dir: &std::path::Path, cache: &mut std::collections::HashMap<PathBuf, Vec<String>>, last: &mut Option<(PathBuf, u32)>, m: &mut Machine, pc: u32, follow: bool, home: Option<String>) {
+    let mut here = lines.lookup(pc).map(|(f, l)| (f.clone(), l));
+    // In a library routine: the nearest caller on the return stack that is in the user's own file.
+    if let (Some(h), Some((f, _))) = (&home, &here) {
+        let is_home = |p: &PathBuf| p.file_stem().is_some_and(|s| s.to_string_lossy().eq_ignore_ascii_case(h));
+        if !is_home(f) && lines.source_files().into_iter().any(|p| is_home(p)) {
+            let sp = usize::from(m.cpu.m.mem[m.cpu.m.regs.stkptr as usize] & 0x7F).min(m.cpu.stack.len() - 1);
+            if let Some(c) = (1..=sp).rev().find_map(|i| lines.lookup(m.cpu.stack[i].saturating_sub(2)).filter(|(p, _)| is_home(p)).map(|(p, l)| (p.clone(), l))) {
+                here = Some(c);
+            }
+        }
     }
-    let on_line = lines.lookup(pc).is_some();
+    if let Some(h) = &here {
+        *last = Some(h.clone());
+    }
+    let on_line = here.is_some();
     let Some((file, cur)) = last.clone() else {
         ui.label("The PC is in generated start-up code, not on a BASIC line yet. Step or Run.");
         return;
