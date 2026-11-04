@@ -53,6 +53,8 @@ pub struct Pic18 {
     pub notes: BTreeSet<String>,
     wide_fsr: bool,
     stk_mask: u8,
+    /// A stack over- or underflow with STVREN = 1 during this step: the reset happens at its end `[A99]`.
+    stk_fault: Option<ResetKind>,
     pc_mask: u32,
     /// The device description, to rebuild the peripherals on a reset that is not a power-on reset.
     dev: Device,
@@ -163,6 +165,7 @@ impl Pic18 {
             notes: BTreeSet::new(),
             wide_fsr,
             stk_mask: (depth + 1).next_power_of_two() as u8 - 1,
+            stk_fault: None,
             pc_mask: (dev.memory.program.size - 1) | 1,
             dev: dev.clone(),
             stim: None,
@@ -397,7 +400,11 @@ impl Pic18 {
         let a = self.m.regs.stkptr as usize;
         let sp = u32::from(self.m.mem[a] & self.stk_mask);
         if sp >= self.depth {
-            self.m.mem[a] |= 0x80; // STKFUL
+            self.set_pcon(0x80); // STKOVF
+            self.stack[self.depth as usize] = v; // overwrites the top entry; the pointer stays
+            if self.cfg.get("STVREN") != Some(0) {
+                self.stk_fault = Some(ResetKind::StackOverflow);
+            }
         } else {
             self.stack[sp as usize + 1] = v;
             self.m.mem[a] = self.m.mem[a] & !self.stk_mask | (sp as u8 + 1);
@@ -408,7 +415,10 @@ impl Pic18 {
         let a = self.m.regs.stkptr as usize;
         let sp = self.m.mem[a] & self.stk_mask;
         if sp == 0 {
-            self.m.mem[a] |= 0x40; // STKUNF
+            self.set_pcon(0x40); // STKUNF
+            if self.cfg.get("STVREN") != Some(0) {
+                self.stk_fault = Some(ResetKind::StackUnderflow);
+            }
             return 0;
         }
         let v = self.stack[sp as usize];
@@ -665,12 +675,15 @@ impl Pic18 {
         let dead = (now - start).saturating_sub(1);
         self.p.crc_scan(&mut self.m, &self.prog, now, dead, !self.in_service.is_empty());
         self.cycles += self.p.take_stall();
-        if let Some(k) = self.p.take_reset() {
+        if let Some(k) = self.stk_fault.take().or_else(|| self.p.take_reset()) {
             self.reset_cond(k);
             return (self.cycles - start) as u32;
         }
         self.p.board_poll(&self.m, now);
         self.irq_check(ic0);
+        if let Some(k) = self.stk_fault.take() {
+            self.reset_cond(k);
+        }
         if !self.p.notes.is_empty() {
             let n = std::mem::take(&mut self.p.notes);
             self.notes.extend(n);
@@ -1123,7 +1136,10 @@ impl Pic18 {
             }
             ResetKind::WdtWindow => self.clear_pcon(0x20), // WDTWV
             ResetKind::Instruction => self.clear_pcon(0x04), // RI
+            ResetKind::StackOverflow => self.set_pcon(0x80), // STKOVF
+            ResetKind::StackUnderflow => self.set_pcon(0x40), // STKUNF
         }
+        self.stk_fault = None;
         self.apply_config();
         self.pc = self.dev.vectors.reset;
         self.state = State::Running;
@@ -1139,6 +1155,12 @@ impl Pic18 {
         let old = std::mem::replace(&mut self.p, np);
         self.p.carry_over(old);
         self.apply_config(); // the new peripherals need the watchdog configuration
+    }
+
+    fn set_pcon(&mut self, bit: u8) {
+        if let Some(a) = self.pcon0 {
+            self.m.mem[a] |= bit;
+        }
     }
 
     fn clear_pcon(&mut self, bit: u8) {

@@ -63,6 +63,10 @@ pub enum ResetKind {
     WdtWindow,
     /// The RESET instruction.
     Instruction,
+    /// A push onto a full stack with STVREN = 1.
+    StackOverflow,
+    /// A pop from an empty stack with STVREN = 1.
+    StackUnderflow,
 }
 
 /// A flag bit in a PIRx register.
