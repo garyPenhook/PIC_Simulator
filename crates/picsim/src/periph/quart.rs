@@ -77,6 +77,8 @@ pub struct QUart {
     rx_free: u64,
     /// The character in flight: (cycle it reaches the FIFO, word, framing error).
     rx_cur: Option<(u64, u16, bool)>,
+    /// The part is in Sleep: the receiver sees nothing.
+    asleep: bool,
     rx_fifo: VecDeque<Rx>,
 }
 
@@ -107,6 +109,7 @@ impl QUart {
             rx_in: VecDeque::new(),
             rx_free: 0,
             rx_cur: None,
+            asleep: false,
             rx_fifo: VecDeque::new(),
         };
         // Registers in hook-sub-code order.
@@ -185,6 +188,26 @@ impl QUart {
     }
 
     /// Everything ON = 0 holds in reset.
+    /// The part slept for `d` cycles with the module's clock stopped: the character in the shift register is `d` cycles later.
+    pub fn shift(&mut self, d: u64) {
+        if let Some(c) = &mut self.cur {
+            (c.0, c.1) = (c.0 + d, c.1 + d);
+        }
+    }
+
+    /// Entering Sleep: the character being received is lost, and until the wake-up the receiver sees nothing.
+    pub fn sleep(&mut self, on: bool) {
+        self.asleep = on;
+        if on {
+            self.rx_cur = None;
+        }
+    }
+
+    /// In Sleep the stimulus goes on; the characters it sends are lost.
+    pub fn sync_asleep(&mut self, m: &mut DataMem, now: u64, ev: &mut Vec<u64>) {
+        self.rx(m, now, ev);
+    }
+
     fn reset(&mut self, m: &mut DataMem) {
         self.cur = None;
         self.next = None;
@@ -270,7 +293,7 @@ impl QUart {
     }
 
     fn rx_on(&self, m: &DataMem) -> bool {
-        self.on(m) && m.mem[self.con0] & 0x10 != 0 && self.mode(m) <= 4
+        !self.asleep && self.on(m) && m.mem[self.con0] & 0x10 != 0 && self.mode(m) <= 4
     }
 
     /// Receiver: start the next queued character when the line is free, finish the one in flight.

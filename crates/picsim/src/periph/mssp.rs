@@ -142,6 +142,16 @@ impl Mssp {
         m.mem[self.con1] & 0x20 != 0
     }
 
+    /// The part slept for `d` cycles with the module's clock stopped: everything in flight is `d` cycles later.
+    pub fn shift(&mut self, d: u64) {
+        for (t, s) in &mut self.steps {
+            *t += d;
+            if let Step::SpiDone(_, start) = s {
+                *start += d;
+            }
+        }
+    }
+
     /// Cycles of `k` TBRG from `t`.
     fn tbrg(&self, m: &DataMem, t: u64, k: u64) -> u64 {
         t + (k * (u64::from(m.mem[self.add]) + 1)).div_ceil(2)

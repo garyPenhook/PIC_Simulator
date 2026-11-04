@@ -145,6 +145,14 @@ impl Spi {
         m.mem[self.twidth] = (n & 7) as u8;
     }
 
+    /// The part slept for `d` cycles with the module's clock stopped: the transfer in flight ends `d` cycles later.
+    pub fn shift(&mut self, d: u64) {
+        if let Some(c) = &mut self.cur {
+            c.0 += d;
+        }
+        (self.free, self.armed) = (self.free + d, self.armed + d);
+    }
+
     fn reset(&mut self, m: &mut DataMem) {
         self.tx.clear();
         self.rx.clear();

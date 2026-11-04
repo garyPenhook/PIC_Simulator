@@ -218,6 +218,8 @@ struct Uart {
     rx_free: u64,
     /// The character being received: (cycle it reaches the FIFO, word, framing error).
     rx_cur: Option<(u64, u16, bool)>,
+    /// The part is in Sleep: the receiver sees nothing.
+    asleep: bool,
     /// Receive FIFO, two deep: (word with the ninth bit at bit 8, framing error).
     fifo: VecDeque<(u16, bool)>,
 }
@@ -372,6 +374,10 @@ pub struct Periph {
     reset_req: Option<ResetKind>,
     /// The part is in Sleep (set by the core); a watchdog time-out then wakes it instead of resetting `[A93]`.
     sleeping: bool,
+    /// Cycle the part went to sleep.
+    sleep_at: u64,
+    /// Fosc and Fosc/4 are off: Sleep, not Idle (DS40002043F 7.3-7.4 p.71).
+    fosc_off: bool,
     wdt_wake: bool,
     /// Stimulus: (from cycle, port letter, pin, volts), stable-sorted by cycle.
     analog: Vec<(u64, u8, u8, f64)>,
@@ -451,7 +457,7 @@ impl Periph {
 
     /// Find the timers the part has and mark their registers as hooked in `m`.
     pub fn bind(dev: &Device, m: &mut DataMem) -> Periph {
-        let mut p = Periph { ports: Vec::new(), drive: Vec::new(), t0: None, t1: Vec::new(), t2: Vec::new(), uarts: Vec::new(), quarts: Vec::new(), spis: Vec::new(), mssps: Vec::new(), i2cqs: Vec::new(), adc: None, nvm: None, nvmq: None, stall: 0, fvr: None, tx: Vec::new(), spi_tx: Vec::new(), i2c_log: Vec::new(), notes: BTreeSet::new(), ccps: Vec::new(), pwms: Vec::new(), cwg: None, cmps: Vec::new(), cmout: None, clcs: Vec::new(), clcin: Vec::new(), clcdata: None, in_clc: false, clc_scan: 0, wdt: None, reset_req: None, sleeping: false, wdt_wake: false, analog: Vec::new(), ccptmrs: None, ppsout: Vec::new(), i2c_pps: Vec::new(), board: Board::default(), pullup: Vec::new(), forced: Vec::new(), sig: 0, sched: Vec::new(), pin_log: Vec::new(), event: None };
+        let mut p = Periph { ports: Vec::new(), drive: Vec::new(), t0: None, t1: Vec::new(), t2: Vec::new(), uarts: Vec::new(), quarts: Vec::new(), spis: Vec::new(), mssps: Vec::new(), i2cqs: Vec::new(), adc: None, nvm: None, nvmq: None, stall: 0, fvr: None, tx: Vec::new(), spi_tx: Vec::new(), i2c_log: Vec::new(), notes: BTreeSet::new(), ccps: Vec::new(), pwms: Vec::new(), cwg: None, cmps: Vec::new(), cmout: None, clcs: Vec::new(), clcin: Vec::new(), clcdata: None, in_clc: false, clc_scan: 0, wdt: None, reset_req: None, sleeping: false, sleep_at: 0, fosc_off: false, wdt_wake: false, analog: Vec::new(), ccptmrs: None, ppsout: Vec::new(), i2c_pps: Vec::new(), board: Board::default(), pullup: Vec::new(), forced: Vec::new(), sig: 0, sched: Vec::new(), pin_log: Vec::new(), event: None };
         let mut hook = |a: usize, k: u8| m.special[a] = Special::Hook(k);
         if let (Some(l), Some(h), Some(c0), Some(c1), Some(flag)) =
             (addr(dev, "TMR0L"), addr(dev, "TMR0H"), addr(dev, "T0CON0"), addr(dev, "T0CON1"), Flag::find(dev, "TMR0IF"))
@@ -636,7 +642,7 @@ impl Periph {
                 }
                 p.uarts.push(Uart {
                     num: n, reg, sta, baud, brgl, brgh, flag, tsr_end: None, pending: None, rcreg, rcsta, rcflag,
-                    rx_in: VecDeque::new(), rx_free: 0, rx_cur: None, fifo: VecDeque::new(),
+                    rx_in: VecDeque::new(), rx_free: 0, rx_cur: None, asleep: false, fifo: VecDeque::new(),
                 });
             }
         }
@@ -739,7 +745,7 @@ impl Periph {
 
     /// The receiver listens: serial port and receiver enabled, asynchronous, no overrun pending.
     fn uart_rx_on(u: &Uart, m: &DataMem) -> bool {
-        m.mem[u.rcsta] & 0x92 == 0x90 && m.mem[u.sta] & 0x10 == 0
+        !u.asleep && m.mem[u.rcsta] & 0x92 == 0x90 && m.mem[u.sta] & 0x10 == 0
     }
 
     /// TXIF and TRMT follow the transmitter state.
@@ -805,6 +811,9 @@ impl Periph {
     /// Bring every model to cycle `now`. Capture edges on the CCPx pins inside the span are handled at their own cycle
     /// so that TMR1 is read at that cycle.
     pub fn sync(&mut self, m: &mut DataMem, now: u64) {
+        if self.fosc_off {
+            return self.sync_asleep(m, now);
+        }
         loop {
             let mut best: Option<(u64, usize)> = None;
             for (i, c) in self.ccps.iter().enumerate() {
@@ -944,18 +953,101 @@ impl Periph {
     }
 
     /// SLEEP at cycle `now`: the watchdog is cleared and counts on only in the modes that run in Sleep.
-    pub fn enter_sleep(&mut self, m: &DataMem, now: u64) {
+    pub fn enter_sleep(&mut self, m: &mut DataMem, now: u64, idle: bool) {
+        self.sync(m, now);
         self.sleeping = true;
+        self.fosc_off = !idle;
+        self.sleep_at = now;
         self.wdt_wake = false;
+        if idle {
+            return;
+        }
+        for u in &mut self.uarts {
+            (u.asleep, u.rx_cur) = (true, None);
+        }
+        for q in &mut self.quarts {
+            q.sleep(true);
+        }
         if let Some(w) = &mut self.wdt {
             (w.start, w.armed, w.was_on) = (now, false, w.on_sleep(m.mem[w.con0]));
         }
     }
 
+    /// One look at the models that keep running in Sleep, up to cycle `now`: the watchdog, the comparators, the CLCs, the CWG
+    /// dead band and the data EEPROM. Everything clocked by Fosc or Fosc/4 has no clock (DS40002043F 7.4 p.71) and waits for `thaw`.
+    /// Characters the stimulus sends to a UART meanwhile are lost `[A94]`.
+    fn sync_asleep(&mut self, m: &mut DataMem, now: u64) {
+        let mut ev: Vec<u64> = Vec::new();
+        self.clc_scan(m, now);
+        self.cmp_scan(m, now);
+        self.apply_sched(m, now, &mut ev);
+        for u in &mut self.uarts {
+            Self::uart_rx(u, m, now, &mut ev);
+        }
+        for q in &mut self.quarts {
+            q.sync_asleep(m, now, &mut ev);
+        }
+        if let Some(n) = &mut self.nvm
+            && let Some(e) = n.sync(m, now)
+        {
+            ev.push(e);
+        }
+        if let Some(n) = &mut self.nvmq
+            && let Some(e) = n.sync(m, now)
+        {
+            ev.push(e);
+        }
+        self.clc_eval(m, 4 * now);
+        self.wdt_tick(m, now);
+        for e in ev {
+            self.raised(e);
+        }
+    }
+
+    /// The part slept for `d` cycles: what has no clock in Sleep carries on from where it stopped, so every time it
+    /// has in hand moves `d` cycles later.
+    fn thaw(&mut self, d: u64) {
+        if let Some(t) = &mut self.t0 {
+            t.last += d;
+        }
+        for t in &mut self.t1 {
+            t.last += d;
+        }
+        for t in &mut self.t2 {
+            t.last += d;
+        }
+        for s in self.sched.iter_mut().filter(|s| s.pwm) {
+            s.tick += 4 * d;
+        }
+        for c in &mut self.ccps {
+            c.scan += d;
+        }
+        for u in &mut self.uarts {
+            u.asleep = false;
+            if let Some(e) = &mut u.tsr_end {
+                *e += d;
+            }
+        }
+        for q in &mut self.quarts {
+            q.sleep(false);
+            q.shift(d);
+        }
+        self.spis.iter_mut().for_each(|q| q.shift(d));
+        self.mssps.iter_mut().for_each(|q| q.shift(d));
+        self.i2cqs.iter_mut().for_each(|q| q.shift(d));
+        if let Some(Some((e, _))) = self.adc.as_mut().map(|a| a.end.as_mut()) {
+            *e += d;
+        }
+    }
+
     /// Wake-up: the watchdog is cleared again (DS40002043F 7.2.1 p.69).
     pub fn exit_sleep(&mut self, now: u64) {
+        let d = now.saturating_sub(self.sleep_at);
         self.sleeping = false;
         self.wdt_wake = false;
+        if std::mem::take(&mut self.fosc_off) {
+            self.thaw(d);
+        }
         if let Some(w) = &mut self.wdt {
             (w.start, w.armed, w.was_on) = (now, false, false);
         }
@@ -1337,12 +1429,15 @@ impl Periph {
     fn apply_sched(&mut self, m: &mut DataMem, now: u64, ev: &mut Vec<u64>) {
         // A change can schedule another one (CWG dead band) that is also due: go on until nothing is.
         loop {
-            self.sched.sort_by_key(|s| s.tick);
-            let due = self.sched.iter().take_while(|s| s.tick / 4 <= now).count();
-            if due == 0 {
+            // Edges that Timer2-type time bases make (`pwm`) wait while the part sleeps.
+            let asleep = self.fosc_off;
+            let (mut due, rest): (Vec<Sched>, Vec<Sched>) = std::mem::take(&mut self.sched).into_iter().partition(|s| s.tick / 4 <= now && !(asleep && s.pwm));
+            self.sched = rest;
+            if due.is_empty() {
                 break;
             }
-            for s in self.sched.drain(..due).collect::<Vec<_>>() {
+            due.sort_by_key(|s| s.tick);
+            for s in due {
                 self.set_sig(m, s.code, s.act, s.tick);
                 if let Some(f) = s.flag {
                     f.set(m);

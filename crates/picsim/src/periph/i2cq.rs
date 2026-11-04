@@ -229,6 +229,16 @@ impl I2cQ {
         on(self.eif, (self.errv >> 4) & m.mem[self.err] & 7 != 0, m);
     }
 
+    /// The part slept for `d` cycles with the module's clock stopped: everything in flight is `d` cycles later.
+    pub fn shift(&mut self, d: u64) {
+        for e in &mut self.q {
+            e.0 += d;
+        }
+        if let Some(t) = &mut self.bfre_at {
+            *t += d;
+        }
+    }
+
     fn reset(&mut self) {
         self.abort();
         self.st = St::Idle;

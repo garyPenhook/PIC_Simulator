@@ -686,7 +686,8 @@ impl Pic18 {
         self.m.mem[st] = self.m.mem[st] & !0x20 | 0x40;
         self.state = State::Sleeping;
         let now = self.cycles;
-        self.p.enter_sleep(&self.m, now);
+        let idle = self.dev.find_sfr("CPUDOZE").is_some_and(|s| self.m.mem[s.addr as usize] & 0x80 != 0);
+        self.p.enter_sleep(&mut self.m, now, idle);
     }
 
     /// Nothing can end this Sleep: no interrupt is enabled and the watchdog does not count.
