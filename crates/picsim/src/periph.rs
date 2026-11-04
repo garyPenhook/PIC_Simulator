@@ -955,10 +955,16 @@ impl Periph {
     /// SLEEP at cycle `now`: the watchdog is cleared and counts on only in the modes that run in Sleep.
     pub fn enter_sleep(&mut self, m: &mut DataMem, now: u64, idle: bool) {
         self.sync(m, now);
+        if self.reset_req.is_some() {
+            return; // a reset fell due on the SLEEP cycle: the part resets instead of sleeping
+        }
         self.sleeping = true;
         self.fosc_off = !idle;
         self.sleep_at = now;
         self.wdt_wake = false;
+        if let Some(w) = &mut self.wdt {
+            (w.start, w.armed, w.was_on) = (now, false, w.on_sleep(m.mem[w.con0]));
+        }
         if idle {
             return;
         }
@@ -967,9 +973,6 @@ impl Periph {
         }
         for q in &mut self.quarts {
             q.sleep(true);
-        }
-        if let Some(w) = &mut self.wdt {
-            (w.start, w.armed, w.was_on) = (now, false, w.on_sleep(m.mem[w.con0]));
         }
     }
 

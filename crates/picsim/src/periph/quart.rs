@@ -187,7 +187,6 @@ impl QUart {
         }
     }
 
-    /// Everything ON = 0 holds in reset.
     /// The part slept for `d` cycles with the module's clock stopped: the character in the shift register is `d` cycles later.
     pub fn shift(&mut self, d: u64) {
         if let Some(c) = &mut self.cur {
@@ -208,6 +207,7 @@ impl QUart {
         self.rx(m, now, ev);
     }
 
+    /// Everything ON = 0 holds in reset.
     fn reset(&mut self, m: &mut DataMem) {
         self.cur = None;
         self.next = None;
