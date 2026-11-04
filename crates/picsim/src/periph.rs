@@ -370,6 +370,9 @@ pub struct Periph {
     wdt: Option<Wdt>,
     /// A reset the watchdog or CLRWDT asks for; the core takes it after the instruction (`take_reset`).
     reset_req: Option<ResetKind>,
+    /// The part is in Sleep (set by the core); a watchdog time-out then wakes it instead of resetting `[A93]`.
+    sleeping: bool,
+    wdt_wake: bool,
     /// Stimulus: (from cycle, port letter, pin, volts), stable-sorted by cycle.
     analog: Vec<(u64, u8, u8, f64)>,
     /// A compare match with TMR1 clearing happened on the last clock: TMR1 goes to 0 on the next one `[A61]`.
@@ -448,7 +451,7 @@ impl Periph {
 
     /// Find the timers the part has and mark their registers as hooked in `m`.
     pub fn bind(dev: &Device, m: &mut DataMem) -> Periph {
-        let mut p = Periph { ports: Vec::new(), drive: Vec::new(), t0: None, t1: Vec::new(), t2: Vec::new(), uarts: Vec::new(), quarts: Vec::new(), spis: Vec::new(), mssps: Vec::new(), i2cqs: Vec::new(), adc: None, nvm: None, nvmq: None, stall: 0, fvr: None, tx: Vec::new(), spi_tx: Vec::new(), i2c_log: Vec::new(), notes: BTreeSet::new(), ccps: Vec::new(), pwms: Vec::new(), cwg: None, cmps: Vec::new(), cmout: None, clcs: Vec::new(), clcin: Vec::new(), clcdata: None, in_clc: false, clc_scan: 0, wdt: None, reset_req: None, analog: Vec::new(), ccptmrs: None, ppsout: Vec::new(), i2c_pps: Vec::new(), board: Board::default(), pullup: Vec::new(), forced: Vec::new(), sig: 0, sched: Vec::new(), pin_log: Vec::new(), event: None };
+        let mut p = Periph { ports: Vec::new(), drive: Vec::new(), t0: None, t1: Vec::new(), t2: Vec::new(), uarts: Vec::new(), quarts: Vec::new(), spis: Vec::new(), mssps: Vec::new(), i2cqs: Vec::new(), adc: None, nvm: None, nvmq: None, stall: 0, fvr: None, tx: Vec::new(), spi_tx: Vec::new(), i2c_log: Vec::new(), notes: BTreeSet::new(), ccps: Vec::new(), pwms: Vec::new(), cwg: None, cmps: Vec::new(), cmout: None, clcs: Vec::new(), clcin: Vec::new(), clcdata: None, in_clc: false, clc_scan: 0, wdt: None, reset_req: None, sleeping: false, wdt_wake: false, analog: Vec::new(), ccptmrs: None, ppsout: Vec::new(), i2c_pps: Vec::new(), board: Board::default(), pullup: Vec::new(), forced: Vec::new(), sig: 0, sched: Vec::new(), pin_log: Vec::new(), event: None };
         let mut hook = |a: usize, k: u8| m.special[a] = Special::Hook(k);
         if let (Some(l), Some(h), Some(c0), Some(c1), Some(flag)) =
             (addr(dev, "TMR0L"), addr(dev, "TMR0H"), addr(dev, "T0CON0"), addr(dev, "T0CON1"), Flag::find(dev, "TMR0IF"))
@@ -923,16 +926,51 @@ impl Periph {
     /// The watchdog at cycle `now`: held clear while off, a time-out asks for a reset.
     fn wdt_tick(&mut self, m: &DataMem, now: u64) {
         self.wdt_fosc();
+        let sleeping = self.sleeping;
         let Some(w) = &mut self.wdt else { return };
         let (c0, c1) = (m.mem[w.con0], m.mem[w.con1]);
-        let on = w.on(c0);
+        let on = if sleeping { w.on_sleep(c0) } else { w.on(c0) };
         if !on || !w.was_on {
             (w.start, w.armed) = (now, false);
         }
         w.was_on = on;
         if on && now >= w.deadline(c0, c1) {
-            self.reset_req.get_or_insert(ResetKind::Wdt);
+            if sleeping {
+                self.wdt_wake = true;
+            } else {
+                self.reset_req.get_or_insert(ResetKind::Wdt);
+            }
         }
+    }
+
+    /// SLEEP at cycle `now`: the watchdog is cleared and counts on only in the modes that run in Sleep.
+    pub fn enter_sleep(&mut self, m: &DataMem, now: u64) {
+        self.sleeping = true;
+        self.wdt_wake = false;
+        if let Some(w) = &mut self.wdt {
+            (w.start, w.armed, w.was_on) = (now, false, w.on_sleep(m.mem[w.con0]));
+        }
+    }
+
+    /// Wake-up: the watchdog is cleared again (DS40002043F 7.2.1 p.69).
+    pub fn exit_sleep(&mut self, now: u64) {
+        self.sleeping = false;
+        self.wdt_wake = false;
+        if let Some(w) = &mut self.wdt {
+            (w.start, w.armed, w.was_on) = (now, false, false);
+        }
+    }
+
+    /// A watchdog time-out happened in Sleep.
+    pub fn wdt_woke(&self) -> bool {
+        self.wdt_wake
+    }
+
+    /// Cycle of the watchdog time-out while asleep, if it counts in Sleep.
+    pub fn wdt_sleep_deadline(&self, m: &DataMem) -> Option<u64> {
+        let w = self.wdt.as_ref()?;
+        let (c0, c1) = (m.mem[w.con0], m.mem[w.con1]);
+        w.on_sleep(c0).then(|| w.deadline(c0, c1))
     }
 
     /// CLRWDT at cycle `now`: a valid one clears the watchdog, one in a closed window (or unarmed in windowed mode) asks for a reset.

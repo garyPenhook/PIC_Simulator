@@ -190,7 +190,7 @@ impl Machine {
             }
             first = false;
             self.cpu.step();
-            if self.cpu.state != crate::pic18::State::Running {
+            if self.cpu.sleep_dead() {
                 return Stop::Sleep;
             }
         }

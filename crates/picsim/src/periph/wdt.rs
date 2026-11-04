@@ -75,10 +75,19 @@ impl Wdt {
         self.fosc_mhz * 1e6 / 4.0 / hz
     }
 
-    /// The WDT counts: by WDTE, SEN and whether the device sleeps (it never does while `step` runs).
+    /// The WDT counts: by WDTE, SEN (`on_sleep` is the rule while asleep).
     pub fn on(&self, con0: u8) -> bool {
         match self.wdte {
             2 | 3 => true,
+            1 => con0 & 1 != 0,
+            _ => false,
+        }
+    }
+
+    /// The WDT counts in Sleep: WDTE 3 always, 1 with SEN; 2 is off while asleep (Table 10-2 p.99).
+    pub fn on_sleep(&self, con0: u8) -> bool {
+        match self.wdte {
+            3 => true,
             1 => con0 & 1 != 0,
             _ => false,
         }

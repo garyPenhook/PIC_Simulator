@@ -453,4 +453,7 @@ NACKed and a read from nobody gives FFh.
 * `[A91]` The table, not the prose of 9.5 (TO, PD and RWDT "change"), decides which bits a reset changes: a time-out clears nTO and RWDT, a violation only WDTWV. PD is not touched.
 * `[A92]` After a reset other than the power-on reset the peripherals are rebuilt (all their state starts over) and the stimulus is applied again from its start (a `[[uart]]` stream
   or I2C client begins again; pin and analog levels are by absolute cycle and stay right). The logs (`tx`, `pin_log`, ...), the notes and the board stay. The reset takes no time.
-* `[A93]` SLEEP still stops the run: the WWDT neither runs nor wakes the part in Sleep. MCLR pin, brown-out and stack over/underflow resets are not modelled.
+* `[A93]` Sleep (DS40002043F 7.2.1 p.69, 10.6 p.99, Table 9-3 p.90): SLEEP sets TO = 1, PD = 0 and clears the WWDT; with an enabled interrupt flag already pending (PEIE for groups after PIR0, GIE ignored) it is a NOP.
+  The WWDT counts in Sleep for WDTE = 3, or 1 with SEN; WDTE = 2 is off. A time-out wakes the part with no reset: PC + 2, TO = PD = 0, PCON0 unchanged (the table, as `[A91]`). An enabled interrupt flag wakes it
+  with TO = 1, PD = 0 (the OV = 0 in the table row is not modelled); with GIE set the vector is taken after the instruction following SLEEP. The WWDT is cleared again on wake. With no interrupt enabled the
+  run jumps to the time-out; with nothing that can wake the part `Stop::Sleep` ends the run. Peripherals keep running in Sleep (no per-peripheral Sleep rules), no oscillator start-up delay; the MCLR pin, brown-out and stack over/underflow resets are not modelled.

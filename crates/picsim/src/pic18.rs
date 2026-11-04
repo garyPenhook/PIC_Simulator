@@ -17,7 +17,7 @@ pub const N: u8 = 16;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum State {
     Running,
-    /// SLEEP executed (no wake sources are modelled before S3).
+    /// SLEEP executed; ends by a watchdog time-out or an enabled interrupt flag.
     Sleeping,
 }
 
@@ -438,8 +438,7 @@ impl Pic18 {
     pub fn step(&mut self) -> u32 {
         let start = self.cycles;
         if self.state != State::Running {
-            self.cycles += 1;
-            return 1;
+            return self.sleep_step();
         }
         let ic0 = self.m.mem[self.intcon];
         self.p.clear_event();
@@ -669,6 +668,54 @@ impl Pic18 {
         (self.cycles - start) as u32
     }
 
+    // ----- sleep ---------------------------------------------------------------------------------------------
+
+    /// Some interrupt flag is set with its enable bit (and PEIE for the groups after PIR0), whatever GIE says
+    /// (DS40002043F 7.2.1-7.2.2 p.69).
+    fn wake_irq(&self) -> bool {
+        let peie = self.m.mem[self.intcon] & 0x40 != 0;
+        self.irq.iter().enumerate().any(|(n, g)| g[0] != 0 && (n == 0 || self.vic || peie) && self.m.mem[g[0]] & self.m.mem[g[1]] != 0)
+    }
+
+    /// SLEEP: a wake-up interrupt already pending makes it a NOP; otherwise PD = 0, TO = 1, the watchdog is cleared `[A93]`.
+    fn sleep(&mut self) {
+        if self.wake_irq() {
+            return;
+        }
+        let st = self.m.regs.status as usize;
+        self.m.mem[st] = self.m.mem[st] & !0x20 | 0x40;
+        self.state = State::Sleeping;
+        let now = self.cycles;
+        self.p.enter_sleep(&self.m, now);
+    }
+
+    /// Nothing can end this Sleep: no interrupt is enabled and the watchdog does not count.
+    pub fn sleep_dead(&self) -> bool {
+        self.state == State::Sleeping && !self.irq.iter().any(|g| g[0] != 0 && self.m.mem[g[1]] != 0) && self.p.wdt_sleep_deadline(&self.m).is_none()
+    }
+
+    /// One step while asleep: a cycle, or a jump to the watchdog time-out when no interrupt is enabled. Wake-up by the watchdog
+    /// (TO = PD = 0) or by an interrupt (TO = 1, PD = 0) continues at PC + 2, which the SLEEP fetch already left in the PC (Table 9-3 p.90).
+    fn sleep_step(&mut self) -> u32 {
+        let start = self.cycles;
+        let mut next = start + 1;
+        if !self.irq.iter().any(|g| g[0] != 0 && self.m.mem[g[1]] != 0)
+            && let Some(d) = self.p.wdt_sleep_deadline(&self.m)
+        {
+            next = d.max(next);
+        }
+        self.cycles = next;
+        self.p.sync(&mut self.m, next);
+        let st = self.m.regs.status as usize;
+        let by_wdt = self.p.wdt_woke();
+        if by_wdt || self.wake_irq() {
+            self.m.mem[st] = if by_wdt { self.m.mem[st] & !0x60 } else { self.m.mem[st] & !0x20 | 0x40 };
+            self.state = State::Running;
+            self.p.exit_sleep(next);
+        }
+        (self.cycles - start) as u32
+    }
+
     // ----- interrupts ----------------------------------------------------------------------------------------
 
     /// Take an interrupt if one is enabled and pending after the instruction that just finished.
@@ -824,7 +871,7 @@ impl Pic18 {
         match w >> 8 {
             0x00 => match w & 0xFF {
                 0x00 => {}
-                0x03 => self.state = State::Sleeping,
+                0x03 => self.sleep(),
                 0x04 => {
                     let now = self.cycles;
                     self.p.clrwdt(&self.m, now);

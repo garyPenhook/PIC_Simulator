@@ -164,3 +164,54 @@ fn reset_instruction_clears_ri_and_restarts() {
     assert_eq!(m.cpu.pc, 0);
     assert_eq!(r(&mut m, "TRISC"), 0xFF);
 }
+
+const SLEEP: [u8; 2] = [0x03, 0x00];
+
+/// WDTE = 3 keeps counting in Sleep; the time-out wakes the part with TO = PD = 0 and no reset, continuing at PC + 2 (DS40002043F 10.6 p.99, Table 9-3 p.90).
+#[test]
+fn watchdog_wakes_from_sleep() {
+    let mut m = machine(&[SLEEP[0], SLEEP[1], 0x00, 0x00, BRA_SELF[0], BRA_SELF[1]], ON);
+    w(&mut m, "WDTCON0", 0x00);
+    w(&mut m, "PCON0", 0xFF);
+    m.cpu.step(); // SLEEP
+    assert_eq!(r(&mut m, "STATUS") & 0x60, 0x40, "TO = 1, PD = 0");
+    assert!(!m.cpu.sleep_dead());
+    let t0 = m.cpu.cycles;
+    while m.cpu.state != picsim::pic18::State::Running {
+        m.cpu.step();
+    }
+    assert!(m.cpu.cycles >= t0 + 16000 && m.cpu.cycles <= t0 + 17000, "woke at the time-out, {}", m.cpu.cycles - t0);
+    assert_eq!(m.cpu.pc, 2, "PC + 2, no reset");
+    assert_eq!(r(&mut m, "STATUS") & 0x60, 0, "TO = PD = 0");
+    assert_eq!(r(&mut m, "PCON0"), 0xFF, "unchanged");
+}
+
+/// WDTE = 2 is off while asleep: nothing ends the Sleep, so the run stops there.
+#[test]
+fn watchdog_off_in_sleep_in_mode_2() {
+    let mut m = machine(&[SLEEP[0], SLEEP[1]], 0x5F); // WDTE = 10
+    m.cpu.step();
+    assert!(m.cpu.sleep_dead());
+}
+
+/// An interrupt flag with its enable ends the Sleep (TO = 1, PD = 0); one pending already makes SLEEP a NOP.
+#[test]
+fn interrupt_wakes_from_sleep() {
+    let mut m = machine(&[SLEEP[0], SLEEP[1], 0x00, 0x00], OFF);
+    let (pie, pir) = (addr(&m, "PIE0"), addr(&m, "PIR0"));
+    m.cpu.write(pie, 0x01);
+    m.cpu.step();
+    assert_eq!(m.cpu.state, picsim::pic18::State::Sleeping);
+    assert!(!m.cpu.sleep_dead());
+    m.cpu.write(pir, 0x01);
+    m.cpu.step();
+    assert_eq!(m.cpu.state, picsim::pic18::State::Running);
+    assert_eq!(m.cpu.pc, 2);
+    assert_eq!(r(&mut m, "STATUS") & 0x60, 0x40);
+
+    let mut m = machine(&[SLEEP[0], SLEEP[1], 0x00, 0x00], OFF);
+    m.cpu.write(pie, 0x01);
+    m.cpu.write(pir, 0x01);
+    m.cpu.step();
+    assert_eq!(m.cpu.state, picsim::pic18::State::Running, "SLEEP executes as a NOP");
+}
