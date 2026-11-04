@@ -26,6 +26,7 @@ use std::collections::{BTreeSet, VecDeque};
 
 mod board;
 mod ccp;
+mod clc;
 mod cmp;
 mod cwg;
 mod flash;
@@ -37,6 +38,7 @@ mod quart;
 mod spi;
 pub use board::{parse_pin, pin_name, Board, Bus, Led, Oled, Pin};
 use ccp::{Ccp, Pwm};
+use clc::Clc;
 use cmp::Cmp;
 use cwg::Cwg;
 use i2cq::I2cQ;
@@ -334,6 +336,12 @@ pub struct Periph {
     cwg: Option<Cwg>,
     cmps: Vec<Cmp>,
     cmout: Option<usize>,
+    /// Configurable logic cells, the CLCINxPPS registers, CLCDATA, "inside `clc_eval`" and the cycle stimulus was last looked at.
+    clcs: Vec<Clc>,
+    clcin: Vec<usize>,
+    clcdata: Option<usize>,
+    in_clc: bool,
+    clc_scan: u64,
     /// Stimulus: (from cycle, port letter, pin, volts), stable-sorted by cycle.
     analog: Vec<(u64, u8, u8, f64)>,
     /// A compare match with TMR1 clearing happened on the last clock: TMR1 goes to 0 on the next one `[A61]`.
@@ -412,7 +420,7 @@ impl Periph {
 
     /// Find the timers the part has and mark their registers as hooked in `m`.
     pub fn bind(dev: &Device, m: &mut DataMem) -> Periph {
-        let mut p = Periph { ports: Vec::new(), drive: Vec::new(), t0: None, t1: Vec::new(), t2: Vec::new(), uarts: Vec::new(), quarts: Vec::new(), spis: Vec::new(), mssps: Vec::new(), i2cqs: Vec::new(), adc: None, nvm: None, nvmq: None, stall: 0, fvr: None, tx: Vec::new(), spi_tx: Vec::new(), i2c_log: Vec::new(), notes: BTreeSet::new(), ccps: Vec::new(), pwms: Vec::new(), cwg: None, cmps: Vec::new(), cmout: None, analog: Vec::new(), ccptmrs: None, ppsout: Vec::new(), i2c_pps: Vec::new(), board: Board::default(), pullup: Vec::new(), forced: Vec::new(), sig: 0, sched: Vec::new(), pin_log: Vec::new(), event: None };
+        let mut p = Periph { ports: Vec::new(), drive: Vec::new(), t0: None, t1: Vec::new(), t2: Vec::new(), uarts: Vec::new(), quarts: Vec::new(), spis: Vec::new(), mssps: Vec::new(), i2cqs: Vec::new(), adc: None, nvm: None, nvmq: None, stall: 0, fvr: None, tx: Vec::new(), spi_tx: Vec::new(), i2c_log: Vec::new(), notes: BTreeSet::new(), ccps: Vec::new(), pwms: Vec::new(), cwg: None, cmps: Vec::new(), cmout: None, clcs: Vec::new(), clcin: Vec::new(), clcdata: None, in_clc: false, clc_scan: 0, analog: Vec::new(), ccptmrs: None, ppsout: Vec::new(), i2c_pps: Vec::new(), board: Board::default(), pullup: Vec::new(), forced: Vec::new(), sig: 0, sched: Vec::new(), pin_log: Vec::new(), event: None };
         let mut hook = |a: usize, k: u8| m.special[a] = Special::Hook(k);
         if let (Some(l), Some(h), Some(c0), Some(c1), Some(flag)) =
             (addr(dev, "TMR0L"), addr(dev, "TMR0H"), addr(dev, "T0CON0"), addr(dev, "T0CON1"), Flag::find(dev, "TMR0IF"))
@@ -529,6 +537,15 @@ impl Periph {
                     hook(reg, CWG0 + sub);
                 }
                 p.cwg = Some(c);
+            }
+            for n in 1..=8u8 {
+                if let Some(c) = Clc::find(dev, n) {
+                    p.clcs.push(c);
+                }
+            }
+            if !p.clcs.is_empty() {
+                p.clcin = (0..8).filter_map(|k| addr(dev, &format!("CLCIN{k}PPS"))).collect();
+                p.clcdata = addr(dev, "CLCDATA");
             }
             for n in 3..=4u8 {
                 if let Some(w) = Pwm::find(dev, n) {
@@ -769,7 +786,9 @@ impl Periph {
             self.sync_core(m, e);
             self.capture(m, i, e);
         }
+        self.clc_scan(m, now);
         self.sync_core(m, now);
+        self.clc_eval(m, 4 * now);
         for c in &mut self.ccps {
             c.scan = now;
         }
@@ -834,6 +853,113 @@ impl Periph {
         if self.cwg.as_ref().is_some_and(|c| c.source(m) == Some(code)) {
             self.cwg_edge(m, new, tick);
         }
+        self.clc_eval(m, tick);
+    }
+
+    /// Level of CLC data input `src` (DyS code, DS40002043F p.409) of cell `n` at cycle `now`.
+    fn clc_input(&mut self, m: &DataMem, src: u8, now: u64, n: u8) -> bool {
+        let code = match src {
+            0..=7 => return self.clcin.get(usize::from(src)).is_some_and(|&r| self.pps_pin(m, r, now)),
+            24..=27 => src - 19, // CCP1, CCP2, PWM3, PWM4 = source codes 5..8
+            28 | 29 => src - 15, // CMP1 = 0x0D, CMP2 = 0x0E
+            33..=40 => 0x18 + src - 33,
+            49 | 50 => src - 48,
+            _ => {
+                self.notes.insert(format!("CLC{n} data input {src} (clock, timer, serial, DSM, ZCD or IOC source) is not modelled; it reads low"));
+                return false;
+            }
+        };
+        self.sig >> code & 1 != 0
+    }
+
+    /// One evaluation of cell `i` at `tick` Fosc ticks; true when its output changed.
+    fn clc_step(&mut self, m: &mut DataMem, i: usize, tick: u64) -> bool {
+        let now = tick / 4;
+        let c = &self.clcs[i];
+        let (con, polr, sel, gls, flag, sig, n) = (c.con, c.pol, c.sel, c.gls, c.flag, c.sig, c.n);
+        let (was_on, q0, clk0, out0) = (c.on, c.q, c.clk, c.out);
+        let on = m.mem[con] & 0x80 != 0;
+        let (mut q, mut clk, mut out) = (false, false, false);
+        if on {
+            let pol = m.mem[polr];
+            let used = |k: usize| gls.iter().any(|&g| m.mem[g] >> (2 * k) & 3 != 0);
+            let mut d = [false; 4];
+            for (k, dk) in d.iter_mut().enumerate() {
+                if used(k) {
+                    *dk = self.clc_input(m, m.mem[sel[k]] & 63, now, n);
+                }
+            }
+            let mut g = [false; 4];
+            for (y, gy) in g.iter_mut().enumerate() {
+                *gy = clc::gate(m.mem[gls[y]], pol >> y & 1 != 0, d);
+            }
+            clk = g[0];
+            q = clc::logic(m.mem[con] & 7, g, was_on && q0, if was_on { clk0 } else { g[0] });
+            out = q != (pol & 0x80 != 0);
+        }
+        let c = &mut self.clcs[i];
+        (c.q, c.clk, c.on) = (q, clk, on);
+        if out != out0 {
+            c.out = out;
+        }
+        m.mem[con] = m.mem[con] & !0x20 | u8::from(out) << 5;
+        if let Some(a) = self.clcdata {
+            let bit = 1u8 << (n - 1);
+            if out { m.mem[a] |= bit } else { m.mem[a] &= !bit }
+        }
+        if out == out0 {
+            return false;
+        }
+        self.set_sig(m, sig, u8::from(out), tick);
+        if m.mem[con] & (if out { 0x10 } else { 0x08 }) != 0 {
+            flag.set(m);
+            self.raised(now);
+        }
+        true
+    }
+
+    /// Some cell is enabled or still shows a high output (so that disabling it is seen).
+    fn clc_active(&self, m: &DataMem) -> bool {
+        self.clcs.iter().any(|c| c.on || c.out || m.mem[c.con] & 0x80 != 0)
+    }
+
+    /// Re-evaluate all the cells at `tick` until the outputs settle (cells feed each other).
+    fn clc_eval(&mut self, m: &mut DataMem, tick: u64) {
+        if self.in_clc || !self.clc_active(m) {
+            return;
+        }
+        self.in_clc = true;
+        let mut settled = false;
+        for _ in 0..8 {
+            let mut changed = false;
+            for i in 0..self.clcs.len() {
+                changed |= self.clc_step(m, i, tick);
+            }
+            if !changed {
+                settled = true;
+                break;
+            }
+        }
+        if !settled {
+            self.notes.insert("CLC: a loop of cells did not settle within 8 passes (ring oscillator); left as is".to_string());
+        }
+        self.in_clc = false;
+    }
+
+    /// Pin stimulus changes between the last look and `now` are evaluated in order, then the state at `now`.
+    fn clc_scan(&mut self, m: &mut DataMem, now: u64) {
+        let from = self.clc_scan;
+        if !self.clc_active(m) {
+            self.clc_scan = now;
+            return;
+        }
+        let mut at: Vec<u64> = self.drive.iter().map(|e| e.0).filter(|&t| t > from && t < now).collect();
+        at.dedup();
+        for t in at {
+            self.clc_eval(m, 4 * t);
+        }
+        self.clc_eval(m, 4 * now);
+        self.clc_scan = now;
     }
 
     /// Voltage of a comparator input source at cycle `now`.
@@ -1728,7 +1854,7 @@ impl Periph {
         for &(reg, pi, bit) in &self.ppsout {
             // A pin driven by a modelled peripheral source (RxyPPS, TRIS clear) shows the source level, not the latch.
             let code = m.mem[reg] & 31;
-            if pi == i && tris >> bit & 1 == 0 && (self.ccps.iter().any(|c| c.sig == code) || self.pwms.iter().any(|c| c.sig == code) || self.cmps.iter().any(|c| c.sig == code) || ((1..=4).contains(&code) && self.cwg.as_ref().is_some_and(|c| c.hiz >> (code - 1) & 1 == 0))) {
+            if pi == i && tris >> bit & 1 == 0 && (self.ccps.iter().any(|c| c.sig == code) || self.pwms.iter().any(|c| c.sig == code) || self.cmps.iter().any(|c| c.sig == code) || self.clcs.iter().any(|c| c.sig == code) || ((1..=4).contains(&code) && self.cwg.as_ref().is_some_and(|c| c.hiz >> (code - 1) & 1 == 0))) {
                 v = v & !(1 << bit) | u8::from(self.sig >> code & 1 != 0) << bit;
             }
         }

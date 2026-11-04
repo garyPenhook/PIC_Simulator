@@ -379,6 +379,18 @@ NACKed and a read from nobody gives FFh.
 * Pins (28-pin Table 3 p.5): CxIN0- RA0, CxIN1- RA1, CxIN2- RB3, CxIN3- RB1; CxIN0+ RA2; C1IN1+ RA3; C2IN1+ RB0.
 * `[A79]` Voltages come from the stimulus only; VDD, ANSELx and TRISx are not looked at. `[A80]` No offset, hysteresis (HYS is stored), response time or
   Timer1 synchronisation (SYNC adds a note). `[A81]` The DAC input (PCH = 101) and not-connected selections read 0 V (DAC adds a note). `[A82]` 28-pin pins only.
+
+## CLC1-CLC8 (DS40002043F ch.26 p.406-426; `periph/clc.rs`, `tests/clc.rs`)
+
+* Registers p.414-426: CLCxCON EN 7, OUT 5 (read only), INTP 4, INTN 3, MODE 2:0; CLCxPOL POL 7, G4POL..G1POL 3:0; CLCxSEL0-3 D1S-D4S 5:0;
+  CLCxGLS0-3 bit 2(k-1)+1 = GyDkT, bit 2(k-1) = GyDkN; CLCDATA MLCxOUT bit x-1. Output PPS codes 0x18-0x1F (Table 18-2 p.287); a disabled cell outputs 0.
+* Gate = (OR of the enabled terms dkT/dkN) XOR GyPOL (Figure 26-2 p.408, Table 26-1 p.410: GLS 0x00 gives GyPOL). The prose of 26.1.2 says "ANDed"; the figure
+  ANDs each term with its enable bit and ORs the terms, and the table agrees with that.
+* Functions (Figure 26-3 p.411): 000 (g1&g2)|(g3&g4); 001 (g1|g2)^(g3|g4); 010 g1&g2&g3&g4; 011 S-R S=g1|g2 R=g3|g4; 100 D-FF D=g2 CLK=g1 S=g4 R=g3;
+  101 D-FF D=g4|g2 CLK=g1 R=g3; 110 J-K J=g2 K=g4 CLK=g1 R=g3; 111 latch D=g2 LE=g3 S=g4 R=g1. CLCxIF on the rising (INTP) or falling (INTN) edge of the output (26.2).
+* `[A83]` Evaluated after every instruction and on every change of a modelled input (pin stimulus times, PPS source changes); no propagation delay (39.4.20 not used).
+  `[A84]` R wins over S when both are 1 (not stated). `[A85]` Disabling clears the flip-flop; enabling takes the present clock level as the previous one.
+  `[A86]` Inputs modelled: CLCIN0-7 pins, CCP1/2, PWM3/4, CMP1/2, CWG1A/B, CLC outputs. Others read low and add a note. `[A87]` Loops are iterated at most 8 times.
 * Not modelled: Timer1 gate from a comparator, ADC auto-trigger, Timer2/4/6 reset from a comparator, wake from Sleep.
 * Tests: `crates/picsim/tests/cmp.rs`.
 
