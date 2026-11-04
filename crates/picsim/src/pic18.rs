@@ -212,6 +212,7 @@ impl Pic18 {
         }
         let (wdte, cps, cws, ccs) = (self.cfg.get("WDTE"), self.cfg.get("WDTCPS"), self.cfg.get("WDTCWS"), self.cfg.get("WDTCCS"));
         let modelled = self.p.wdt_config(wdte.unwrap_or(0) as u8, cps.unwrap_or(0x1F) as u8, cws.unwrap_or(7) as u8, ccs.unwrap_or(7) as u8);
+        self.p.scan_config(self.cfg.get("SCANE").is_none_or(|v| v != 0));
         if !modelled && self.cfg.get("WDTE").is_some_and(|w| w != 0) {
             self.notes.insert("watchdog enabled by WDTE: a timeout reset is not modelled (CLRWDT does nothing)".into());
         }
@@ -302,7 +303,7 @@ impl Pic18 {
             return 0;
         }
         match self.m.special[i] {
-            Special::None | Special::Core => self.m.mem[i],
+            Special::None | Special::Core | Special::Crc(_) => self.m.mem[i],
             Special::Hook(k) => {
                 if Periph::is_stored(k) { self.m.mem[i] } else { self.p.read(k, &mut self.m, self.cycles) }
             }
@@ -344,6 +345,12 @@ impl Pic18 {
         }
         match self.m.special[i] {
             Special::None | Special::Core => self.m.mem[i] = v & self.m.implemented[i],
+            Special::Crc(k) => {
+                let now = self.cycles;
+                self.p.sync(&mut self.m, now);
+                self.p.crc_write(k, v & self.m.implemented[i], now, &mut self.m, &self.prog);
+                self.cycles += self.p.take_stall();
+            }
             Special::Hook(k) => {
                 let now = self.cycles;
                 self.p.sync(&mut self.m, now);
@@ -655,6 +662,9 @@ impl Pic18 {
         let _ = at;
         let now = self.cycles;
         self.p.sync(&mut self.m, now);
+        let dead = (now - start).saturating_sub(1);
+        self.p.crc_scan(&mut self.m, &self.prog, now, dead, !self.in_service.is_empty());
+        self.cycles += self.p.take_stall();
         if let Some(k) = self.p.take_reset() {
             self.reset_cond(k);
             return (self.cycles - start) as u32;

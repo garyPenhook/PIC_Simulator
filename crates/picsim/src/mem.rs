@@ -36,6 +36,8 @@ pub enum Special {
     Core,
     /// A peripheral register with a model behind it (`periph.rs`); the code says which.
     Hook(u8),
+    /// A CRC / scanner register (`periph/crc.rs`); the code is the sub-code there. Reads are the stored byte.
+    Crc(u8),
 }
 
 pub struct DataMem {

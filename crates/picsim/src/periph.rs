@@ -27,6 +27,7 @@ use std::collections::{BTreeSet, VecDeque};
 mod board;
 mod ccp;
 mod clc;
+mod crc;
 mod wdt;
 mod cmp;
 mod cwg;
@@ -40,6 +41,7 @@ mod spi;
 pub use board::{parse_pin, pin_name, Board, Bus, Led, Oled, Pin};
 use ccp::{Ccp, Pwm};
 use clc::Clc;
+use crc::Crc;
 use wdt::Wdt;
 use cmp::Cmp;
 use cwg::Cwg;
@@ -369,6 +371,8 @@ pub struct Periph {
     clcdata: Option<usize>,
     in_clc: bool,
     clc_scan: u64,
+    /// CRC with memory scanner (Q10).
+    crc: Option<Crc>,
     wdt: Option<Wdt>,
     /// A reset the watchdog or CLRWDT asks for; the core takes it after the instruction (`take_reset`).
     reset_req: Option<ResetKind>,
@@ -457,7 +461,7 @@ impl Periph {
 
     /// Find the timers the part has and mark their registers as hooked in `m`.
     pub fn bind(dev: &Device, m: &mut DataMem) -> Periph {
-        let mut p = Periph { ports: Vec::new(), drive: Vec::new(), t0: None, t1: Vec::new(), t2: Vec::new(), uarts: Vec::new(), quarts: Vec::new(), spis: Vec::new(), mssps: Vec::new(), i2cqs: Vec::new(), adc: None, nvm: None, nvmq: None, stall: 0, fvr: None, tx: Vec::new(), spi_tx: Vec::new(), i2c_log: Vec::new(), notes: BTreeSet::new(), ccps: Vec::new(), pwms: Vec::new(), cwg: None, cmps: Vec::new(), cmout: None, clcs: Vec::new(), clcin: Vec::new(), clcdata: None, in_clc: false, clc_scan: 0, wdt: None, reset_req: None, sleeping: false, sleep_at: 0, fosc_off: false, wdt_wake: false, analog: Vec::new(), ccptmrs: None, ppsout: Vec::new(), i2c_pps: Vec::new(), board: Board::default(), pullup: Vec::new(), forced: Vec::new(), sig: 0, sched: Vec::new(), pin_log: Vec::new(), event: None };
+        let mut p = Periph { ports: Vec::new(), drive: Vec::new(), t0: None, t1: Vec::new(), t2: Vec::new(), uarts: Vec::new(), quarts: Vec::new(), spis: Vec::new(), mssps: Vec::new(), i2cqs: Vec::new(), adc: None, nvm: None, nvmq: None, stall: 0, fvr: None, tx: Vec::new(), spi_tx: Vec::new(), i2c_log: Vec::new(), notes: BTreeSet::new(), ccps: Vec::new(), pwms: Vec::new(), cwg: None, cmps: Vec::new(), cmout: None, clcs: Vec::new(), clcin: Vec::new(), clcdata: None, in_clc: false, clc_scan: 0, crc: None, wdt: None, reset_req: None, sleeping: false, sleep_at: 0, fosc_off: false, wdt_wake: false, analog: Vec::new(), ccptmrs: None, ppsout: Vec::new(), i2c_pps: Vec::new(), board: Board::default(), pullup: Vec::new(), forced: Vec::new(), sig: 0, sched: Vec::new(), pin_log: Vec::new(), event: None };
         let mut hook = |a: usize, k: u8| m.special[a] = Special::Hook(k);
         if let (Some(l), Some(h), Some(c0), Some(c1), Some(flag)) =
             (addr(dev, "TMR0L"), addr(dev, "TMR0H"), addr(dev, "T0CON0"), addr(dev, "T0CON1"), Flag::find(dev, "TMR0IF"))
@@ -682,6 +686,13 @@ impl Periph {
                 p.i2cqs.push(q);
             }
         }
+        if let Some(c) = Crc::find(dev) {
+            for (reg, sub) in c.regs() {
+                m.special[reg] = Special::Crc(sub);
+            }
+            c.init(m);
+            p.crc = Some(c);
+        }
         p
     }
 
@@ -836,6 +847,9 @@ impl Periph {
         self.sync_core(m, now);
         self.clc_eval(m, 4 * now);
         self.wdt_tick(m, now);
+        if let Some(c) = &mut self.crc {
+            c.sync(m, now);
+        }
         for c in &mut self.ccps {
             c.scan = now;
         }
@@ -904,6 +918,39 @@ impl Periph {
     }
 
     /// Set the watchdog's configuration (WDTE, WDTCPS, WDTCWS, WDTCCS fields of the configuration words).
+    /// CONFIG4.SCANE: the scanner exists.
+    pub fn scan_config(&mut self, scane: bool) {
+        if let Some(c) = &mut self.crc {
+            c.scane = scane;
+        }
+    }
+
+    /// A write to a CRC or scanner register; the CPU stalls for a Burst scan.
+    pub fn crc_write(&mut self, sub: u8, v: u8, now: u64, m: &mut DataMem, prog: &[u8]) {
+        if let Some(c) = &mut self.crc {
+            self.stall += c.write(sub, v, now, m, prog, &mut self.notes);
+            if self.stall > 0 {
+                self.flash_event(now);
+            }
+        }
+    }
+
+    /// Scanner work after an instruction (Concurrent, Triggered, Peek).
+    pub fn crc_scan(&mut self, m: &mut DataMem, prog: &[u8], now: u64, dead: u64, in_isr: bool) {
+        let Some(c) = &mut self.crc else { return };
+        let trig = match c.tsel(m) {
+            t @ 16..=23 => self.clcs.get(usize::from(t - 16)).map(|x| x.out),
+            _ => None,
+        };
+        if c.waiting(m) && trig.is_none() {
+            self.notes.insert("scanner trigger source (SCANTRIG) is not modelled except CLC1-CLC8: the scan never starts".into());
+        }
+        self.stall += c.scan(m, prog, now, dead, trig, in_isr);
+        if self.stall > 0 {
+            self.flash_event(now);
+        }
+    }
+
     pub fn wdt_config(&mut self, wdte: u8, cps: u8, cws: u8, ccs: u8) -> bool {
         let Some(w) = &mut self.wdt else { return false };
         (w.wdte, w.ps_fixed, w.win_fixed, w.cs_fixed) = (wdte, cps != 0x1F, cws != 7, ccs != 7);
@@ -1010,6 +1057,9 @@ impl Periph {
     /// The part slept for `d` cycles: what has no clock in Sleep carries on from where it stopped, so every time it
     /// has in hand moves `d` cycles later.
     fn thaw(&mut self, d: u64) {
+        if let Some(c) = &mut self.crc {
+            c.thaw(d);
+        }
         if let Some(t) = &mut self.t0 {
             t.last += d;
         }
