@@ -55,6 +55,11 @@ pub struct Pic18 {
     stk_mask: u8,
     /// A stack over- or underflow with STVREN = 1 during this step: the reset happens at its end `[A99]`.
     stk_fault: Option<ResetKind>,
+    /// The MCLR pin as the stimulus drives it: (from cycle, level), the next one to apply, the pin is low, the part is held in reset `[A100]`.
+    mclr_ev: Vec<(u64, u8)>,
+    mclr_next: usize,
+    mclr_low: bool,
+    mclr_hold: bool,
     pc_mask: u32,
     /// The device description, to rebuild the peripherals on a reset that is not a power-on reset.
     dev: Device,
@@ -166,6 +171,10 @@ impl Pic18 {
             wide_fsr,
             stk_mask: (depth + 1).next_power_of_two() as u8 - 1,
             stk_fault: None,
+            mclr_ev: Vec::new(),
+            mclr_next: 0,
+            mclr_low: false,
+            mclr_hold: false,
             pc_mask: (dev.memory.program.size - 1) | 1,
             dev: dev.clone(),
             stim: None,
@@ -454,6 +463,9 @@ impl Pic18 {
     /// Execute one instruction; returns the cycles it took (also added to `self.cycles`).
     pub fn step(&mut self) -> u32 {
         let start = self.cycles;
+        if self.mclr_hold {
+            return self.hold_step();
+        }
         if self.state != State::Running {
             return self.sleep_step();
         }
@@ -675,7 +687,7 @@ impl Pic18 {
         let dead = (now - start).saturating_sub(1);
         self.p.crc_scan(&mut self.m, &self.prog, now, dead, !self.in_service.is_empty());
         self.cycles += self.p.take_stall();
-        if let Some(k) = self.stk_fault.take().or_else(|| self.p.take_reset()) {
+        if let Some(k) = self.stk_fault.take().or_else(|| self.mclr_fell()).or_else(|| self.p.take_reset()) {
             self.reset_cond(k);
             return (self.cycles - start) as u32;
         }
@@ -687,6 +699,51 @@ impl Pic18 {
         if !self.p.notes.is_empty() {
             let n = std::mem::take(&mut self.p.notes);
             self.notes.extend(n);
+        }
+        (self.cycles - start) as u32
+    }
+
+    // ----- MCLR pin --------------------------------------------------------------------------------------------
+
+    pub fn set_mclr_events(&mut self, ev: Vec<(u64, u8)>) {
+        self.mclr_ev = ev;
+        self.mclr_next = 0;
+        self.mclr_low = false;
+        self.mclr_hold = false;
+    }
+
+    /// The pin is the reset input: LVP = 1 makes it MCLR whatever MCLRE says, otherwise MCLRE = 1 (DS40002043F 4.7.2 p.32).
+    fn mclr_enabled(&self) -> bool {
+        self.cfg.get("LVP") == Some(1) || self.cfg.get("MCLRE") != Some(0)
+    }
+
+    /// Applies the pin levels due by now; true if the pin fell while it is the reset input.
+    fn mclr_fell(&mut self) -> Option<ResetKind> {
+        let mut fell = false;
+        while let Some(&(at, level)) = self.mclr_ev.get(self.mclr_next)
+            && at <= self.cycles
+        {
+            self.mclr_next += 1;
+            fell |= level == 0 && !self.mclr_low;
+            self.mclr_low = level == 0;
+        }
+        if fell && self.mclr_enabled() {
+            self.mclr_hold = self.mclr_low;
+            return Some(ResetKind::Mclr);
+        }
+        None
+    }
+
+    /// The part is held in reset while MCLR is low: time passes up to the release, nothing runs.
+    fn hold_step(&mut self) -> u32 {
+        let start = self.cycles;
+        self.cycles = match self.mclr_ev.get(self.mclr_next) {
+            Some(&(at, _)) => at.max(start + 1),
+            None => start + 1,
+        };
+        let _ = self.mclr_fell();
+        if !self.mclr_low {
+            self.mclr_hold = false;
         }
         (self.cycles - start) as u32
     }
@@ -728,7 +785,14 @@ impl Pic18 {
         {
             next = d.max(next);
         }
+        if let Some(&(at, _)) = self.mclr_ev.get(self.mclr_next) {
+            next = next.min(at.max(start + 1));
+        }
         self.cycles = next;
+        if let Some(k) = self.mclr_fell() {
+            self.reset_cond(k);
+            return (self.cycles - start) as u32;
+        }
         self.p.sync(&mut self.m, next);
         let st = self.m.regs.status as usize;
         let by_wdt = self.p.wdt_woke();
@@ -1136,6 +1200,7 @@ impl Pic18 {
             }
             ResetKind::WdtWindow => self.clear_pcon(0x20), // WDTWV
             ResetKind::Instruction => self.clear_pcon(0x04), // RI
+            ResetKind::Mclr => self.clear_pcon(0x08), // RMCLR
             ResetKind::StackOverflow => self.set_pcon(0x80), // STKOVF
             ResetKind::StackUnderflow => self.set_pcon(0x40), // STKUNF
         }

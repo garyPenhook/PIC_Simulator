@@ -67,6 +67,8 @@ pub enum ResetKind {
     StackOverflow,
     /// A pop from an empty stack with STVREN = 1.
     StackUnderflow,
+    /// The MCLR pin driven low while it is the reset input.
+    Mclr,
 }
 
 /// A flag bit in a PIRx register.

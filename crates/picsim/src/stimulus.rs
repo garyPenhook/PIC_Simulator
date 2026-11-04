@@ -43,6 +43,10 @@
 //! mask = 0xFF         # default 0xFF
 //! at = 0
 //!
+//! [[mclr]]            # the level of the MCLR pin (RE3 on the 28-pin Q10): 0 holds the part in reset (when the pin is MCLR)
+//! level = 0           # 0 or 1; from `at` on, later entries replace earlier ones; the pin is high until driven
+//! at = 20000
+//!
 //! fosc_mhz = 64       # optional: the PIC clock, for the OLED's scrolling time (default 64)
 //!
 //! [[led]]             # an LED on a pin: on while the pin is an output at the active level
@@ -79,6 +83,8 @@ pub struct Stimulus {
     pub analog: Vec<(u8, u8, u64, f64)>,
     /// (port letter, from cycle, pin mask, levels)
     pub pins: Vec<(u8, u64, u8, u8)>,
+    /// (from cycle, level) of the MCLR pin, sorted by cycle.
+    pub mclr: Vec<(u64, u8)>,
     /// LEDs and OLEDs on the board.
     pub board: crate::periph::Board,
 }
@@ -120,6 +126,28 @@ impl Stimulus {
                         st.pins.push((letter, at, mask, int("value", 0xFF)?.ok_or("port needs value")? as u8));
                     }
                 }
+                continue;
+            }
+            if k == "mclr" {
+                for e in v.as_array().ok_or("mclr must be [[mclr]] entries")? {
+                    let t = e.as_table().ok_or("mclr entry must be a table")?;
+                    for key in t.keys() {
+                        if !["level", "at"].contains(&key.as_str()) {
+                            return Err(format!("mclr: unknown key {key}"));
+                        }
+                    }
+                    let level = match t.get("level") {
+                        Some(toml::Value::Boolean(b)) => u8::from(*b),
+                        Some(x) if matches!(x.as_integer(), Some(0 | 1)) => x.as_integer().unwrap() as u8,
+                        _ => return Err("mclr.level must be 0, 1, true or false".into()),
+                    };
+                    let at = match t.get("at") {
+                        None => 0,
+                        Some(x) => x.as_integer().and_then(|i| u64::try_from(i).ok()).filter(|i| *i <= MAX_CYCLES).ok_or(format!("mclr.at must be an integer 0..{MAX_CYCLES}"))?,
+                    };
+                    st.mclr.push((at, level));
+                }
+                st.mclr.sort_by_key(|e| e.0);
                 continue;
             }
             if k == "fosc_mhz" {

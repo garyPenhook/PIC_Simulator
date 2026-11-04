@@ -57,7 +57,10 @@ impl Machine {
 
     /// Drive the part as a stimulus file says (see `stimulus.rs`).
     pub fn load_stimulus(&mut self, text: &str) -> Result<(), String> {
-        crate::stimulus::Stimulus::parse(text)?.apply(&self.dev, &mut self.cpu.p)?;
+        let st = crate::stimulus::Stimulus::parse(text)?;
+        let mclr = st.mclr.clone();
+        st.apply(&self.dev, &mut self.cpu.p)?;
+        self.cpu.set_mclr_events(mclr);
         self.stimulus = Some(text.to_string());
         self.cpu.stim = self.stimulus.clone();
         Ok(())
@@ -70,6 +73,7 @@ impl Machine {
             if let Some(t) = &self.stimulus
                 && let Ok(st) = crate::stimulus::Stimulus::parse(t)
             {
+                c.set_mclr_events(st.mclr.clone());
                 let _ = st.apply(&self.dev, &mut c.p); // it applied once on this device, so it applies again
             }
             c.p.set_board(self.cpu.p.board.fresh());
