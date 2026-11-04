@@ -115,6 +115,11 @@ impl NvmQ {
         Some(e)
     }
 
+    /// Cycle the running write ends.
+    pub fn end(&self) -> Option<u64> {
+        self.op.map(|o| o.0)
+    }
+
     pub fn hold(&self) -> Option<usize> {
         self.pfm.as_ref().map(|f| f.hold)
     }

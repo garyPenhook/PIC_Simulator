@@ -781,10 +781,17 @@ impl Pic18 {
     fn sleep_step(&mut self) -> u32 {
         let start = self.cycles;
         let mut next = start + 1;
-        if !self.irq.iter().any(|g| g[0] != 0 && self.m.mem[g[1]] != 0)
-            && let Some(d) = self.p.wdt_sleep_deadline(&self.m)
-        {
+        let irq_on = self.irq.iter().any(|g| g[0] != 0 && self.m.mem[g[1]] != 0);
+        if !irq_on && let Some(d) = self.p.wdt_sleep_deadline(&self.m) {
             next = d.max(next);
+        }
+        // A timer on LFINTOSC or SOSC may set the flag that wakes the part: look at each of its edges, and at the other
+        // things that can happen meanwhile, rather than at every cycle `[A102]`.
+        if irq_on && self.p.timer_in_sleep() {
+            let ev = [self.p.next_osc_edge(&self.m, start), self.p.wdt_sleep_deadline(&self.m), self.p.next_analog(start), self.p.next_pending(start)];
+            if let Some(e) = ev.into_iter().flatten().min() {
+                next = e.max(next);
+            }
         }
         if let Some(&(at, _)) = self.mclr_ev.get(self.mclr_next) {
             next = next.min(at.max(start + 1));

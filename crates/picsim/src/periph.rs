@@ -7,9 +7,9 @@
 //!   (period TMR0H+1 clocks); 16-bit mode rolls over at FFFFh; TMR0H is buffered in 16-bit mode (read of TMR0L
 //!   loads it, write of TMR0L stores it); prescaler 1:1..1:32768 (T0CKPS) and postscaler 1:1..1:16 (T0OUTPS) are
 //!   cleared by a write to TMR0L, T0CON0 or T0CON1; TMR0IF is set when TMR0_out toggles, i.e. every T0OUTPS+1
-//!   matches or rollovers; FOSC/4 source = T0CS 010 (Table 19-1).
+//!   matches or rollovers; FOSC/4 source = T0CS 010 (Table 19-1); the pin, LFINTOSC and SOSC too `[A102]`.
 //! * Timer1 (ch.20, p.305-313): 16-bit up counter, prescaler 1/2/4/8, rollover from FFFFh to 0000h sets TMR1IF;
-//!   RD16 buffers TMR1H like Timer0 (20.6). Clock FOSC/4 = CS 1, FOSC = CS 2 (TMRxCLK).
+//!   RD16 buffers TMR1H like Timer0 (20.6). Clock FOSC/4 = CS 1, FOSC = CS 2 (TMRxCLK); the pin, LFINTOSC and SOSC too `[A102]`.
 //! * Timer2 (ch.21, p.324-327): T2TMR counts up, compares with T2PR, goes to 0 on the next clock; the postscaler
 //!   counts matches and the flag is set when it reaches OUTPS+1; prescaler and postscaler are cleared by a write to
 //!   T2TMR or T2CON, T2TMR is not; one-shot software start (MODE 01000) clears ON at the period match.
@@ -117,6 +117,83 @@ fn prescale(pre: &mut u64, shift: u32, dt: u64) -> u64 {
     let t = *pre + dt;
     *pre = t & ((1u64 << shift) - 1);
     t >> shift
+}
+
+/// Where a Timer0 / Timer1-type clock comes from.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Clk {
+    /// This many counter ticks per instruction cycle (Fosc/4: 1, Fosc: 4).
+    Cyc(u64),
+    /// The pin of TxCKIPPS; `true` counts falling edges (Timer0 CS = 001).
+    Pin(bool),
+    /// An oscillator of this frequency in Hz that does not stop in Sleep.
+    Hz(u64),
+    /// Not modelled: it does not count.
+    Other,
+}
+
+const LFINTOSC_HZ: u64 = 31_000;
+const SOSC_HZ: u64 = 32_768;
+
+/// Timer0 clock source T0CS (Q10: DS40002043F Table 19-1 p.296; Q41: T0CON1 DS40002214G p.360).
+fn t0_clk(q41: bool, cs: u8) -> Clk {
+    match cs {
+        0 => Clk::Pin(false),
+        1 => Clk::Pin(true),
+        2 => Clk::Cyc(1),
+        4 => Clk::Hz(LFINTOSC_HZ),
+        5 if !q41 => Clk::Hz(SOSC_HZ),
+        6 if q41 => Clk::Hz(SOSC_HZ),
+        _ => Clk::Other,
+    }
+}
+
+/// Timer1/3/5 clock source CS (Q10: DS40002043F Table 20-2 p.306; Q41: Table 25-4 DS40002214G p.377).
+fn t1_clk(q41: bool, cs: u8) -> Clk {
+    match cs {
+        0 => Clk::Pin(false),
+        1 => Clk::Cyc(1),
+        2 => Clk::Cyc(4),
+        4 => Clk::Hz(LFINTOSC_HZ),
+        6 if !q41 => Clk::Hz(SOSC_HZ),
+        7 if q41 => Clk::Hz(SOSC_HZ),
+        _ => Clk::Other,
+    }
+}
+
+/// How the edges of one clock fall in a window of cycles.
+enum How {
+    /// `r` ticks per cycle, evenly.
+    Ratio(u64),
+    /// An oscillator: edge number `e0 + k` falls on the cycle `ceil((e0 + k) * fosc / (4 * hz))`.
+    Time { hz: u64, fosc: u64, e0: u64 },
+    /// The cycles of the pin edges, in order.
+    List(Vec<u64>),
+}
+
+/// The counter ticks that a clock makes between two cycles.
+struct Edges {
+    n: u64,
+    how: How,
+}
+
+impl Edges {
+    /// Cycle of the `j`-th prescaler output clock after `base`, with `pre0` ticks already in the prescaler (shift `sh`).
+    fn at(&self, base: u64, pre0: u64, sh: u32, j: u64) -> u64 {
+        match &self.how {
+            How::Ratio(r) => at(base, pre0, sh, j, *r),
+            How::Time { hz, fosc, e0 } => {
+                let k = e0 + (j << sh) - pre0;
+                (u128::from(k) * u128::from(*fosc)).div_ceil(4 * u128::from(*hz)) as u64
+            }
+            How::List(l) => l[((j << sh) - pre0 - 1) as usize],
+        }
+    }
+}
+
+/// Edge number of an oscillator at cycle `t`: edges since cycle 0.
+fn osc_edges(t: u64, hz: u64, fosc: u64) -> u64 {
+    (u128::from(t) * 4 * u128::from(hz) / u128::from(fosc)) as u64
 }
 
 // Hook codes stored in `Special::Hook`.
@@ -298,6 +375,10 @@ struct Timer0 {
     pre: u64,
     post: u8,
     last: u64,
+    /// T0CKIPPS, the pin of the clock sources 000 and 001.
+    cki: Option<usize>,
+    /// Set at SLEEP when the clock keeps this timer running in Sleep `[A102]`.
+    sleep_run: bool,
 }
 
 struct Timer1 {
@@ -316,6 +397,10 @@ struct Timer1 {
     cnt: u16,
     pre: u64,
     last: u64,
+    /// TxCKIPPS, the pin of clock source 00000.
+    cki: Option<usize>,
+    /// Set at SLEEP when the clock keeps this timer running in Sleep `[A102]`.
+    sleep_run: bool,
 }
 
 struct Timer2 {
@@ -488,7 +573,7 @@ impl Periph {
             for (a, k) in [(l, T0L), (h, T0H), (c0, T0C0), (c1, T0C1)] {
                 hook(a, k);
             }
-            p.t0 = Some(Timer0 { l, h, c0, c1, flag, cnt: 0, cmp: 0xFF, pre: 0, post: 0, last: 0 });
+            p.t0 = Some(Timer0 { l, h, c0, c1, flag, cnt: 0, cmp: 0xFF, pre: 0, post: 0, last: 0, cki: addr(dev, "T0CKIPPS"), sleep_run: false });
         }
         for (i, n) in [1u8, 3, 5].into_iter().enumerate() {
             if let (Some(l), Some(h), Some(con), Some(clk), Some(gcon), Some(flag)) = (
@@ -502,7 +587,7 @@ impl Periph {
                 for (sub, a) in [l, h, con, clk, gcon].into_iter().enumerate() {
                     hook(a, t1_hook(i, sub as u8));
                 }
-                p.t1.push(Timer1 { n, clr: false, gate: addr(dev, &format!("T{n}GATE")), gpps: addr(dev, &format!("T{n}GPPS")), l, h, con, clk, gcon, flag, cnt: 0, pre: 0, last: 0 });
+                p.t1.push(Timer1 { n, clr: false, gate: addr(dev, &format!("T{n}GATE")), gpps: addr(dev, &format!("T{n}GPPS")), l, h, con, clk, gcon, flag, cnt: 0, pre: 0, last: 0, cki: addr(dev, &format!("T{n}CKIPPS")), sleep_run: false });
             }
         }
         for (i, n) in [2u8, 4, 6].into_iter().enumerate() {
@@ -872,12 +957,12 @@ impl Periph {
                 }
             }
             let Some((e, i)) = best else { break };
-            self.sync_core(m, e);
+            self.sync_core(m, e, false);
             self.capture(m, i, e);
         }
         self.clc_scan(m, now);
         self.ioc_scan(m, now);
-        self.sync_core(m, now);
+        self.sync_core(m, now, false);
         self.clc_eval(m, 4 * now);
         self.wdt_tick(m, now);
         if let Some(c) = &mut self.crc {
@@ -1081,6 +1166,13 @@ impl Periph {
         }
     }
 
+    fn clear_sleep_run(&mut self) {
+        if let Some(t) = &mut self.t0 {
+            t.sleep_run = false;
+        }
+        self.t1.iter_mut().for_each(|t| t.sleep_run = false);
+    }
+
     /// SLEEP at cycle `now`: the watchdog is cleared and counts on only in the modes that run in Sleep.
     pub fn enter_sleep(&mut self, m: &mut DataMem, now: u64, idle: bool) {
         self.sync(m, now);
@@ -1090,12 +1182,21 @@ impl Periph {
         self.sleeping = true;
         self.fosc_off = !idle;
         self.sleep_at = now;
+        self.clear_sleep_run();
         self.wdt_wake = false;
         if let Some(w) = &mut self.wdt {
             (w.start, w.armed, w.was_on) = (now, false, w.on_sleep(m.mem[w.con0]));
         }
         if idle {
             return;
+        }
+        // Which timers go on counting: their `last` is kept up to date in Sleep and `thaw` leaves it alone.
+        let t0_ok = self.t0_sleep_ok(m);
+        if let Some(t) = &mut self.t0 {
+            t.sleep_run = t0_ok;
+        }
+        for i in 0..self.t1.len() {
+            self.t1[i].sleep_run = self.t1_sleep_ok(m, i);
         }
         for u in &mut self.uarts {
             (u.asleep, u.rx_cur) = (true, None);
@@ -1106,7 +1207,8 @@ impl Periph {
     }
 
     /// One look at the models that keep running in Sleep, up to cycle `now`: the watchdog, the comparators, the CLCs, the CWG
-    /// dead band and the data EEPROM. Everything clocked by Fosc or Fosc/4 has no clock (DS40002043F 7.4 p.71) and waits for `thaw`.
+    /// dead band and the data EEPROM. Everything clocked by Fosc or Fosc/4 has no clock (DS40002043F 7.4 p.71) and waits for `thaw`; Timer0 and
+    /// Timer1-type timers on a pin, LFINTOSC or SOSC count on (`sync_core` with `asleep`) `[A102]`.
     /// Characters the stimulus sends to a UART meanwhile are lost `[A94]`.
     fn sync_asleep(&mut self, m: &mut DataMem, now: u64) {
         let mut ev: Vec<u64> = Vec::new();
@@ -1130,6 +1232,7 @@ impl Periph {
         {
             ev.push(e);
         }
+        self.sync_core(m, now, true);
         self.clc_eval(m, 4 * now);
         self.wdt_tick(m, now);
         for e in ev {
@@ -1143,10 +1246,10 @@ impl Periph {
         if let Some(c) = &mut self.crc {
             c.thaw(d);
         }
-        if let Some(t) = &mut self.t0 {
+        if let Some(t) = self.t0.as_mut().filter(|t| !t.sleep_run) {
             t.last += d;
         }
-        for t in &mut self.t1 {
+        for t in self.t1.iter_mut().filter(|t| !t.sleep_run) {
             t.last += d;
         }
         for t in &mut self.t2 {
@@ -1184,6 +1287,7 @@ impl Periph {
         if std::mem::take(&mut self.fosc_off) {
             self.thaw(d);
         }
+        self.clear_sleep_run();
         if let Some(w) = &mut self.wdt {
             (w.start, w.armed, w.was_on) = (now, false, false);
         }
@@ -1583,7 +1687,105 @@ impl Periph {
         }
     }
 
-    fn sync_core(&mut self, m: &mut DataMem, now: u64) {
+    /// Fosc in Hz (the board's `fosc_mhz`, 64 MHz until the stimulus says otherwise).
+    fn fosc_hz(&self) -> u64 {
+        (if self.board.fosc_mhz > 0.0 { self.board.fosc_mhz } else { 64.0 } * 1e6) as u64
+    }
+
+    /// The Q41 family (its timers select SOSC with other codes).
+    fn q41(&self) -> bool {
+        self.nvmq.is_some()
+    }
+
+    /// Clock of Timer0 now.
+    fn t0_clock(&self, m: &DataMem) -> Option<Clk> {
+        self.t0.as_ref().map(|t| t0_clk(self.q41(), m.mem[t.c1] >> 5))
+    }
+
+    /// Clock of Timer1-type timer `i` now.
+    fn t1_clock(&self, m: &DataMem, i: usize) -> Clk {
+        t1_clk(self.q41(), m.mem[self.t1[i].clk] & 0x1F)
+    }
+
+    /// Timer0 counts without Fosc/4: ON, T0ASYNC = 1 and a pin or an oscillator that runs in Sleep `[A102]`.
+    fn t0_sleep_ok(&self, m: &DataMem) -> bool {
+        let Some(t) = &self.t0 else { return false };
+        m.mem[t.c0] & 0x80 != 0 && m.mem[t.c1] & 0x10 != 0 && matches!(self.t0_clock(m), Some(Clk::Pin(_) | Clk::Hz(_)))
+    }
+
+    /// Timer1-type timer `i` counts without Fosc/4: ON, SYNC = 1 and a pin or an oscillator that runs in Sleep `[A102]`.
+    fn t1_sleep_ok(&self, m: &DataMem, i: usize) -> bool {
+        let con = m.mem[self.t1[i].con];
+        con & 1 != 0 && con & 4 != 0 && matches!(self.t1_clock(m, i), Clk::Pin(_) | Clk::Hz(_))
+    }
+
+    /// The ticks a clock makes in cycles `from+1 ..= to`. A pin edge is a change of its level (`cki` is the PPS register).
+    fn clock_edges(&self, m: &DataMem, clk: Clk, cki: Option<usize>, from: u64, to: u64) -> Edges {
+        match clk {
+            Clk::Cyc(r) => Edges { n: (to - from) * r, how: How::Ratio(r) },
+            Clk::Hz(hz) => {
+                let fosc = self.fosc_hz();
+                let e0 = osc_edges(from, hz, fosc);
+                Edges { n: osc_edges(to, hz, fosc) - e0, how: How::Time { hz, fosc, e0 } }
+            }
+            Clk::Pin(inv) => {
+                let mut l: Vec<u64> = Vec::new();
+                if let Some(reg) = cki {
+                    let mut times: Vec<u64> = self.drive.iter().map(|d| d.0).filter(|&t| t > from && t <= to).collect();
+                    times.sort_unstable();
+                    times.dedup();
+                    for t in times {
+                        let (old, new) = (self.pps_pin(m, reg, t - 1), self.pps_pin(m, reg, t));
+                        if old != new && new != inv {
+                            l.push(t);
+                        }
+                    }
+                }
+                Edges { n: l.len() as u64, how: How::List(l) }
+            }
+            Clk::Other => Edges { n: 0, how: How::Ratio(0) },
+        }
+    }
+
+    /// Some timer counts in this Sleep (a pin, LFINTOSC or SOSC clock).
+    pub fn timer_in_sleep(&self) -> bool {
+        self.t0.as_ref().is_some_and(|t| t.sleep_run) || self.t1.iter().any(|t| t.sleep_run)
+    }
+
+    /// The next cycle after `after` on which an oscillator that keeps a timer running in Sleep makes an edge. The part
+    /// is looked at on each one so that the timer's flag wakes it on the cycle it is set `[A102]`.
+    pub fn next_osc_edge(&self, m: &DataMem, after: u64) -> Option<u64> {
+        let fosc = self.fosc_hz();
+        let mut hzs: Vec<u64> = Vec::new();
+        if self.t0.as_ref().is_some_and(|t| t.sleep_run)
+            && let Some(Clk::Hz(h)) = self.t0_clock(m)
+        {
+            hzs.push(h);
+        }
+        for i in 0..self.t1.len() {
+            if self.t1[i].sleep_run
+                && let Clk::Hz(h) = self.t1_clock(m, i)
+            {
+                hzs.push(h);
+            }
+        }
+        hzs.into_iter().map(|hz| (u128::from(osc_edges(after, hz, fosc) + 1) * u128::from(fosc)).div_ceil(4 * u128::from(hz)) as u64).min()
+    }
+
+    /// The next cycle after `after` that a stimulus analog level changes.
+    pub fn next_analog(&self, after: u64) -> Option<u64> {
+        self.analog.iter().map(|e| e.0).filter(|&t| t > after).min()
+    }
+
+    /// The next cycle after `after` that a scheduled pin change (not a Timer2-type edge, which waits in Sleep) or the end of a
+    /// data EEPROM write falls due.
+    pub fn next_pending(&self, after: u64) -> Option<u64> {
+        let s = self.sched.iter().filter(|s| !s.pwm).map(|s| s.tick / 4);
+        let n = self.nvm.iter().filter_map(|n| n.end()).chain(self.nvmq.iter().filter_map(|n| n.end()));
+        s.chain(n).filter(|&t| t > after).min()
+    }
+
+    fn sync_core(&mut self, m: &mut DataMem, now: u64, asleep: bool) {
         let mut ev: Vec<u64> = Vec::new();
         // Compare CCPs with the timer they use: (index, CCPR, MODE, timer number).
         let comps: Vec<(usize, u16, u8, u8)> = self
@@ -1604,17 +1806,31 @@ impl Periph {
         let mut hits: Vec<Sched> = Vec::new();
         // Timer2-type period matches: (timer number, cycle, PR, prescaler shift).
         let mut periods: Vec<(u8, u64, u8, u32)> = Vec::new();
-        if let Some(t) = &mut self.t0 {
+        // Each running timer's clock edges are looked up first: they read the pins and the other tables of `self`.
+        // In Sleep a timer is run if it was set up to count at SLEEP (`sleep_run`, the same fact `thaw` goes by); it counts
+        // only while its registers still say so (a debugger can write them meanwhile).
+        let t0_run = !asleep || self.t0.as_ref().is_some_and(|t| t.sleep_run);
+        let t0_in = match (&self.t0, self.t0_clock(m)) {
+            (Some(t), Some(clk)) if t0_run && (!asleep || self.t0_sleep_ok(m)) && m.mem[t.c0] & 0x80 != 0 && now > t.last => Some((clk, self.clock_edges(m, clk, t.cki, t.last, now))),
+            _ => None,
+        };
+        let t1_run: Vec<bool> = self.t1.iter().map(|t| !asleep || t.sleep_run).collect();
+        let mut t1_in: Vec<Option<(Clk, Edges)>> = Vec::new();
+        for i in 0..self.t1.len() {
+            let t = &self.t1[i];
+            let clk = self.t1_clock(m, i);
+            t1_in.push((t1_run[i] && (!asleep || self.t1_sleep_ok(m, i)) && m.mem[t.con] & 1 != 0 && now > t.last).then(|| (clk, self.clock_edges(m, clk, t.cki, t.last, now))));
+        }
+        if let Some(t) = self.t0.as_mut().filter(|_| t0_run) {
             let (base, pre0) = (t.last, t.pre);
-            let dt = now - t.last;
             t.last = now;
             let c0 = m.mem[t.c0];
             let c1 = m.mem[t.c1];
-            if c0 & 0x80 != 0 && dt > 0 {
-                if c1 >> 5 != 2 {
-                    self.notes.insert(format!("Timer0 clock source T0CS={} is not modelled (only FOSC/4); it does not count", c1 >> 5));
+            if let Some((clk, ed)) = t0_in {
+                if clk == Clk::Other {
+                    self.notes.insert(format!("Timer0 clock source T0CS={} is not modelled (Fosc/4, the T0CKIPPS pin, LFINTOSC and SOSC are); it does not count", c1 >> 5));
                 } else {
-                    let clocks = prescale(&mut t.pre, u32::from(c1 & 15), dt);
+                    let clocks = prescale(&mut t.pre, u32::from(c1 & 15), ed.n);
                     let outps = c0 & 15;
                     let wide = c0 & 0x10 != 0;
                     for j in 1..=clocks {
@@ -1634,7 +1850,7 @@ impl Periph {
                                 t.post = 0;
                                 m.mem[t.c0] ^= 0x20; // T0OUT toggles
                                 t.flag.set(m);
-                                ev.push(at(base, pre0, u32::from(c1 & 15), j, 1));
+                                ev.push(ed.at(base, pre0, u32::from(c1 & 15), j));
                             } else {
                                 t.post += 1;
                             }
@@ -1644,21 +1860,21 @@ impl Periph {
             }
             m.mem[t.l] = t.cnt as u8;
         }
-        for t in &mut self.t1 {
+        for (ti, t) in self.t1.iter_mut().enumerate() {
+            if !t1_run[ti] {
+                continue;
+            }
             let comps: Vec<(usize, u16, u8)> = comps.iter().filter(|c| c.3 == t.n).map(|&(i, r, mo, _)| (i, r, mo)).collect();
             let (base, pre0) = (t.last, t.pre);
-            let dt = now - t.last;
             t.last = now;
             let con = m.mem[t.con];
-            if con & 1 != 0 && dt > 0 {
+            if let Some((clk, ed)) = t1_in[ti].take() {
                 let cs = m.mem[t.clk] & 0x1F;
-                if cs != 1 && cs != 2 {
-                    self.notes.insert(format!("Timer{} clock source CS={cs} is not modelled (only FOSC/4 and FOSC); it does not count", t.n));
+                if clk == Clk::Other {
+                    self.notes.insert(format!("Timer{} clock source CS={cs} is not modelled (Fosc/4, Fosc, the TxCKIPPS pin, LFINTOSC and SOSC are); it does not count", t.n));
                 } else {
-                    let ticks = if cs == 2 { dt * 4 } else { dt };
-                    let clocks = prescale(&mut t.pre, u32::from((con >> 4) & 3), ticks);
+                    let clocks = prescale(&mut t.pre, u32::from((con >> 4) & 3), ed.n);
                     let sh = u32::from((con >> 4) & 3);
-                    let ratio = if cs == 2 { 4 } else { 1 };
                     if comps.is_empty() {
                         if std::mem::take(&mut t.clr) && clocks > 0 {
                             t.cnt = 0;
@@ -1667,7 +1883,7 @@ impl Periph {
                         if total >= 65536 {
                             t.flag.set(m);
                             let last_wrap = (total / 65536) * 65536 - u64::from(t.cnt);
-                            ev.push(at(base, pre0, sh, last_wrap, ratio));
+                            ev.push(ed.at(base, pre0, sh, last_wrap));
                         }
                         t.cnt = total as u16;
                     } else {
@@ -1695,7 +1911,7 @@ impl Periph {
                             t.cnt = t.cnt.wrapping_add(step as u16);
                             done += step;
                             left -= step;
-                            let cyc = at(base, pre0, sh, done, ratio);
+                            let cyc = ed.at(base, pre0, sh, done);
                             if wrapped {
                                 t.flag.set(m);
                                 ev.push(cyc);
@@ -1726,6 +1942,15 @@ impl Periph {
                 m.mem[t.h] = (t.cnt >> 8) as u8;
             }
             m.mem[t.l] = t.cnt as u8;
+        }
+        if asleep {
+            // Only the timers on a clock that runs in Sleep were looked at; what they make is done here, the rest waits for `thaw`.
+            self.sched.extend(hits);
+            self.apply_sched(m, now, &mut ev);
+            for e in ev {
+                self.raised(e);
+            }
+            return;
         }
         for t in &mut self.t2 {
             let (base, pre0) = (t.last, t.pre);
