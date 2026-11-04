@@ -26,6 +26,7 @@ use std::collections::{BTreeSet, VecDeque};
 
 mod board;
 mod ccp;
+mod cmp;
 mod cwg;
 mod flash;
 mod nvm;
@@ -36,6 +37,7 @@ mod quart;
 mod spi;
 pub use board::{parse_pin, pin_name, Board, Bus, Led, Oled, Pin};
 use ccp::{Ccp, Pwm};
+use cmp::Cmp;
 use cwg::Cwg;
 use i2cq::I2cQ;
 use mssp::Mssp;
@@ -156,6 +158,10 @@ const PWM0: u8 = 236;
 /// Q10 CWG1 registers use hook codes CWG0 + cwg sub-code (see `cwg.rs`).
 const CWG0: u8 = 41; // 41..=47 (T1G is 40, the ports start at 48)
 const CWG_END: u8 = CWG0 + cwg::HOOKS - 1;
+/// Q10 comparator n (0-based) uses hook codes CMP0 + cmp::HOOKS * n + sub-code (CMxCON0, CMxNCH, CMxPCH); CMOUT is CMOUT_HOOK.
+const CMP0: u8 = 184;
+const CMP_END: u8 = CMP0 + 2 * cmp::HOOKS;
+const CMOUT_HOOK: u8 = 222;
 const NVM0: u8 = 240;
 const NVMQ0: u8 = 242;
 
@@ -326,6 +332,10 @@ pub struct Periph {
     ccps: Vec<Ccp>,
     pwms: Vec<Pwm>,
     cwg: Option<Cwg>,
+    cmps: Vec<Cmp>,
+    cmout: Option<usize>,
+    /// Stimulus: (from cycle, port letter, pin, volts), stable-sorted by cycle.
+    analog: Vec<(u64, u8, u8, f64)>,
     /// A compare match with TMR1 clearing happened on the last clock: TMR1 goes to 0 on the next one `[A61]`.
     ccptmrs: Option<usize>,
     /// RxyPPS registers: (register, index into `ports`, pin).
@@ -402,7 +412,7 @@ impl Periph {
 
     /// Find the timers the part has and mark their registers as hooked in `m`.
     pub fn bind(dev: &Device, m: &mut DataMem) -> Periph {
-        let mut p = Periph { ports: Vec::new(), drive: Vec::new(), t0: None, t1: Vec::new(), t2: Vec::new(), uarts: Vec::new(), quarts: Vec::new(), spis: Vec::new(), mssps: Vec::new(), i2cqs: Vec::new(), adc: None, nvm: None, nvmq: None, stall: 0, fvr: None, tx: Vec::new(), spi_tx: Vec::new(), i2c_log: Vec::new(), notes: BTreeSet::new(), ccps: Vec::new(), pwms: Vec::new(), cwg: None, ccptmrs: None, ppsout: Vec::new(), i2c_pps: Vec::new(), board: Board::default(), pullup: Vec::new(), forced: Vec::new(), sig: 0, sched: Vec::new(), pin_log: Vec::new(), event: None };
+        let mut p = Periph { ports: Vec::new(), drive: Vec::new(), t0: None, t1: Vec::new(), t2: Vec::new(), uarts: Vec::new(), quarts: Vec::new(), spis: Vec::new(), mssps: Vec::new(), i2cqs: Vec::new(), adc: None, nvm: None, nvmq: None, stall: 0, fvr: None, tx: Vec::new(), spi_tx: Vec::new(), i2c_log: Vec::new(), notes: BTreeSet::new(), ccps: Vec::new(), pwms: Vec::new(), cwg: None, cmps: Vec::new(), cmout: None, analog: Vec::new(), ccptmrs: None, ppsout: Vec::new(), i2c_pps: Vec::new(), board: Board::default(), pullup: Vec::new(), forced: Vec::new(), sig: 0, sched: Vec::new(), pin_log: Vec::new(), event: None };
         let mut hook = |a: usize, k: u8| m.special[a] = Special::Hook(k);
         if let (Some(l), Some(h), Some(c0), Some(c1), Some(flag)) =
             (addr(dev, "TMR0L"), addr(dev, "TMR0H"), addr(dev, "T0CON0"), addr(dev, "T0CON1"), Flag::find(dev, "TMR0IF"))
@@ -498,6 +508,21 @@ impl Periph {
                     hook(c.con, CCP0 + p.ccps.len() as u8 * ccp::HOOKS);
                     p.ccps.push(c);
                 }
+            }
+            for n in 1..=2u8 {
+                if let Some(c) = Cmp::find(dev, n) {
+                    let k = CMP0 + cmp::HOOKS * p.cmps.len() as u8;
+                    for (reg, sub) in [(c.con0, cmp::CON0), (c.nch, cmp::NCH), (c.pch, cmp::PCH)] {
+                        hook(reg, k + sub);
+                    }
+                    p.cmps.push(c);
+                }
+            }
+            if !p.cmps.is_empty()
+                && let Some(a) = addr(dev, "CMOUT")
+            {
+                hook(a, CMOUT_HOOK);
+                p.cmout = Some(a);
             }
             if let Some(c) = Cwg::find(dev) {
                 for (reg, sub) in [(c.con0, cwg::CON0), (c.con1, cwg::CON1), (c.as0, cwg::AS0), (c.as1, cwg::AS1), (c.str_, cwg::STR), (c.dbr, cwg::DBR), (c.dbf, cwg::DBF)] {
@@ -811,6 +836,83 @@ impl Periph {
         }
     }
 
+    /// Voltage of a comparator input source at cycle `now`.
+    fn cmp_volts(&self, m: &DataMem, src: cmp::Src, now: u64) -> f64 {
+        match src {
+            cmp::Src::Pin(l, b) => self.analog.iter().filter(|e| e.0 <= now && e.1 == l && e.2 == b).last().map_or(0.0, |e| e.3),
+            cmp::Src::Fvr => self.fvr.map_or(0.0, |a| cmp::fvr_volts(m.mem[a])),
+            _ => 0.0,
+        }
+    }
+
+    /// The output level of comparator `i` at cycle `now`, after POL.
+    fn cmp_level(&self, m: &DataMem, i: usize, now: u64) -> bool {
+        let c = &self.cmps[i];
+        let con = m.mem[c.con0];
+        let core = con & 0x80 != 0 && {
+            let (p, n) = (cmp::pos(c.n, m.mem[c.pch]), cmp::neg(m.mem[c.nch]));
+            self.cmp_volts(m, p, now) > self.cmp_volts(m, n, now)
+        };
+        core != (con & 0x10 != 0)
+    }
+
+    /// Re-evaluate comparator `i` at cycle `at`: on a change update OUT and MCxOUT, drive the PPS source, set CxIF per INTP/INTN
+    /// and let the CWG see a shutdown source change.
+    fn cmp_update(&mut self, m: &mut DataMem, i: usize, at: u64) {
+        let new = self.cmp_level(m, i, at);
+        let c = &self.cmps[i];
+        let (con0, con1, flag, sig, n) = (c.con0, c.con1, c.flag, c.sig, c.n);
+        let pch = cmp::pos(n, m.mem[c.pch]);
+        if m.mem[con0] & 0x80 != 0 && pch == cmp::Src::Dac {
+            self.notes.insert(format!("C{n} DAC input is not modelled; it reads 0 V"));
+        }
+        if new == c.out {
+            return;
+        }
+        self.cmps[i].out = new;
+        if new { m.mem[con0] |= 0x40 } else { m.mem[con0] &= !0x40 }
+        if let Some(cm) = self.cmout {
+            let bit = 1u8 << (n - 1);
+            if new { m.mem[cm] |= bit } else { m.mem[cm] &= !bit }
+        }
+        self.set_sig(m, sig, u8::from(new), 4 * at);
+        if m.mem[con1] & (if new { 2 } else { 1 }) != 0 {
+            flag.set(m);
+            self.raised(at);
+        }
+        if let Some(a0) = self.cwg.as_ref().map(|c| c.as0) {
+            let before = m.mem[a0] & 0x80;
+            self.cwg_sources(m, at);
+            if m.mem[a0] & 0x80 != before {
+                let ch = self.cwg.as_ref().unwrap().now(m);
+                self.cwg_apply(m, 4 * at, ch);
+            }
+        }
+    }
+
+    /// Stimulus changes of the analog pins between the last look and `now`: each distinct cycle is evaluated in order.
+    fn cmp_scan(&mut self, m: &mut DataMem, now: u64) {
+        for i in 0..self.cmps.len() {
+            let from = self.cmps[i].scan;
+            let mut at: Vec<u64> = self.analog.iter().map(|e| e.0).filter(|&t| t > from && t <= now).collect();
+            at.dedup();
+            for t in at {
+                self.cmp_update(m, i, t);
+            }
+            self.cmps[i].scan = now;
+        }
+    }
+
+    /// Stimulus: pin `bit` of port `letter` is `volts` from cycle `at` on.
+    pub fn analog_feed(&mut self, letter: u8, bit: u8, at: u64, volts: f64) -> bool {
+        if !self.ports.iter().any(|p| p.letter == letter) {
+            return false;
+        }
+        self.analog.push((at, letter, bit, volts));
+        self.analog.sort_by_key(|e| e.0);
+        true
+    }
+
     /// Apply the outputs the CWG asks for at `tick`; delayed changes (dead band) go to the schedule. Pending delayed
     /// changes are dropped first: an input that turned round before the dead band ended shows no pulse (25.8).
     fn cwg_apply(&mut self, m: &mut DataMem, tick: u64, ch: [cwg::Change; 4]) {
@@ -836,10 +938,11 @@ impl Periph {
     fn cwg_sources(&mut self, m: &mut DataMem, now: u64) -> bool {
         let Some(c) = &self.cwg else { return false };
         let (as0, as1, pps) = (c.as0, m.mem[c.as1], c.pps);
-        if as1 & 0xFE != 0 {
-            self.notes.insert("CWG1 auto-shutdown sources other than the CWG1PPS pin (AS0E) are not modelled".to_string());
+        if as1 & 0xCE != 0 {
+            self.notes.insert("CWG1 auto-shutdown sources other than the CWG1PPS pin (AS0E) and the comparators (AS4E, AS5E) are not modelled".to_string());
         }
-        let active = as1 & 1 != 0 && pps.is_some_and(|r| !self.pps_pin(m, r, now));
+        let cmp_low = |n: usize| self.cmps.get(n).is_some_and(|c| !c.out);
+        let active = as1 & 1 != 0 && pps.is_some_and(|r| !self.pps_pin(m, r, now)) || as1 & 0x10 != 0 && cmp_low(0) || as1 & 0x20 != 0 && cmp_low(1);
         let c = self.cwg.as_mut().unwrap();
         if active && c.en(m) && m.mem[as0] & 0x80 == 0 {
             m.mem[as0] |= 0x80;
@@ -882,8 +985,8 @@ impl Periph {
                         c.dir_change();
                     }
                 }
-                if m.mem[c.ism] & 15 == 0 || m.mem[c.ism] & 15 > 4 {
-                    self.notes.insert("CWG1 data input other than CCP1, CCP2, PWM3 and PWM4 is not modelled; the CWG sees it low".to_string());
+                if m.mem[c.ism] & 15 == 0 || m.mem[c.ism] & 15 > 6 {
+                    self.notes.insert("CWG1 data input other than CCP1, CCP2, PWM3, PWM4, CMP1 and CMP2 is not modelled; the CWG sees it low".to_string());
                 }
                 if m.mem[self.cwg.as_ref().unwrap().clk] & 1 != 0 {
                     self.notes.insert("CWG1 clock HFINTOSC is counted as Fosc".to_string());
@@ -1209,6 +1312,8 @@ impl Periph {
         }
         self.sched.extend(hits);
         self.apply_sched(m, now, &mut ev);
+        self.cmp_scan(m, now);
+        self.apply_sched(m, now, &mut ev); // comparator edges can schedule CWG dead-band changes
         if let Some(a) = &mut self.adc {
             while let Some((e, v)) = a.end.filter(|(e, _)| *e <= now) {
                 a.end = None;
@@ -1390,6 +1495,9 @@ impl Periph {
                     self.notes.insert("FVR start-up time (25 us typ.) is not modelled; FVRRDY is set at once".into());
                 }
                 m.mem[a] = v & !0x40 | (v >> 1) & 0x40;
+                for i in 0..self.cmps.len() {
+                    self.cmp_update(m, i, now);
+                }
             }
             ADC0 => {
                 let a = self.adc.as_mut().unwrap();
@@ -1496,6 +1604,20 @@ impl Periph {
                 }
             }
             CWG0..=CWG_END => self.cwg_write(k, v, now, m),
+            CMOUT_HOOK => {} // read only
+            CMP0..CMP_END => {
+                let i = usize::from(k - CMP0) / usize::from(cmp::HOOKS);
+                let c = &self.cmps[i];
+                match (k - CMP0) % cmp::HOOKS {
+                    cmp::CON0 => m.mem[c.con0] = v & 0x93 | m.mem[c.con0] & 0x40, // OUT is read only
+                    cmp::NCH => m.mem[c.nch] = v & 7,
+                    _ => m.mem[c.pch] = v & 7,
+                }
+                if v & 1 != 0 && (k - CMP0) % cmp::HOOKS == cmp::CON0 {
+                    self.notes.insert(format!("C{} SYNC (output latched on the Timer1 clock) is not modelled; the output is asynchronous", i + 1));
+                }
+                self.cmp_update(m, i, now);
+            }
             PWM0..=237 => {
                 let i = usize::from(k - PWM0);
                 let (con, sig) = (self.pwms[i].con, self.pwms[i].sig);
@@ -1606,7 +1728,7 @@ impl Periph {
         for &(reg, pi, bit) in &self.ppsout {
             // A pin driven by a modelled peripheral source (RxyPPS, TRIS clear) shows the source level, not the latch.
             let code = m.mem[reg] & 31;
-            if pi == i && tris >> bit & 1 == 0 && (self.ccps.iter().any(|c| c.sig == code) || self.pwms.iter().any(|c| c.sig == code) || ((1..=4).contains(&code) && self.cwg.as_ref().is_some_and(|c| c.hiz >> (code - 1) & 1 == 0))) {
+            if pi == i && tris >> bit & 1 == 0 && (self.ccps.iter().any(|c| c.sig == code) || self.pwms.iter().any(|c| c.sig == code) || self.cmps.iter().any(|c| c.sig == code) || ((1..=4).contains(&code) && self.cwg.as_ref().is_some_and(|c| c.hiz >> (code - 1) & 1 == 0))) {
                 v = v & !(1 << bit) | u8::from(self.sig >> code & 1 != 0) << bit;
             }
         }

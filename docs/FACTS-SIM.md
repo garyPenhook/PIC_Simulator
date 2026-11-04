@@ -369,6 +369,19 @@ NACKed and a read from nobody gives FFh.
 * A write to a CWG register while a dead-band turn-on is pending drops it and applies the steady-state levels at once.
 * Tests: `crates/picsim/tests/cwg.rs`.
 
+## Q10 comparators C1/C2 (`periph/cmp.rs`, DS40002043F ch.34 p.589-600)
+
+* Stimulus `[[analog]] pin = "RA0" volts = 1.5 at = 0` (0..6 V, 0 V until set, later entries replace earlier ones) gives pin voltages. FVR_Buffer2
+  follows FVRCON (FVREN and CDAFVR = 1.024 / 2.048 / 4.096 V). AVSS is 0 V.
+* Output = (CxVP > CxVN) XOR POL; a disabled comparator makes a 0 before POL, so changing POL or EN while disabled gives an edge (34.5 note).
+  OUT (CMxCON0 bit 6) and MCxOUT (CMOUT) follow it and are read only; CxIF (PIR2 bit 0 / 1, p.201) is set on a rising edge with INTP and a falling edge
+  with INTN. PPS codes 0x0D (CMP1) and 0x0E (CMP2); CWG1 data inputs ISM 5 / 6 and shutdown sources AS4E / AS5E (output low).
+* Pins (28-pin Table 3 p.5): CxIN0- RA0, CxIN1- RA1, CxIN2- RB3, CxIN3- RB1; CxIN0+ RA2; C1IN1+ RA3; C2IN1+ RB0.
+* `[A79]` Voltages come from the stimulus only; VDD, ANSELx and TRISx are not looked at. `[A80]` No offset, hysteresis (HYS is stored), response time or
+  Timer1 synchronisation (SYNC adds a note). `[A81]` The DAC input (PCH = 101) and not-connected selections read 0 V (DAC adds a note). `[A82]` 28-pin pins only.
+* Not modelled: Timer1 gate from a comparator, ADC auto-trigger, Timer2/4/6 reset from a comparator, wake from Sleep.
+* Tests: `crates/picsim/tests/cmp.rs`.
+
 ## Board parts: LEDs and an SSD1306 OLED (`periph/board.rs`, stimulus `[[led]]` / `[[oled]]`, GUI "Board" tab)
 
 * LED: lit while its pin is an output (TRIS clear) at the active level (`active = "high"` or `"low"`); an input pin leaves it dark.

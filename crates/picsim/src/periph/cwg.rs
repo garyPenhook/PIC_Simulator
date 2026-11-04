@@ -2,7 +2,7 @@
 //! band, auto-shutdown.
 //!
 //! Rules relied on:
-//! * Data input (CWG1ISM, Table 25-1 p.389): 0001 CCP1, 0010 CCP2, 0011 PWM3, 0100 PWM4. The other sources (pin, comparators,
+//! * Data input (CWG1ISM, Table 25-1 p.389): 0001 CCP1, 0010 CCP2, 0011 PWM3, 0100 PWM4, 0101 CMP1, 0110 CMP2. The other sources (pin,
 //!   DSM, CLC) are not modelled; the module then sees a low input and a note says so.
 //! * Outputs CWG1A..D are PPS output codes 0x01..0x04 (Table 18-2 p.287).
 //! * MODE (p.397): 000 asynchronous steering, 001 synchronous steering (STRy changes take effect on the next rising edge of the
@@ -127,6 +127,7 @@ impl Cwg {
     pub fn source(&self, m: &DataMem) -> Option<u8> {
         match m.mem[self.ism] & 15 {
             n @ 1..=4 => Some(4 + n),
+            n @ 5..=6 => Some(8 + n), // CMP1 = 0x0D, CMP2 = 0x0E
             _ => None,
         }
     }

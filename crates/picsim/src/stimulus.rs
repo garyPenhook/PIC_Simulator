@@ -15,6 +15,11 @@
 //! value = 512
 //! at = 0              # from this instruction cycle on, default 0; later entries replace earlier ones
 //!
+//! [[analog]]         # the voltage on a pin, for the comparators
+//! pin = "RA0"
+//! volts = 1.5         # 0 .. 6
+//! at = 0             # from this instruction cycle on; later entries replace earlier ones
+//!
 //! [[i2c]]            # a client on the I2C bus of MSSP `port` (Q10): ACKs `address` (7 bits), sends `data` then `fill` when read
 //! port = 1            # MSSP number, default 1
 //! address = 0x50
@@ -70,6 +75,8 @@ pub struct Stimulus {
     pub i2c: Vec<(u8, I2cClient)>,
     /// (channel, from cycle, code)
     pub adc: Vec<(u8, u64, u16)>,
+    /// (port letter, pin, from cycle, volts)
+    pub analog: Vec<(u8, u8, u64, f64)>,
     /// (port letter, from cycle, pin mask, levels)
     pub pins: Vec<(u8, u64, u8, u8)>,
     /// LEDs and OLEDs on the board.
@@ -213,6 +220,32 @@ impl Stimulus {
                 }
                 continue;
             }
+            if k == "analog" {
+                for e in v.as_array().ok_or("analog must be [[analog]] entries")? {
+                    let t = e.as_table().ok_or("analog entry must be a table")?;
+                    for key in t.keys() {
+                        if !["pin", "volts", "at"].contains(&key.as_str()) {
+                            return Err(format!("analog: unknown key {key}"));
+                        }
+                    }
+                    let s = t.get("pin").and_then(|x| x.as_str()).ok_or("analog needs pin (a pin such as \"RA0\")")?;
+                    let (letter, bit) = parse_pin(s).ok_or(format!("analog.pin = {s:?} is not a pin (RA0..RH7)"))?;
+                    let volts = match t.get("volts") {
+                        Some(toml::Value::Float(f)) => *f,
+                        Some(toml::Value::Integer(i)) => *i as f64,
+                        _ => return Err("analog needs volts (a number)".into()),
+                    };
+                    if !(0.0..=6.0).contains(&volts) {
+                        return Err(format!("analog.volts {volts} must be 0..6"));
+                    }
+                    let at = match t.get("at") {
+                        None => 0,
+                        Some(x) => x.as_integer().and_then(|i| u64::try_from(i).ok()).filter(|i| *i <= MAX_CYCLES).ok_or(format!("analog.at must be an integer 0..{MAX_CYCLES}"))?,
+                    };
+                    st.analog.push((letter, bit, at, volts));
+                }
+                continue;
+            }
             if k == "adc" {
                 for e in v.as_array().ok_or("adc must be [[adc]] entries")? {
                     let t = e.as_table().ok_or("adc entry must be a table")?;
@@ -315,6 +348,11 @@ impl Stimulus {
         }
         for (letter, at, mask, val) in self.pins {
             if !p.pin_feed(letter, at, mask, val) {
+                return Err(format!("{}: no PORT{} in the simulator", dev.device.name, letter as char));
+            }
+        }
+        for (letter, bit, at, volts) in self.analog {
+            if !p.analog_feed(letter, bit, at, volts) {
                 return Err(format!("{}: no PORT{} in the simulator", dev.device.name, letter as char));
             }
         }
