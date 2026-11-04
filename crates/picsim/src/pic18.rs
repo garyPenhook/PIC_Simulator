@@ -744,6 +744,7 @@ impl Pic18 {
         let _ = self.mclr_fell();
         if !self.mclr_low {
             self.mclr_hold = false;
+            self.p.ioc_rebase(self.cycles);
         }
         (self.cycles - start) as u32
     }
@@ -787,6 +788,9 @@ impl Pic18 {
         }
         if let Some(&(at, _)) = self.mclr_ev.get(self.mclr_next) {
             next = next.min(at.max(start + 1));
+        }
+        if let Some(t) = self.p.next_drive(start) {
+            next = next.min(t); // a pin edge may wake the part
         }
         self.cycles = next;
         if let Some(k) = self.mclr_fell() {
@@ -1220,6 +1224,7 @@ impl Pic18 {
         let old = std::mem::replace(&mut self.p, np);
         self.p.carry_over(old);
         self.apply_config(); // the new peripherals need the watchdog configuration
+        self.p.ioc_rebase(self.cycles);
     }
 
     fn set_pcon(&mut self, bit: u8) {

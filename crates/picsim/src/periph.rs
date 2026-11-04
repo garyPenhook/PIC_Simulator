@@ -71,6 +71,18 @@ pub enum ResetKind {
     Mclr,
 }
 
+/// Interrupt-on-change and the INT0-INT2 pins `[A101]`.
+#[derive(Default)]
+struct Ioc {
+    /// (index into `ports`, IOCxF, IOCxN, IOCxP)
+    ports: Vec<(usize, usize, usize, usize)>,
+    /// (INTxPPS, INTxIF, INTCON register and mask of INTxEDG)
+    ints: Vec<(usize, Flag, usize, u8)>,
+    iocif: Option<Flag>,
+    /// The stimulus has been looked at up to this cycle.
+    scan: u64,
+}
+
 /// A flag bit in a PIRx register.
 #[derive(Clone, Copy, Debug)]
 struct Flag {
@@ -411,6 +423,7 @@ pub struct Periph {
     pub pin_log: Vec<(u64, u8, u8, bool)>,
     /// Cycle of the latest flag set by `sync` since the core last looked (`take_event`).
     event: Option<u64>,
+    ioc: Ioc,
 }
 
 /// A change of a PPS output source at `tick` (Fosc ticks): `act` 0 clears, 1 sets, 2 toggles; `flag` is set with it.
@@ -467,7 +480,7 @@ impl Periph {
 
     /// Find the timers the part has and mark their registers as hooked in `m`.
     pub fn bind(dev: &Device, m: &mut DataMem) -> Periph {
-        let mut p = Periph { ports: Vec::new(), drive: Vec::new(), t0: None, t1: Vec::new(), t2: Vec::new(), uarts: Vec::new(), quarts: Vec::new(), spis: Vec::new(), mssps: Vec::new(), i2cqs: Vec::new(), adc: None, nvm: None, nvmq: None, stall: 0, fvr: None, tx: Vec::new(), spi_tx: Vec::new(), i2c_log: Vec::new(), notes: BTreeSet::new(), ccps: Vec::new(), pwms: Vec::new(), cwg: None, cmps: Vec::new(), cmout: None, clcs: Vec::new(), clcin: Vec::new(), clcdata: None, in_clc: false, clc_scan: 0, crc: None, wdt: None, reset_req: None, sleeping: false, sleep_at: 0, fosc_off: false, wdt_wake: false, analog: Vec::new(), ccptmrs: None, ppsout: Vec::new(), i2c_pps: Vec::new(), board: Board::default(), pullup: Vec::new(), forced: Vec::new(), sig: 0, sched: Vec::new(), pin_log: Vec::new(), event: None };
+        let mut p = Periph { ports: Vec::new(), drive: Vec::new(), t0: None, t1: Vec::new(), t2: Vec::new(), uarts: Vec::new(), quarts: Vec::new(), spis: Vec::new(), mssps: Vec::new(), i2cqs: Vec::new(), adc: None, nvm: None, nvmq: None, stall: 0, fvr: None, tx: Vec::new(), spi_tx: Vec::new(), i2c_log: Vec::new(), notes: BTreeSet::new(), ccps: Vec::new(), pwms: Vec::new(), cwg: None, cmps: Vec::new(), cmout: None, clcs: Vec::new(), clcin: Vec::new(), clcdata: None, in_clc: false, clc_scan: 0, crc: None, wdt: None, reset_req: None, sleeping: false, sleep_at: 0, fosc_off: false, wdt_wake: false, analog: Vec::new(), ccptmrs: None, ppsout: Vec::new(), i2c_pps: Vec::new(), board: Board::default(), pullup: Vec::new(), forced: Vec::new(), sig: 0, sched: Vec::new(), pin_log: Vec::new(), event: None, ioc: Ioc::default() };
         let mut hook = |a: usize, k: u8| m.special[a] = Special::Hook(k);
         if let (Some(l), Some(h), Some(c0), Some(c1), Some(flag)) =
             (addr(dev, "TMR0L"), addr(dev, "TMR0H"), addr(dev, "T0CON0"), addr(dev, "T0CON1"), Flag::find(dev, "TMR0IF"))
@@ -699,6 +712,19 @@ impl Periph {
             c.init(m);
             p.crc = Some(c);
         }
+        for port in 0..p.ports.len() {
+            let l = p.ports[port].letter as char;
+            if let (Some(f), Some(n), Some(pp)) = (addr(dev, &format!("IOC{l}F")), addr(dev, &format!("IOC{l}N")), addr(dev, &format!("IOC{l}P"))) {
+                p.ioc.ports.push((port, f, n, pp));
+            }
+        }
+        p.ioc.iocif = Flag::find(dev, "IOCIF");
+        for k in 0..3 {
+            let edg = dev.sfr.iter().find_map(|s| s.fields.iter().find(|f| f.name == format!("INT{k}EDG")).map(|f| (s.addr as usize, 1u8 << f.pos)));
+            if let (Some(pps), Some(flag), Some((ea, em))) = (addr(dev, &format!("INT{k}PPS")), Flag::find(dev, &format!("INT{k}IF")), edg) {
+                p.ioc.ints.push((pps, flag, ea, em));
+            }
+        }
         p
     }
 
@@ -850,6 +876,7 @@ impl Periph {
             self.capture(m, i, e);
         }
         self.clc_scan(m, now);
+        self.ioc_scan(m, now);
         self.sync_core(m, now);
         self.clc_eval(m, 4 * now);
         self.wdt_tick(m, now);
@@ -859,6 +886,55 @@ impl Periph {
         for c in &mut self.ccps {
             c.scan = now;
         }
+    }
+
+    /// Edges of the pins on the interrupt-on-change registers and the INTx pins, from `ioc.scan` to `now`: the flags are set
+    /// (also in Sleep), IOCIF follows the IOCxF registers `[A101]`.
+    fn ioc_scan(&mut self, m: &mut DataMem, now: u64) {
+        if self.ioc.ports.is_empty() && self.ioc.ints.is_empty() {
+            return;
+        }
+        let from = self.ioc.scan;
+        self.ioc.scan = now;
+        let mut times: Vec<u64> = self.drive.iter().map(|d| d.0).filter(|&t| t > from && t <= now).collect();
+        times.sort_unstable();
+        times.dedup();
+        for t in times {
+            for k in 0..self.ioc.ports.len() {
+                let (pi, f, n, pp) = self.ioc.ports[k];
+                let (old, new) = (self.port_levels(pi, m, t - 1), self.port_levels(pi, m, t));
+                let hit = (old ^ new) & (new & m.mem[pp] | !new & m.mem[n]);
+                if hit != 0 {
+                    m.mem[f] |= hit & m.implemented[f];
+                    self.raised(t);
+                }
+            }
+            for k in 0..self.ioc.ints.len() {
+                let (pps, flag, ea, em) = self.ioc.ints[k];
+                let (old, new) = (self.pps_pin(m, pps, t - 1), self.pps_pin(m, pps, t));
+                if old != new && new == (m.mem[ea] & em != 0) {
+                    flag.set(m);
+                    self.raised(t);
+                }
+            }
+        }
+        if let Some(fl) = self.ioc.iocif {
+            if self.ioc.ports.iter().any(|&(_, f, ..)| m.mem[f] != 0) {
+                fl.set(m);
+            } else {
+                fl.clear(m);
+            }
+        }
+    }
+
+    /// Edges before `now` are not looked at (a reset: the pins are not watched meanwhile).
+    pub fn ioc_rebase(&mut self, now: u64) {
+        self.ioc.scan = now;
+    }
+
+    /// The next time after `after` that the stimulus changes a pin.
+    pub fn next_drive(&self, after: u64) -> Option<u64> {
+        self.drive.iter().map(|d| d.0).filter(|&t| t > after).min()
     }
 
     /// Capture event of CCP `i` at the input edge on cycle `e` (the capture timer is already at cycle `e`).
@@ -1034,6 +1110,7 @@ impl Periph {
     /// Characters the stimulus sends to a UART meanwhile are lost `[A94]`.
     fn sync_asleep(&mut self, m: &mut DataMem, now: u64) {
         let mut ev: Vec<u64> = Vec::new();
+        self.ioc_scan(m, now);
         self.clc_scan(m, now);
         self.cmp_scan(m, now);
         self.apply_sched(m, now, &mut ev);
