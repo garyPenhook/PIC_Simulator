@@ -169,8 +169,16 @@ GO cleared on completion (40.2.2 p.720). Differences from the Q10:
 * Timer1 GVAL (T1GCON bit 2): the gate source after GPOL, for the pin source (T1GATE = 0, pin chosen by T1GPPS, reset
   RB5 on the Q10). `[A17]` MDB reads GVAL = 0 while GE = 0 and the polarity-adjusted pin level while GE = 1, whatever
   GTM, GSPM, GGO and ON are (probed on all combinations on a low pin); the data sheet says GVAL is unaffected by GE
-  (DS40002043F 20.14.2 p.318). The model follows MDB. Other gate sources read as low, with a note. The gate does not
-  yet stop the counter.
+  (DS40002043F 20.14.2 p.318). The model follows MDB. Other gate sources read as low, with a note.
+* Timer1/3/5 gate, pin source only (GSS = 0, TxGPPS) `[A103]` (DS40002043F 20.7 pp.309-313, Table 20-3): with GE the timer
+  counts only while the pin, after GPOL, is active; a closed gate holds the count and (assumed, not in the data sheet)
+  the prescaler. A pin change on cycle t is seen by clock ticks on cycle t and later. GTM: the gate is a flip-flop that
+  toggles on the rising edge. GSPM: counting starts at the first rising edge after GGO is set and stops at the next
+  falling edge, which clears GGO (also cleared with GSPM). TMRxGIF is set on a falling edge of the gate, also with
+  GE = 0; in single-pulse mode only for the counted pulse. GVAL itself still reads the plain pin (see above). The pin is
+  followed through the stimulus only (like a pin clock); software writes to the gate pin's LAT between two looks are not
+  seen. Counting in Sleep uses the same plan. Other gate sources (timer overflows, CCP/PWM/CMP/ZCD/CLC outputs) are not
+  modelled: the timer counts regardless, with a note. Tests: `timer1_*gate*` in `crates/picsim/tests/pins.rs`.
 
 ## Stimulus file (`crates/picsim/src/stimulus.rs`, `basil-sim --stim FILE`)
 

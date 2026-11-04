@@ -381,6 +381,17 @@ struct Timer0 {
     sleep_run: bool,
 }
 
+/// What the Timer1 gate does over one window of cycles: the stretches in which the timer counts, the falling edges of the
+/// gate (TMRxGIF) and the gate state at the end.
+struct GatePlan {
+    /// (from, to, counts): ticks on cycles from+1 ..= to.
+    segs: Vec<(u64, u64, bool)>,
+    gif: Vec<u64>,
+    ff: bool,
+    run: bool,
+    ggo: bool,
+}
+
 struct Timer1 {
     /// Data sheet number: 1, 3 or 5.
     n: u8,
@@ -388,6 +399,11 @@ struct Timer1 {
     clr: bool,
     gate: Option<usize>,
     gpps: Option<usize>,
+    /// TMRxGIF, set on the falling edge of the gate (20.7.6).
+    gif: Option<Flag>,
+    /// Gate toggle flip-flop (GTM) and the single-pulse "counting enabled" state (GSPM).
+    gff: bool,
+    grun: bool,
     l: usize,
     h: usize,
     con: usize,
@@ -587,7 +603,7 @@ impl Periph {
                 for (sub, a) in [l, h, con, clk, gcon].into_iter().enumerate() {
                     hook(a, t1_hook(i, sub as u8));
                 }
-                p.t1.push(Timer1 { n, clr: false, gate: addr(dev, &format!("T{n}GATE")), gpps: addr(dev, &format!("T{n}GPPS")), l, h, con, clk, gcon, flag, cnt: 0, pre: 0, last: 0, cki: addr(dev, &format!("T{n}CKIPPS")), sleep_run: false });
+                p.t1.push(Timer1 { n, clr: false, gate: addr(dev, &format!("T{n}GATE")), gpps: addr(dev, &format!("T{n}GPPS")), gif: Flag::find(dev, &format!("TMR{n}GIF")), gff: false, grun: false, l, h, con, clk, gcon, flag, cnt: 0, pre: 0, last: 0, cki: addr(dev, &format!("T{n}CKIPPS")), sleep_run: false });
             }
         }
         for (i, n) in [2u8, 4, 6].into_iter().enumerate() {
@@ -1815,11 +1831,21 @@ impl Periph {
             _ => None,
         };
         let t1_run: Vec<bool> = self.t1.iter().map(|t| !asleep || t.sleep_run).collect();
-        let mut t1_in: Vec<Option<(Clk, Edges)>> = Vec::new();
+        let mut t1_in: Vec<Option<(Clk, Vec<(u64, Edges)>)>> = Vec::new();
+        let mut t1_gate: Vec<Option<GatePlan>> = Vec::new();
         for i in 0..self.t1.len() {
+            let last = self.t1[i].last;
+            let plan = if t1_run[i] && now > last { self.gate_plan(m, i, last, now) } else { None };
             let t = &self.t1[i];
             let clk = self.t1_clock(m, i);
-            t1_in.push((t1_run[i] && (!asleep || self.t1_sleep_ok(m, i)) && m.mem[t.con] & 1 != 0 && now > t.last).then(|| (clk, self.clock_edges(m, clk, t.cki, t.last, now))));
+            let go = t1_run[i] && (!asleep || self.t1_sleep_ok(m, i)) && m.mem[t.con] & 1 != 0 && now > last;
+            // Each stretch in which the gate lets the timer count, with its clock edges.
+            let wins: Vec<(u64, u64)> = match &plan {
+                Some(p) => p.segs.iter().filter(|s| s.2).map(|s| (s.0, s.1)).collect(),
+                None => vec![(last, now)],
+            };
+            t1_in.push(go.then(|| (clk, wins.into_iter().map(|(a, b)| (a, self.clock_edges(m, clk, t.cki, a, b))).collect())));
+            t1_gate.push(plan);
         }
         if let Some(t) = self.t0.as_mut().filter(|_| t0_run) {
             let (base, pre0) = (t.last, t.pre);
@@ -1865,10 +1891,23 @@ impl Periph {
                 continue;
             }
             let comps: Vec<(usize, u16, u8)> = comps.iter().filter(|c| c.3 == t.n).map(|&(i, r, mo, _)| (i, r, mo)).collect();
-            let (base, pre0) = (t.last, t.pre);
             t.last = now;
+            if let Some(p) = t1_gate[ti].take() {
+                (t.gff, t.grun) = (p.ff, p.run);
+                if m.mem[t.gcon] & 8 != 0 && !p.ggo {
+                    m.mem[t.gcon] &= !8; // GGO/DONE: the pulse is done
+                }
+                for c in p.gif {
+                    if let Some(f) = t.gif {
+                        f.set(m);
+                    }
+                    ev.push(c);
+                }
+            }
             let con = m.mem[t.con];
-            if let Some((clk, ed)) = t1_in[ti].take() {
+            let (clk, wins) = t1_in[ti].take().unwrap_or((Clk::Other, Vec::new()));
+            for (base, ed) in wins {
+                let pre0 = t.pre;
                 let cs = m.mem[t.clk] & 0x1F;
                 if clk == Clk::Other {
                     self.notes.insert(format!("Timer{} clock source CS={cs} is not modelled (Fosc/4, Fosc, the TxCKIPPS pin, LFINTOSC and SOSC are); it does not count", t.n));
@@ -2238,8 +2277,18 @@ impl Periph {
                 self.quarts[i].write((k - QUART0) % quart::HOOKS, v, now, m, &mut self.tx);
             }
             k if matches!(t1_dec(k), Some((_, 4))) => {
-                let a = self.t1[t1_dec(k).unwrap().0].gcon;
-                m.mem[a] = v & !4 | m.mem[a] & 4; // GVAL is read only
+                let t = &mut self.t1[t1_dec(k).unwrap().0];
+                let mut v = v;
+                if v & 0x10 == 0 {
+                    v &= !8; // GGO/DONE is cleared with GSPM (20.14.2)
+                }
+                if v & 0x20 == 0 {
+                    t.gff = false; // the toggle flip-flop is held clear without GTM
+                }
+                if v & 8 == 0 || m.mem[t.gcon] & 8 == 0 || v & 0x10 == 0 {
+                    t.grun = false; // a new acquisition waits for the next rising edge
+                }
+                m.mem[t.gcon] = v & !4 | m.mem[t.gcon] & 4; // GVAL is read only
             }
             PORT0..=0x6F => {
                 let p = &self.ports[usize::from(k - PORT0)];
@@ -2331,9 +2380,6 @@ impl Periph {
             k if matches!(t1_dec(k), Some((_, 2))) => {
                 let t = &self.t1[t1_dec(k).unwrap().0];
                 m.mem[t.con] = v;
-                if v & 1 != 0 && m.mem[t.gcon] & 0x80 != 0 {
-                    self.notes.insert(format!("Timer{} gate (GE) is not modelled; the timer counts regardless of the gate", t.n));
-                }
             }
             k if matches!(t1_dec(k), Some((_, 3))) || matches!(t2_dec(k), Some((_, 1 | 3 | 4))) => {
                 let a = self.addr_of(k);
@@ -2521,6 +2567,69 @@ impl Periph {
             }
         };
         src == (m.mem[gcon] & 0x40 != 0)
+    }
+
+    /// The Timer1-type timer `i`'s gate over cycles `from+1 ..= to` for the pin source (GSS = 0, TxGPPS), `None` for any other
+    /// source (the timer then counts regardless, with a note when GE is set). `[A103]` The pin is followed through the
+    /// stimulus only, like a pin clock: a software write to the LAT of the gate pin is not seen between two looks. A pin
+    /// change on cycle t is seen by the clock ticks on cycle t and later. The gate signal is the pin after GPOL; the toggle
+    /// flip-flop changes on its rising edge (GTM); with GSPM the timer counts from the first rising edge after GGO is set
+    /// to the next falling edge, which clears GGO. TMRxGIF is set on a falling edge of the gate after the toggle flip-flop
+    /// (in single-pulse mode only for the pulse that was counted), also while GE = 0 (20.7.1-20.7.6, Figures 20-4 to 20-7).
+    /// The prescaler holds while the gate is closed (not stated in the data sheet).
+    fn gate_plan(&mut self, m: &DataMem, i: usize, from: u64, to: u64) -> Option<GatePlan> {
+        let t = &self.t1[i];
+        let (tn, gcon, gff, grun) = (t.n, t.gcon, t.gff, t.grun);
+        let con = m.mem[gcon];
+        let (ge, gpol, gtm, gspm) = (con & 0x80 != 0, con & 0x40 != 0, con & 0x20 != 0, con & 0x10 != 0);
+        let reg = match (t.gate.map(|g| m.mem[g] & 31), t.gpps) {
+            (Some(0), Some(r)) => r,
+            _ => {
+                if ge {
+                    self.notes.insert(format!("Timer{tn} gate source other than the T{tn}GPPS pin is not modelled; the timer counts regardless of the gate"));
+                }
+                return None;
+            }
+        };
+        let active = |c: u64| self.pps_pin(m, reg, c) == gpol;
+        let (mut ff, mut run, mut ggo) = (gff && gtm, grun && gspm, con & 8 != 0 && gspm);
+        let counts = |ff: bool, run: bool, b: bool| !ge || if gspm { run && if gtm { ff } else { b } } else if gtm { ff } else { b };
+        let mut times: Vec<u64> = self.drive.iter().map(|d| d.0).filter(|&c| c > from && c <= to).collect();
+        times.sort_unstable();
+        times.dedup();
+        let (mut segs, mut gif) = (Vec::new(), Vec::new());
+        let (mut b, mut start) = (active(from), from);
+        let mut cur = counts(ff, run, b);
+        for c in times {
+            let nb = active(c);
+            if nb == b {
+                continue;
+            }
+            if c - 1 > start {
+                segs.push((start, c - 1, cur));
+                start = c - 1;
+            }
+            let s_old = if gtm { ff } else { b };
+            if gtm && nb {
+                ff = !ff;
+            }
+            let s_new = if gtm { ff } else { nb };
+            if s_new && !s_old && gspm && ggo {
+                run = true;
+            }
+            if !s_new && s_old {
+                if !gspm || run {
+                    gif.push(c);
+                }
+                if gspm && run {
+                    (run, ggo) = (false, false);
+                }
+            }
+            b = nb;
+            cur = counts(ff, run, b);
+        }
+        segs.push((start, to, cur));
+        Some(GatePlan { segs, gif, ff, run, ggo })
     }
 
     /// Stimulus: the pins `mask` of port `letter` are driven to `val` from cycle `at` on.

@@ -71,3 +71,56 @@ fn bad_stimulus_is_rejected() {
         assert!(Machine::new(dev.clone()).unwrap().load_stimulus(t).is_err(), "{t}");
     }
 }
+
+/// Timer1 on Fosc/4 (1 tick per cycle), gate from RB5 (T1GPPS reset), counting between cycles 0 and `run`.
+fn gated(stim: &str, gcon: u8) -> (Machine, u32, u32, u32) {
+    let mut m = machine(stim);
+    let (ansb, gate, clk, con) = (addr(&m, "ANSELB"), addr(&m, "T1GATE"), addr(&m, "T1CLK"), addr(&m, "T1CON"));
+    m.cpu.write(ansb, 0);
+    m.cpu.write(gate, 0);
+    m.cpu.write(clk, 1);
+    m.cpu.write(addr(&m, "T1GCON"), gcon);
+    m.cpu.write(con, 0x01);
+    let (l, gcon_a, pir5) = (addr(&m, "TMR1L"), addr(&m, "T1GCON"), addr(&m, "PIR5"));
+    (m, l, gcon_a, pir5)
+}
+
+const PULSE: &str = "[[pin]]\nport = \"B\"\nbit = 5\nlevel = 1\nat = 100\n[[pin]]\nport = \"B\"\nbit = 5\nlevel = 0\nat = 200\n";
+
+#[test]
+fn timer1_counts_only_while_the_gate_is_active() {
+    // Active high: the pin is high for cycles 100..200.
+    let (mut m, l, _, pir5) = gated(PULSE, 0xC0);
+    run_to(&mut m, 300);
+    assert_eq!(m.cpu.read(l), 100);
+    assert_ne!(m.cpu.read(pir5) & 0x01, 0, "TMR1GIF on the falling edge of the gate");
+    // Active low: it counts while the pin is low, 0..100 and from 200 on.
+    let (mut m, l, ..) = gated(PULSE, 0x80);
+    run_to(&mut m, 300);
+    assert_eq!(m.cpu.read(l), 200);
+    // GE = 0: the gate is ignored, but TMR1GIF still follows the pin.
+    let (mut m, l, _, pir5) = gated(PULSE, 0x40);
+    run_to(&mut m, 300);
+    assert_eq!(m.cpu.read(l), 44);
+    assert_eq!(m.cpu.read(l + 1), 1);
+    assert_ne!(m.cpu.read(pir5) & 0x01, 0);
+}
+
+#[test]
+fn timer1_gate_single_pulse_counts_one_pulse() {
+    let two = format!("{PULSE}[[pin]]\nport = \"B\"\nbit = 5\nlevel = 1\nat = 300\n[[pin]]\nport = \"B\"\nbit = 5\nlevel = 0\nat = 400\n");
+    let (mut m, l, g, _) = gated(&two, 0xD0); // GE, active high, GSPM
+    m.cpu.write(g, 0xD8); // GGO
+    run_to(&mut m, 500);
+    assert_eq!(m.cpu.read(l), 100, "only the first pulse is counted");
+    assert_eq!(m.cpu.read(g) & 8, 0, "GGO/DONE cleared on the falling edge");
+}
+
+#[test]
+fn timer1_gate_toggle_measures_a_full_period() {
+    // Pin high 100..200 and 300..400; toggle: the flip-flop is high from the first rising edge to the second.
+    let two = format!("{PULSE}[[pin]]\nport = \"B\"\nbit = 5\nlevel = 1\nat = 300\n[[pin]]\nport = \"B\"\nbit = 5\nlevel = 0\nat = 400\n");
+    let (mut m, l, ..) = gated(&two, 0xE0);
+    run_to(&mut m, 500);
+    assert_eq!(m.cpu.read(l), 200);
+}
