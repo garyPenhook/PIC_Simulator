@@ -390,6 +390,17 @@ struct GatePlan {
     ff: bool,
     run: bool,
     ggo: bool,
+    b: Option<bool>,
+}
+
+/// Where the gate of a Timer1-type timer comes from.
+#[derive(Clone, Copy)]
+enum GSrc {
+    /// The pin of the TxGPPS register (address).
+    Pin(usize),
+    /// A PPS output source (code of Table 18-2): CCP, PWM, comparator and CLC outputs.
+    Sig(u8),
+    None,
 }
 
 struct Timer1 {
@@ -404,6 +415,8 @@ struct Timer1 {
     /// Gate toggle flip-flop (GTM) and the single-pulse "counting enabled" state (GSPM).
     gff: bool,
     grun: bool,
+    /// Gate level (after GPOL) at the last look, to see a change that software made to the pin in between.
+    gb: Option<bool>,
     l: usize,
     h: usize,
     con: usize,
@@ -517,6 +530,9 @@ pub struct Periph {
     forced: Vec<u8>,
     /// Levels of the PPS output sources (bit = source code of Table 18-2).
     sig: u32,
+    /// Changes of the PPS output sources: (time in Fosc ticks, code, new level). Kept back to the oldest timer look so that
+    /// a Timer1 gate can be followed through a window (`gate_plan`).
+    sig_log: Vec<(u64, u8, bool)>,
     /// Output source changes scheduled for a later time (CCP compare and PWM edges).
     sched: Vec<Sched>,
     /// Changes of the pins driven by a peripheral through RxyPPS: (time in Fosc ticks = 4 * cycle + quarter,
@@ -581,7 +597,7 @@ impl Periph {
 
     /// Find the timers the part has and mark their registers as hooked in `m`.
     pub fn bind(dev: &Device, m: &mut DataMem) -> Periph {
-        let mut p = Periph { ports: Vec::new(), drive: Vec::new(), t0: None, t1: Vec::new(), t2: Vec::new(), uarts: Vec::new(), quarts: Vec::new(), spis: Vec::new(), mssps: Vec::new(), i2cqs: Vec::new(), adc: None, nvm: None, nvmq: None, stall: 0, fvr: None, tx: Vec::new(), spi_tx: Vec::new(), i2c_log: Vec::new(), notes: BTreeSet::new(), ccps: Vec::new(), pwms: Vec::new(), cwg: None, cmps: Vec::new(), cmout: None, clcs: Vec::new(), clcin: Vec::new(), clcdata: None, in_clc: false, clc_scan: 0, crc: None, wdt: None, reset_req: None, sleeping: false, sleep_at: 0, fosc_off: false, wdt_wake: false, analog: Vec::new(), ccptmrs: None, ppsout: Vec::new(), i2c_pps: Vec::new(), board: Board::default(), pullup: Vec::new(), forced: Vec::new(), sig: 0, sched: Vec::new(), pin_log: Vec::new(), event: None, ioc: Ioc::default() };
+        let mut p = Periph { ports: Vec::new(), drive: Vec::new(), t0: None, t1: Vec::new(), t2: Vec::new(), uarts: Vec::new(), quarts: Vec::new(), spis: Vec::new(), mssps: Vec::new(), i2cqs: Vec::new(), adc: None, nvm: None, nvmq: None, stall: 0, fvr: None, tx: Vec::new(), spi_tx: Vec::new(), i2c_log: Vec::new(), notes: BTreeSet::new(), ccps: Vec::new(), pwms: Vec::new(), cwg: None, cmps: Vec::new(), cmout: None, clcs: Vec::new(), clcin: Vec::new(), clcdata: None, in_clc: false, clc_scan: 0, crc: None, wdt: None, reset_req: None, sleeping: false, sleep_at: 0, fosc_off: false, wdt_wake: false, analog: Vec::new(), ccptmrs: None, ppsout: Vec::new(), i2c_pps: Vec::new(), board: Board::default(), pullup: Vec::new(), forced: Vec::new(), sig: 0, sig_log: Vec::new(), sched: Vec::new(), pin_log: Vec::new(), event: None, ioc: Ioc::default() };
         let mut hook = |a: usize, k: u8| m.special[a] = Special::Hook(k);
         if let (Some(l), Some(h), Some(c0), Some(c1), Some(flag)) =
             (addr(dev, "TMR0L"), addr(dev, "TMR0H"), addr(dev, "T0CON0"), addr(dev, "T0CON1"), Flag::find(dev, "TMR0IF"))
@@ -603,7 +619,7 @@ impl Periph {
                 for (sub, a) in [l, h, con, clk, gcon].into_iter().enumerate() {
                     hook(a, t1_hook(i, sub as u8));
                 }
-                p.t1.push(Timer1 { n, clr: false, gate: addr(dev, &format!("T{n}GATE")), gpps: addr(dev, &format!("T{n}GPPS")), gif: Flag::find(dev, &format!("TMR{n}GIF")), gff: false, grun: false, l, h, con, clk, gcon, flag, cnt: 0, pre: 0, last: 0, cki: addr(dev, &format!("T{n}CKIPPS")), sleep_run: false });
+                p.t1.push(Timer1 { n, clr: false, gate: addr(dev, &format!("T{n}GATE")), gpps: addr(dev, &format!("T{n}GPPS")), gif: Flag::find(dev, &format!("TMR{n}GIF")), gff: false, grun: false, gb: None, l, h, con, clk, gcon, flag, cnt: 0, pre: 0, last: 0, cki: addr(dev, &format!("T{n}CKIPPS")), sleep_run: false });
             }
         }
         for (i, n) in [2u8, 4, 6].into_iter().enumerate() {
@@ -826,7 +842,37 @@ impl Periph {
                 p.ioc.ints.push((pps, flag, ea, em));
             }
         }
+        // Registers that change what a pin or a gate source reads are looked at up to the write (`Special::Sync`).
+        let mut regs: Vec<usize> = Vec::new();
+        for t in &p.t1 {
+            regs.extend(t.gate.into_iter().chain(t.gpps));
+        }
+        for port in &p.ports {
+            regs.extend([port.lat, port.tris]);
+            regs.extend(port.ansel);
+        }
+        regs.extend(p.ppsout.iter().map(|o| o.0));
+        for a in regs {
+            if m.special[a] == Special::None {
+                m.special[a] = Special::Sync;
+            }
+        }
         p
+    }
+
+    /// A Timer1-type timer is running or gated, so a write to a pin register must first bring the models up to date: the
+    /// levels it changes are what the gate sees.
+    pub fn watching(&self, m: &DataMem) -> bool {
+        self.t1.iter().any(|t| m.mem[t.con] & 1 != 0 || m.mem[t.gcon] & 0x80 != 0)
+    }
+
+    /// After a write to register `a` that `Special::Sync` covers: a changed gate source or pin is not an edge of the gate.
+    pub fn synced_write(&mut self, a: usize) {
+        for t in &mut self.t1 {
+            if t.gate == Some(a) || t.gpps == Some(a) {
+                t.gb = None;
+            }
+        }
     }
 
     /// Set the byte-level client that answers SPI `num` (1-based). False when the part has no such SPI.
@@ -1083,6 +1129,7 @@ impl Periph {
             return;
         }
         self.sig ^= 1 << code;
+        self.sig_log.push((tick, code, new));
         for c in self.ccps.iter().filter(|c| c.sig == code) {
             if new { m.mem[c.con] |= 0x20 } else { m.mem[c.con] &= !0x20 }
         }
@@ -1801,6 +1848,135 @@ impl Periph {
         s.chain(n).filter(|&t| t > after).min()
     }
 
+    /// The timers gated by a CCP, PWM, comparator or CLC output, now that the edges of this span are known.
+    fn t1_late(&mut self, m: &mut DataMem, now: u64, asleep: bool, late: &[bool], comps: &[(usize, u16, u8, u8)], ev: &mut Vec<u64>) {
+        if !late.contains(&true) {
+            return;
+        }
+        let mut hits: Vec<Sched> = Vec::new();
+        for ti in 0..self.t1.len() {
+            if late[ti] {
+                let (plan, input) = self.t1_prepare(m, ti, now, asleep);
+                self.t1_step(m, ti, now, comps, plan, input, ev, &mut hits);
+            }
+        }
+        self.sched.extend(hits);
+        self.apply_sched(m, now, ev);
+    }
+
+    /// Gate plan and clock edges of Timer1-type timer `i` over the span from its last look to `now`.
+    fn t1_prepare(&mut self, m: &DataMem, i: usize, now: u64, asleep: bool) -> (Option<GatePlan>, Option<(Clk, Vec<(u64, Edges)>)>) {
+        let last = self.t1[i].last;
+        let plan = if now > last { self.gate_plan(m, i, last, now) } else { None };
+        let t = &self.t1[i];
+        let clk = self.t1_clock(m, i);
+        let go = (!asleep || self.t1_sleep_ok(m, i)) && m.mem[t.con] & 1 != 0 && now > last;
+        // Each stretch in which the gate lets the timer count, with its clock edges.
+        let wins: Vec<(u64, u64)> = match &plan {
+            Some(p) => p.segs.iter().filter(|s| s.2).map(|s| (s.0, s.1)).collect(),
+            None => vec![(last, now)],
+        };
+        let input = go.then(|| (clk, wins.into_iter().map(|(a, b)| (a, self.clock_edges(m, clk, t.cki, a, b))).collect()));
+        (plan, input)
+    }
+
+    /// Bring Timer1-type timer `ti` to `now` with its gate plan and clock edges; compare matches go to `hits`.
+    #[allow(clippy::too_many_arguments)]
+    fn t1_step(&mut self, m: &mut DataMem, ti: usize, now: u64, comps_all: &[(usize, u16, u8, u8)], plan: Option<GatePlan>, input: Option<(Clk, Vec<(u64, Edges)>)>, ev: &mut Vec<u64>, hits: &mut Vec<Sched>) {
+        let t = &mut self.t1[ti];
+        let comps: Vec<(usize, u16, u8)> = comps_all.iter().filter(|c| c.3 == t.n).map(|&(i, r, mo, _)| (i, r, mo)).collect();
+        t.last = now;
+        if let Some(p) = plan {
+            (t.gff, t.grun, t.gb) = (p.ff, p.run, p.b);
+            if m.mem[t.gcon] & 8 != 0 && !p.ggo {
+                m.mem[t.gcon] &= !8; // GGO/DONE: the pulse is done
+            }
+            for c in p.gif {
+                if let Some(f) = t.gif {
+                    f.set(m);
+                }
+                ev.push(c);
+            }
+        }
+        let con = m.mem[t.con];
+        let (clk, wins) = input.unwrap_or((Clk::Other, Vec::new()));
+        for (base, ed) in wins {
+            let pre0 = t.pre;
+            let cs = m.mem[t.clk] & 0x1F;
+            if clk == Clk::Other {
+                self.notes.insert(format!("Timer{} clock source CS={cs} is not modelled (Fosc/4, Fosc, the TxCKIPPS pin, LFINTOSC and SOSC are); it does not count", t.n));
+            } else {
+                let clocks = prescale(&mut t.pre, u32::from((con >> 4) & 3), ed.n);
+                let sh = u32::from((con >> 4) & 3);
+                if comps.is_empty() {
+                    if std::mem::take(&mut t.clr) && clocks > 0 {
+                        t.cnt = 0;
+                    }
+                    let total = u64::from(t.cnt) + clocks;
+                    if total >= 65536 {
+                        t.flag.set(m);
+                        let last_wrap = (total / 65536) * 65536 - u64::from(t.cnt);
+                        ev.push(ed.at(base, pre0, sh, last_wrap));
+                    }
+                    t.cnt = total as u16;
+                } else {
+                    // Step from event to event: the next compare match or the rollover, whichever comes first.
+                    let (mut left, mut done) = (clocks, 0u64);
+                    while left > 0 {
+                        if t.clr {
+                            t.clr = false;
+                            t.cnt = 0;
+                            left -= 1;
+                            done += 1;
+                            continue;
+                        }
+                        let to_wrap = 65536 - u64::from(t.cnt);
+                        let to_match = comps
+                            .iter()
+                            .map(|&(_, r, _)| {
+                                let d = u64::from(r.wrapping_sub(t.cnt));
+                                if d == 0 { 65536 } else { d }
+                            })
+                            .min()
+                            .unwrap();
+                        let step = left.min(to_wrap).min(to_match);
+                        let wrapped = step == to_wrap;
+                        t.cnt = t.cnt.wrapping_add(step as u16);
+                        done += step;
+                        left -= step;
+                        let cyc = ed.at(base, pre0, sh, done);
+                        if wrapped {
+                            t.flag.set(m);
+                            ev.push(cyc);
+                        }
+                        let mut clear = false;
+                        for &(i, r, mode) in &comps {
+                            if r == t.cnt {
+                                // [A61]
+                                let act = match mode {
+                                    8 => 1,
+                                    9 => 0,
+                                    1 | 2 => 2,
+                                    _ => 3, // pulse modes: flag only [A63]
+                                };
+                                if act == 3 {
+                                    self.notes.insert("CCP compare pulse output (MODE 1010/1011) does not drive the pin".into());
+                                }
+                                hits.push(Sched { tick: 4 * cyc, code: self.ccps[i].sig, act, flag: Some(self.ccps[i].flag), pwm: false });
+                                clear |= matches!(mode, 1 | 11);
+                            }
+                        }
+                        t.clr = clear;
+                    }
+                }
+            }
+        }
+        if m.mem[t.con] & 2 == 0 {
+            m.mem[t.h] = (t.cnt >> 8) as u8;
+        }
+        m.mem[t.l] = t.cnt as u8;
+    }
+
     fn sync_core(&mut self, m: &mut DataMem, now: u64, asleep: bool) {
         let mut ev: Vec<u64> = Vec::new();
         // Compare CCPs with the timer they use: (index, CCPR, MODE, timer number).
@@ -1831,21 +2007,11 @@ impl Periph {
             _ => None,
         };
         let t1_run: Vec<bool> = self.t1.iter().map(|t| !asleep || t.sleep_run).collect();
-        let mut t1_in: Vec<Option<(Clk, Vec<(u64, Edges)>)>> = Vec::new();
-        let mut t1_gate: Vec<Option<GatePlan>> = Vec::new();
+        // A timer gated by a CCP, PWM, comparator or CLC output waits until those have made their edges of this span.
+        let late: Vec<bool> = (0..self.t1.len()).map(|i| t1_run[i] && matches!(self.gate_src(m, i), GSrc::Sig(_))).collect();
+        let mut t1_prep: Vec<Option<(Option<GatePlan>, Option<(Clk, Vec<(u64, Edges)>)>)>> = Vec::new();
         for i in 0..self.t1.len() {
-            let last = self.t1[i].last;
-            let plan = if t1_run[i] && now > last { self.gate_plan(m, i, last, now) } else { None };
-            let t = &self.t1[i];
-            let clk = self.t1_clock(m, i);
-            let go = t1_run[i] && (!asleep || self.t1_sleep_ok(m, i)) && m.mem[t.con] & 1 != 0 && now > last;
-            // Each stretch in which the gate lets the timer count, with its clock edges.
-            let wins: Vec<(u64, u64)> = match &plan {
-                Some(p) => p.segs.iter().filter(|s| s.2).map(|s| (s.0, s.1)).collect(),
-                None => vec![(last, now)],
-            };
-            t1_in.push(go.then(|| (clk, wins.into_iter().map(|(a, b)| (a, self.clock_edges(m, clk, t.cki, a, b))).collect())));
-            t1_gate.push(plan);
+            t1_prep.push((t1_run[i] && !late[i]).then(|| self.t1_prepare(m, i, now, asleep)));
         }
         if let Some(t) = self.t0.as_mut().filter(|_| t0_run) {
             let (base, pre0) = (t.last, t.pre);
@@ -1886,106 +2052,17 @@ impl Periph {
             }
             m.mem[t.l] = t.cnt as u8;
         }
-        for (ti, t) in self.t1.iter_mut().enumerate() {
-            if !t1_run[ti] {
-                continue;
+        for ti in 0..self.t1.len() {
+            if let Some((plan, input)) = t1_prep[ti].take() {
+                self.t1_step(m, ti, now, &comps, plan, input, &mut ev, &mut hits);
             }
-            let comps: Vec<(usize, u16, u8)> = comps.iter().filter(|c| c.3 == t.n).map(|&(i, r, mo, _)| (i, r, mo)).collect();
-            t.last = now;
-            if let Some(p) = t1_gate[ti].take() {
-                (t.gff, t.grun) = (p.ff, p.run);
-                if m.mem[t.gcon] & 8 != 0 && !p.ggo {
-                    m.mem[t.gcon] &= !8; // GGO/DONE: the pulse is done
-                }
-                for c in p.gif {
-                    if let Some(f) = t.gif {
-                        f.set(m);
-                    }
-                    ev.push(c);
-                }
-            }
-            let con = m.mem[t.con];
-            let (clk, wins) = t1_in[ti].take().unwrap_or((Clk::Other, Vec::new()));
-            for (base, ed) in wins {
-                let pre0 = t.pre;
-                let cs = m.mem[t.clk] & 0x1F;
-                if clk == Clk::Other {
-                    self.notes.insert(format!("Timer{} clock source CS={cs} is not modelled (Fosc/4, Fosc, the TxCKIPPS pin, LFINTOSC and SOSC are); it does not count", t.n));
-                } else {
-                    let clocks = prescale(&mut t.pre, u32::from((con >> 4) & 3), ed.n);
-                    let sh = u32::from((con >> 4) & 3);
-                    if comps.is_empty() {
-                        if std::mem::take(&mut t.clr) && clocks > 0 {
-                            t.cnt = 0;
-                        }
-                        let total = u64::from(t.cnt) + clocks;
-                        if total >= 65536 {
-                            t.flag.set(m);
-                            let last_wrap = (total / 65536) * 65536 - u64::from(t.cnt);
-                            ev.push(ed.at(base, pre0, sh, last_wrap));
-                        }
-                        t.cnt = total as u16;
-                    } else {
-                        // Step from event to event: the next compare match or the rollover, whichever comes first.
-                        let (mut left, mut done) = (clocks, 0u64);
-                        while left > 0 {
-                            if t.clr {
-                                t.clr = false;
-                                t.cnt = 0;
-                                left -= 1;
-                                done += 1;
-                                continue;
-                            }
-                            let to_wrap = 65536 - u64::from(t.cnt);
-                            let to_match = comps
-                                .iter()
-                                .map(|&(_, r, _)| {
-                                    let d = u64::from(r.wrapping_sub(t.cnt));
-                                    if d == 0 { 65536 } else { d }
-                                })
-                                .min()
-                                .unwrap();
-                            let step = left.min(to_wrap).min(to_match);
-                            let wrapped = step == to_wrap;
-                            t.cnt = t.cnt.wrapping_add(step as u16);
-                            done += step;
-                            left -= step;
-                            let cyc = ed.at(base, pre0, sh, done);
-                            if wrapped {
-                                t.flag.set(m);
-                                ev.push(cyc);
-                            }
-                            let mut clear = false;
-                            for &(i, r, mode) in &comps {
-                                if r == t.cnt {
-                                    // [A61]
-                                    let act = match mode {
-                                        8 => 1,
-                                        9 => 0,
-                                        1 | 2 => 2,
-                                        _ => 3, // pulse modes: flag only [A63]
-                                    };
-                                    if act == 3 {
-                                        self.notes.insert("CCP compare pulse output (MODE 1010/1011) does not drive the pin".into());
-                                    }
-                                    hits.push(Sched { tick: 4 * cyc, code: self.ccps[i].sig, act, flag: Some(self.ccps[i].flag), pwm: false });
-                                    clear |= matches!(mode, 1 | 11);
-                                }
-                            }
-                            t.clr = clear;
-                        }
-                    }
-                }
-            }
-            if m.mem[t.con] & 2 == 0 {
-                m.mem[t.h] = (t.cnt >> 8) as u8;
-            }
-            m.mem[t.l] = t.cnt as u8;
         }
         if asleep {
             // Only the timers on a clock that runs in Sleep were looked at; what they make is done here, the rest waits for `thaw`.
             self.sched.extend(hits);
             self.apply_sched(m, now, &mut ev);
+            self.t1_late(m, now, true, &late, &comps, &mut ev);
+            self.sig_prune_to(4 * self.t1.iter().map(|t| t.last).min().unwrap_or(now));
             for e in ev {
                 self.raised(e);
             }
@@ -2098,6 +2175,8 @@ impl Periph {
         self.apply_sched(m, now, &mut ev);
         self.cmp_scan(m, now);
         self.apply_sched(m, now, &mut ev); // comparator edges can schedule CWG dead-band changes
+        self.t1_late(m, now, false, &late, &comps, &mut ev);
+        self.sig_prune_to(4 * self.t1.iter().map(|t| t.last).min().unwrap_or(now));
         if let Some(a) = &mut self.adc {
             while let Some((e, v)) = a.end.filter(|(e, _)| *e <= now) {
                 a.end = None;
@@ -2288,6 +2367,7 @@ impl Periph {
                 if v & 8 == 0 || m.mem[t.gcon] & 8 == 0 || v & 0x10 == 0 {
                     t.grun = false; // a new acquisition waits for the next rising edge
                 }
+                t.gb = None; // a polarity change is not an edge
                 m.mem[t.gcon] = v & !4 | m.mem[t.gcon] & 4; // GVAL is read only
             }
             PORT0..=0x6F => {
@@ -2551,54 +2631,130 @@ impl Periph {
     /// Timer1 gate value (GVAL): the gate source after the polarity bit. `[A17]` MDB (probed with every GE/GPOL/GTM/GSPM
     /// combination on a low pin) reads GVAL = 0 while GE = 0, although the data sheet says GVAL is unaffected by GE
     /// (DS40002043F 20.14.2 p.318); the model follows MDB. Single-pulse and toggle mode do not change it either.
-    /// Only the pin source (GSS = 0, T1GPPS) is modelled; others read as a low signal.
+    /// The sources are the T1GPPS pin and the CCP, PWM, comparator and CLC outputs (`gate_src`); others read as a low signal.
     fn gate_value(&mut self, i: usize, m: &DataMem, now: u64) -> bool {
-        let t = &self.t1[i];
-        let tn = t.n;
-        let (gate, gpps, gcon) = (t.gate, t.gpps, t.gcon);
+        let tn = self.t1[i].n;
+        let gcon = self.t1[i].gcon;
         if m.mem[gcon] & 0x80 == 0 {
             return false;
         }
-        let src = match (gate.map(|g| m.mem[g] & 31), gpps) {
-            (Some(0), Some(r)) => self.pps_pin(m, r, now),
-            _ => {
-                self.notes.insert(format!("Timer{tn} gate source other than the T{tn}GPPS pin is not modelled; GVAL sees it low"));
-                false
-            }
-        };
-        src == (m.mem[gcon] & 0x40 != 0)
+        let src = self.gate_src(m, i);
+        if matches!(src, GSrc::None) {
+            self.notes.insert(format!("Timer{tn} gate source is not modelled (the T{tn}GPPS pin and the CCP, PWM, comparator and CLC outputs are); GVAL sees it low"));
+        }
+        self.gate_raw(m, src, now) == (m.mem[gcon] & 0x40 != 0)
     }
 
-    /// The Timer1-type timer `i`'s gate over cycles `from+1 ..= to` for the pin source (GSS = 0, TxGPPS), `None` for any other
-    /// source (the timer then counts regardless, with a note when GE is set). `[A103]` The pin is followed through the
-    /// stimulus only, like a pin clock: a software write to the LAT of the gate pin is not seen between two looks. A pin
-    /// change on cycle t is seen by the clock ticks on cycle t and later. The gate signal is the pin after GPOL; the toggle
-    /// flip-flop changes on its rising edge (GTM); with GSPM the timer counts from the first rising edge after GGO is set
-    /// to the next falling edge, which clears GGO. TMRxGIF is set on a falling edge of the gate after the toggle flip-flop
-    /// (in single-pulse mode only for the pulse that was counted), also while GE = 0 (20.7.1-20.7.6, Figures 20-4 to 20-7).
-    /// The prescaler holds while the gate is closed (not stated in the data sheet).
-    fn gate_plan(&mut self, m: &DataMem, i: usize, from: u64, to: u64) -> Option<GatePlan> {
+    /// Level of the PPS output source `code` at Fosc tick `tick`: the last change at or before it.
+    fn sig_level(&self, code: u8, tick: u64) -> bool {
+        self.sig_log.iter().filter(|e| e.1 == code && e.0 <= tick).max_by_key(|e| e.0).is_some_and(|e| e.2)
+    }
+
+    /// Drop the source changes older than `cutoff` ticks, keeping the last one of each source as the starting level.
+    fn sig_prune_to(&mut self, cutoff: u64) {
+        if self.sig_log.len() > 64 {
+            self.sig_prune(cutoff);
+        }
+    }
+
+    fn sig_prune(&mut self, cutoff: u64) {
+        let mut keep = [usize::MAX; 32];
+        for (k, e) in self.sig_log.iter().enumerate() {
+            let c = usize::from(e.1) & 31;
+            if e.0 < cutoff && (keep[c] == usize::MAX || self.sig_log[keep[c]].0 <= e.0) {
+                keep[c] = k;
+            }
+        }
+        let mut k = 0;
+        self.sig_log.retain(|e| {
+            k += 1;
+            e.0 >= cutoff || keep[usize::from(e.1) & 31] == k - 1
+        });
+    }
+
+    /// The gate source of Timer1-type timer `i` by GSS (Q10: DS40002043F Table 20-4 p.310; Q41: DS40002214G Table 25-5 p.378).
+    /// Timer overflows and post-scaled outputs, ZCD, NCO, SMT and the Q41 PWM are not modelled.
+    fn gate_src(&self, m: &DataMem, i: usize) -> GSrc {
         let t = &self.t1[i];
-        let (tn, gcon, gff, grun) = (t.n, t.gcon, t.gff, t.grun);
-        let con = m.mem[gcon];
-        let (ge, gpol, gtm, gspm) = (con & 0x80 != 0, con & 0x40 != 0, con & 0x20 != 0, con & 0x10 != 0);
-        let reg = match (t.gate.map(|g| m.mem[g] & 31), t.gpps) {
-            (Some(0), Some(r)) => r,
-            _ => {
-                if ge {
-                    self.notes.insert(format!("Timer{tn} gate source other than the T{tn}GPPS pin is not modelled; the timer counts regardless of the gate"));
-                }
-                return None;
+        let Some(g) = t.gate else { return GSrc::None };
+        let gss = m.mem[g] & 31;
+        if gss == 0 {
+            return t.gpps.map_or(GSrc::None, GSrc::Pin);
+        }
+        let ccp = |n: u8| self.ccps.iter().find(|c| c.n == n).map(|c| c.sig);
+        let pwm = |n: u8| self.pwms.iter().find(|c| c.n == n).map(|c| c.sig);
+        let cmp = |n: u8| self.cmps.iter().find(|c| c.n == n).map(|c| c.sig);
+        let clc = |n: u8| self.clcs.iter().find(|c| c.n == n).map(|c| c.sig);
+        let code = if self.q41() {
+            match gss {
+                7 => ccp(1),
+                15 => cmp(1),
+                16 => cmp(2),
+                18..=21 => clc(gss - 17),
+                _ => None,
+            }
+        } else {
+            match gss {
+                8 => ccp(1),
+                9 => ccp(2),
+                10 => pwm(3),
+                11 => pwm(4),
+                12 => cmp(1),
+                13 => cmp(2),
+                16..=23 => clc(gss - 15),
+                _ => None,
             }
         };
-        let active = |c: u64| self.pps_pin(m, reg, c) == gpol;
+        code.map_or(GSrc::None, GSrc::Sig)
+    }
+
+    /// Level of the gate source before GPOL at the start of cycle `c`.
+    fn gate_raw(&self, m: &DataMem, src: GSrc, c: u64) -> bool {
+        match src {
+            GSrc::Pin(r) => self.pps_pin(m, r, c),
+            GSrc::Sig(code) => self.sig_level(code, 4 * c),
+            GSrc::None => false,
+        }
+    }
+
+    /// The Timer1-type timer `i`'s gate over cycles `from+1 ..= to`, `None` for a source that is not modelled (the timer
+    /// then counts regardless, with a note when GE is set). `[A103]` A change of the source on cycle t (a stimulus step,
+    /// or a source edge in the tick of that cycle) is seen by the clock ticks on cycle t and later; a change that software
+    /// made to the pin since the last look (LATx, TRISx, ANSELx, RxyPPS are synced before they are written) is seen on
+    /// the first cycle of the window. The gate signal is the source after GPOL; the toggle flip-flop changes on its
+    /// rising edge (GTM); with GSPM the timer counts from the first rising edge after GGO is set to the next falling edge,
+    /// which clears GGO. TMRxGIF is set on a falling edge of the gate after the toggle flip-flop (in single-pulse mode
+    /// only for the pulse that was counted), also while GE = 0 (20.7.1-20.7.6, Figures 20-4 to 20-7). The prescaler holds
+    /// while the gate is closed (not stated in the data sheet).
+    fn gate_plan(&mut self, m: &DataMem, i: usize, from: u64, to: u64) -> Option<GatePlan> {
+        let src = self.gate_src(m, i);
+        let t = &self.t1[i];
+        let (tn, gcon, gff, grun, gb, gss) = (t.n, t.gcon, t.gff, t.grun, t.gb, t.gate.map_or(0, |g| m.mem[g] & 31));
+        let con = m.mem[gcon];
+        let (ge, gpol, gtm, gspm) = (con & 0x80 != 0, con & 0x40 != 0, con & 0x20 != 0, con & 0x10 != 0);
+        if matches!(src, GSrc::None) {
+            self.t1[i].gb = None;
+            if ge {
+                self.notes.insert(format!("Timer{tn} gate source GSS={gss} is not modelled (the T{tn}GPPS pin and the CCP, PWM, comparator and CLC outputs are); the timer counts regardless of the gate"));
+            }
+            return None;
+        }
+        let active = |c: u64| self.gate_raw(m, src, c) == gpol;
         let (mut ff, mut run, mut ggo) = (gff && gtm, grun && gspm, con & 8 != 0 && gspm);
         let counts = |ff: bool, run: bool, b: bool| !ge || if gspm { run && if gtm { ff } else { b } } else if gtm { ff } else { b };
-        let mut times: Vec<u64> = self.drive.iter().map(|d| d.0).filter(|&c| c > from && c <= to).collect();
+        let mut times: Vec<u64> = match src {
+            GSrc::Pin(_) => self.drive.iter().map(|d| d.0).filter(|&c| c > from && c <= to).collect(),
+            GSrc::Sig(code) => self.sig_log.iter().filter(|e| e.1 == code).map(|e| e.0.div_ceil(4)).filter(|&c| c > from && c <= to).collect(),
+            GSrc::None => Vec::new(),
+        };
+        let mut b = gb.unwrap_or_else(|| active(from));
+        if active(from) != b {
+            times.push(from + 1);
+        }
         times.sort_unstable();
         times.dedup();
         let (mut segs, mut gif) = (Vec::new(), Vec::new());
-        let (mut b, mut start) = (active(from), from);
+        let mut start = from;
         let mut cur = counts(ff, run, b);
         for c in times {
             let nb = active(c);
@@ -2629,7 +2785,7 @@ impl Periph {
             cur = counts(ff, run, b);
         }
         segs.push((start, to, cur));
-        Some(GatePlan { segs, gif, ff, run, ggo })
+        Some(GatePlan { segs, gif, ff, run, ggo, b: Some(b) })
     }
 
     /// Stimulus: the pins `mask` of port `letter` are driven to `val` from cycle `at` on.

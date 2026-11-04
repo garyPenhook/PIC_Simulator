@@ -38,6 +38,9 @@ pub enum Special {
     Hook(u8),
     /// A CRC / scanner register (`periph/crc.rs`); the code is the sub-code there. Reads are the stored byte.
     Crc(u8),
+    /// A register that changes what a pin or a gate source reads (LATx, TRISx, ANSELx, RxyPPS, TxGATE, TxGPPS): the
+    /// peripherals are brought up to date before a write; reads and the stored byte are plain.
+    Sync,
 }
 
 pub struct DataMem {

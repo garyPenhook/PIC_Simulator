@@ -170,15 +170,25 @@ GO cleared on completion (40.2.2 p.720). Differences from the Q10:
   RB5 on the Q10). `[A17]` MDB reads GVAL = 0 while GE = 0 and the polarity-adjusted pin level while GE = 1, whatever
   GTM, GSPM, GGO and ON are (probed on all combinations on a low pin); the data sheet says GVAL is unaffected by GE
   (DS40002043F 20.14.2 p.318). The model follows MDB. Other gate sources read as low, with a note.
-* Timer1/3/5 gate, pin source only (GSS = 0, TxGPPS) `[A103]` (DS40002043F 20.7 pp.309-313, Table 20-3): with GE the timer
-  counts only while the pin, after GPOL, is active; a closed gate holds the count and (assumed, not in the data sheet)
-  the prescaler. A pin change on cycle t is seen by clock ticks on cycle t and later. GTM: the gate is a flip-flop that
-  toggles on the rising edge. GSPM: counting starts at the first rising edge after GGO is set and stops at the next
-  falling edge, which clears GGO (also cleared with GSPM). TMRxGIF is set on a falling edge of the gate, also with
-  GE = 0; in single-pulse mode only for the counted pulse. GVAL itself still reads the plain pin (see above). The pin is
-  followed through the stimulus only (like a pin clock); software writes to the gate pin's LAT between two looks are not
-  seen. Counting in Sleep uses the same plan. Other gate sources (timer overflows, CCP/PWM/CMP/ZCD/CLC outputs) are not
-  modelled: the timer counts regardless, with a note. Tests: `timer1_*gate*` in `crates/picsim/tests/pins.rs`.
+* Timer1/3/5 gate `[A103]` (DS40002043F 20.7 pp.309-313, Table 20-3, source table 20-4 p.310; Q41: DS40002214G 25.7, Table 25-5
+  p.378): with GE the timer counts only while the gate source, after GPOL, is active; a closed gate holds the count and
+  (assumed, not in the data sheet) the prescaler. GTM: the gate is a flip-flop that toggles on the rising edge. GSPM:
+  counting starts at the first rising edge after GGO is set and stops at the next falling edge, which clears GGO (also
+  cleared with GSPM). TMRxGIF is set on a falling edge of the gate, also with GE = 0; in single-pulse mode only for the
+  counted pulse. GVAL itself reads the plain source level (see above). Counting in Sleep uses the same plan.
+  * Sources modelled: the T*GPPS pin (GSS = 0) and the CCP, PWM (Q10), comparator and CLC outputs. They are followed through
+    the span since the last look: stimulus steps for a pin, the log of PPS output source changes (`sig_log`, kept back to
+    the oldest timer look) for the others. A change on cycle t is seen by clock ticks on cycle t and later (a source edge
+    in tick q of cycle c counts from cycle c+1 unless q = 0). A timer gated by an output source is advanced after the
+    CCP/PWM/comparator edges of the span have been made, so that it sees them in the span they fall in.
+  * A change that software makes to the pin (LATx, TRISx, ANSELx, RxyPPS, or the PORTx write) is synced up to the write
+    and seen from the next cycle (`Special::Sync`, only while a Timer1-type timer is ON or has GE set). A write to
+    TxGATE or TxGPPS ends the span first and is not an edge of the gate; so is a write to TxGCON (a GPOL change).
+  * Not modelled (the timer counts regardless, with a note): the timer overflow and post-scaled outputs (the data sheet gives
+    no pulse width), ZCD, NCO, SMT and the Q41 PWM as gate sources. A gate pin driven by a peripheral through RxyPPS is read
+    at the level of the end of the span, not time-resolved. With the timer OFF and GE = 0 a pin change is not synced, so
+    TMRxGIF sees it at the next look, one cycle after the span starts.
+  Tests: `timer1_*gate*` in `crates/picsim/tests/pins.rs`.
 
 ## Stimulus file (`crates/picsim/src/stimulus.rs`, `basil-sim --stim FILE`)
 
@@ -399,7 +409,7 @@ NACKed and a read from nobody gives FFh.
 * `[A83]` Evaluated after every instruction and on every change of a modelled input (pin stimulus times, PPS source changes); no propagation delay (39.4.20 not used).
   `[A84]` R wins over S when both are 1 (not stated). `[A85]` Disabling clears the flip-flop; enabling takes the present clock level as the previous one; enabling or disabling can itself be an output edge that sets CLCxIF per INTP/INTN (not described). A loop of cells that does not settle logs its edges on every pass.
   `[A86]` Inputs modelled: CLCIN0-7 pins, CCP1/2, PWM3/4, CMP1/2, CWG1A/B, CLC outputs. Others read low and add a note. `[A87]` Loops are iterated at most 8 times.
-* Not modelled: Timer1 gate from a comparator, ADC auto-trigger, Timer2/4/6 reset from a comparator, wake from Sleep.
+* Not modelled: ADC auto-trigger, Timer2/4/6 reset from a comparator, wake from Sleep.
 * Tests: `crates/picsim/tests/cmp.rs`.
 
 ## Board parts: LEDs and an SSD1306 OLED (`periph/board.rs`, stimulus `[[led]]` / `[[oled]]`, GUI "Board" tab)

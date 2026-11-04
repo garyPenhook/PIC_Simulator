@@ -315,7 +315,7 @@ impl Pic18 {
             return 0;
         }
         match self.m.special[i] {
-            Special::None | Special::Core | Special::Crc(_) => self.m.mem[i],
+            Special::None | Special::Core | Special::Crc(_) | Special::Sync => self.m.mem[i],
             Special::Hook(k) => {
                 if Periph::is_stored(k) { self.m.mem[i] } else { self.p.read(k, &mut self.m, self.cycles) }
             }
@@ -357,6 +357,14 @@ impl Pic18 {
         }
         match self.m.special[i] {
             Special::None | Special::Core => self.m.mem[i] = v & self.m.implemented[i],
+            Special::Sync => {
+                if self.p.watching(&self.m) {
+                    let now = self.cycles;
+                    self.p.sync(&mut self.m, now);
+                }
+                self.m.mem[i] = v & self.m.implemented[i];
+                self.p.synced_write(i);
+            }
             Special::Crc(k) => {
                 let now = self.cycles;
                 self.p.sync(&mut self.m, now);

@@ -124,3 +124,65 @@ fn timer1_gate_toggle_measures_a_full_period() {
     run_to(&mut m, 500);
     assert_eq!(m.cpu.read(l), 200);
 }
+
+#[test]
+fn timer1_gate_follows_a_software_write_to_the_pin() {
+    // RB5 is an output: LATB5 high from cycle 100 to 200 gates the timer, no stimulus involved.
+    let (mut m, l, ..) = gated("", 0xC0);
+    m.cpu.write(addr(&m, "TRISB"), 0xDF);
+    run_to(&mut m, 100);
+    m.cpu.write(addr(&m, "LATB"), 0x20);
+    run_to(&mut m, 200);
+    m.cpu.write(addr(&m, "LATB"), 0x00);
+    run_to(&mut m, 300);
+    assert_eq!(m.cpu.read(l), 100, "the pulse the program made is counted");
+}
+
+#[test]
+fn timer1_gate_source_change_applies_from_the_write() {
+    // CLC1 is off (low) so the CLC1 gate is closed; at cycle 150 the program switches to the pin, which is high from 100 on.
+    let (mut m, l, ..) = gated("[[pin]]\nport = \"B\"\nbit = 5\nlevel = 1\nat = 100\n", 0xC0);
+    let gate = addr(&m, "T1GATE");
+    m.cpu.write(gate, 16); // CLC1_out
+    run_to(&mut m, 150);
+    m.cpu.write(gate, 0); // the pin
+    run_to(&mut m, 300);
+    assert_eq!(m.cpu.read(l), 150);
+}
+
+#[test]
+fn timer1_gate_from_a_clc_output() {
+    // CLC1 = AND of its four gates; gate 1 takes CLCIN0 (RB0), the empty gates 2-4 are 1 with POL bits 1-3.
+    let (mut m, l, _, pir5) = gated("[[pin]]\nport = \"B\"\nbit = 0\nlevel = 1\nat = 100\n[[pin]]\nport = \"B\"\nbit = 0\nlevel = 0\nat = 200\n", 0xC0);
+    for (n, v) in [("CLCIN0PPS", 0x08), ("CLC1SEL0", 0), ("CLC1GLS0", 0x02), ("CLC1GLS1", 0), ("CLC1GLS2", 0), ("CLC1GLS3", 0), ("CLC1POL", 0x0E), ("CLC1CON", 0x82)] {
+        let a = addr(&m, n);
+        m.cpu.write(a, v);
+    }
+    m.cpu.write(addr(&m, "T1GATE"), 16); // CLC1_out
+    run_to(&mut m, 300);
+    assert_eq!(m.cpu.read(l), 100);
+    assert_ne!(m.cpu.read(pir5) & 0x01, 0, "TMR1GIF on the falling edge of CLC1");
+}
+
+#[test]
+fn timer1_gate_from_a_pwm_output_counts_the_pulse_width() {
+    // CCP1 in PWM mode: 16 cycles high every 256. Timer1 counts only while CCP1_OUT is high (GSS = 8).
+    let (mut m, l, ..) = gated("", 0xC0);
+    for (n, v) in [("RC2PPS", 0x05), ("TRISC", 0xFB), ("T2PR", 0xFF), ("T2CLKCON", 1), ("CCPR1H", 0x10), ("CCP1CON", 0x9C), ("T2CON", 0x80), ("T1GATE", 8)] {
+        let a = addr(&m, n);
+        m.cpu.write(a, v);
+    }
+    let mut end = 700;
+    loop {
+        run_to(&mut m, end);
+        if m.cpu.p.pin_log.len() % 2 == 0 {
+            break;
+        }
+        end += 5;
+    }
+    let log = m.cpu.p.pin_log.clone();
+    let high: u64 = log.chunks(2).map(|c| (c[1].0 - c[0].0) / 4).sum();
+    assert!(log.len() >= 4);
+    let n = u64::from(m.cpu.read(l)) | u64::from(m.cpu.read(l + 1)) << 8;
+    assert_eq!(n, high);
+}
