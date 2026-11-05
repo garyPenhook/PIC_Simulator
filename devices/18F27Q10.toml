@@ -8979,8 +8979,8 @@ width = 1
 name = "OSCCON3"
 addr = 3797
 width = 8
-por = "00-00---"
-mclr = "00-00---"
+por = "01-00---"
+mclr = "01-00---"
 access = "nn-rr---"
 implemented = 216
 
@@ -19610,15 +19610,15 @@ width = 5
 name = "STKPTR"
 addr = 4092
 width = 8
-por = "--000000"
-mclr = "--000000"
-access = "--nnnnnn"
-implemented = 63
+por = "---00000"
+mclr = "---00000"
+access = "---nnnnn"
+implemented = 31
 
 [[sfr.fields]]
 name = "STKPTR"
 pos = 0
-width = 6
+width = 5
 
 [[sfr.legacy]]
 name = "STKPTR0"
@@ -19643,11 +19643,6 @@ width = 1
 [[sfr.legacy]]
 name = "STKPTR4"
 pos = 4
-width = 1
-
-[[sfr.legacy]]
-name = "STKPTR5"
-pos = 5
 width = 1
 
 [[sfr]]
