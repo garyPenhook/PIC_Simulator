@@ -6187,10 +6187,10 @@ width = 1
 name = "CWG1AS1"
 addr = 1555
 width = 8
-por = "-0000000"
-mclr = "-0000000"
-access = "-nnnnnnn"
-implemented = 127
+por = "00000000"
+mclr = "00000000"
+access = "nnnnnnnn"
+implemented = 255
 module = "DOS-02485_wg_ecwg_v1_generic_A1"
 
 [[sfr.fields]]

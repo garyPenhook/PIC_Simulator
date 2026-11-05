@@ -36,7 +36,7 @@ that is too wide (writes stick that should not).
 | R16 | L | C | Q41 | `NCO1CLK` mask | 255 | 239 (bit 4 absent) | Fixed. |
 | R17 | L | C | Q41 | `I2C1CLK`, `I2C1BTOC` mask | 31, 15 | 15, 7 | Fixed. |
 | R18 | M | P | Q41 | `DMAnSIRQ`, `DMAnAIRQ` mask, reset | 127, `-0000000` | 255, `00000000` | Check against the highest trigger number (93). Fixed. |
-| R19 | M | C (Q41, DS40002214G 31.14.7) | Q41; 16F17146 | `CWG1AS1` mask, reset | 127, `-0000000` | 255, `00000000` | Q41 fixed (DS40002214G 31.14.7, DMAnSIRQ p.279). 16F17146 not yet checked against its data sheet. |
+| R19 | M | C (Q41, DS40002214G 31.14.7) | Q41; 16F17146 | `CWG1AS1` mask, reset | 127, `-0000000` | 255, `00000000` | Q41 fixed (DS40002214G 31.14.7, DMAnSIRQ p.279). **Fixed 2026-11-05** for 16F17146 (DS40002343F 26.14.7 p.322: AS7E-AS0E all R/W, reset 0). |
 | R20 | M | P | Q10 | `CCP1CAP`, `CCP2CAP` mask, reset | 3, `------00` | 15, `----0000` | CTS[3:2] cannot be set; `periph/ccp.rs` models only CTS = 0. **Fixed 2026-11-05** (CTS[3:0], DS40002043F 22.6.2 p.357). |
 | R21 | M | P | Q10 | `T2CLKCON`, `T4CLKCON`, `T6CLKCON` mask, reset | 15, `----0000` | 31, `---00000` | Clock source 16-31 cannot be selected. **Fixed 2026-11-05** (CS[4:0], 21.9.5 p.343; T2/T4/T6). |
 | R22 | M | P | Q10 | `CLKRCLK`, `SCANTRIG`, `MDCARH`, `MDCARL`, `MDSRC` mask, reset | 7, 15, 7, 7, 15 | 15, 31, 15, 15, 31 | One bit short each. **Fixed 2026-11-05** (CLKRCLK p.66 CLK[3:0], SCANTRIG p.192 TSEL[4:0], MDCARH/MDCARL CHS/CLS[3:0] p.437-438, MDSRC p.439 SRCS[4:0]). |
