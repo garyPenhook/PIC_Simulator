@@ -8,13 +8,6 @@
    15
   ],
   [
-   "STKPTR",
-   "STKPTR",
-   "0xffc",
-   63,
-   31
-  ],
-  [
    "INDF0",
    "INDFx",
    "0xfef",
@@ -443,13 +436,6 @@
   ]
  ],
  "por": [
-  [
-   "OSCCON3",
-   "OSCCON3",
-   "0xed5",
-   "00-00---",
-   "01-00---"
-  ],
   [
    "CLKRCLK",
    "CLKRCLK",

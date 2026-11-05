@@ -4614,15 +4614,20 @@ width = 1
 name = "OSCSTAT"
 addr = 178
 width = 8
-por = "qqqqqq-q"
-mclr = "qqqqqq-q"
-access = "rrrrrr-r"
-implemented = 253
+por = "00000000"
+mclr = "00000000"
+access = "rrrrrrrr"
+implemented = 255
 aliases = ["OSCSTAT1"]
 
 [[sfr.fields]]
 name = "PLLR"
 pos = 0
+width = 1
+
+[[sfr.fields]]
+name = "SFOR"
+pos = 1
 width = 1
 
 [[sfr.fields]]
@@ -5459,16 +5464,16 @@ width = 1
 name = "DMASELECT"
 addr = 232
 width = 8
-por = "------00"
-mclr = "------00"
-access = "------nn"
-implemented = 3
+por = "-----000"
+mclr = "-----000"
+access = "-----nnn"
+implemented = 7
 module = "DOS-03034_dma_8bit_v1_overlaid"
 
 [[sfr.fields]]
 name = "SLCT"
 pos = 0
-width = 8
+width = 3
 
 [[sfr.legacy]]
 name = "SLCT0"
@@ -5478,6 +5483,11 @@ width = 1
 [[sfr.legacy]]
 name = "SLCT1"
 pos = 1
+width = 1
+
+[[sfr.legacy]]
+name = "SLCT2"
+pos = 2
 width = 1
 
 [[sfr]]
@@ -9140,7 +9150,7 @@ width = 8
 por = "00000000"
 mclr = "00000000"
 access = "rrrrr---"
-implemented = 224
+implemented = 248
 module = "DOS-03057_i2c_8bit_v3"
 
 [[sfr.fields]]
@@ -10227,10 +10237,10 @@ width = 8
 name = "U2CON0"
 addr = 702
 width = 8
-por = "0000-000"
-mclr = "0000-000"
-access = "nnnn-nnn"
-implemented = 247
+por = "00000000"
+mclr = "00000000"
+access = "nnnnnnnn"
+implemented = 255
 module = "DOS-03076_uart_protocol_0_v1"
 
 [[sfr.fields]]
@@ -10271,6 +10281,11 @@ width = 1
 [[sfr.legacy]]
 name = "MODE2"
 pos = 2
+width = 1
+
+[[sfr.legacy]]
+name = "MODE3"
+pos = 3
 width = 1
 
 [[sfr]]
@@ -10807,10 +10822,10 @@ width = 8
 name = "U3CON0"
 addr = 721
 width = 8
-por = "0000-000"
-mclr = "0000-000"
-access = "nnnn-nnn"
-implemented = 247
+por = "00000000"
+mclr = "00000000"
+access = "nnnnnnnn"
+implemented = 255
 module = "DOS-03076_uart_protocol_0_v1"
 
 [[sfr.fields]]
@@ -10851,6 +10866,11 @@ width = 1
 [[sfr.legacy]]
 name = "MODE2"
 pos = 2
+width = 1
+
+[[sfr.legacy]]
+name = "MODE3"
+pos = 3
 width = 1
 
 [[sfr]]
@@ -13623,14 +13643,24 @@ width = 8
 name = "CCPTMRS0"
 addr = 844
 width = 8
-por = "------01"
-mclr = "------01"
-access = "------nn"
-implemented = 3
+por = "--010101"
+mclr = "--010101"
+access = "--nnnnnn"
+implemented = 63
 
 [[sfr.fields]]
 name = "C1TSEL"
 pos = 0
+width = 2
+
+[[sfr.fields]]
+name = "C2TSEL"
+pos = 2
+width = 2
+
+[[sfr.fields]]
+name = "C3TSEL"
+pos = 4
 width = 2
 
 [[sfr.legacy]]
@@ -13641,6 +13671,26 @@ width = 1
 [[sfr.legacy]]
 name = "C1TSEL1"
 pos = 1
+width = 1
+
+[[sfr.legacy]]
+name = "C2TSEL0"
+pos = 2
+width = 1
+
+[[sfr.legacy]]
+name = "C2TSEL1"
+pos = 3
+width = 1
+
+[[sfr.legacy]]
+name = "C3TSEL0"
+pos = 4
+width = 1
+
+[[sfr.legacy]]
+name = "C3TSEL1"
+pos = 5
 width = 1
 
 [[sfr]]
@@ -22550,8 +22600,8 @@ width = 1
 name = "PCON1"
 addr = 1265
 width = 8
-por = "-----111"
-mclr = "-----111"
+por = "-----10q"
+mclr="-----quu"
 access = "-----nnn"
 implemented = 7
 

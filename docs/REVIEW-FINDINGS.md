@@ -20,15 +20,15 @@ that is too wide (writes stick that should not).
 |---|---|---|---|---|---|---|---|
 | R1 | H | C (IPR0) / P (rest) | Q41 (6 files) | `IPR0`-`IPR10` reset | 0x00 (with the dashes of the mask) | IPR0 `10111111`, IPR1/3/4/9 `11111111`, IPR2 `1111---1`, IPR5 `1111-111`, IPR6 `111111-1`, IPR7 `111-1111`, IPR8 `1-1-1111`, IPR10 `11111--1` | After reset every source is low priority in the model; the part resets to high priority. The Q10 IPRs are already correct. |
 | R2 | H | C | Q10 | `DAC1CON0` (0xF2E) mask | 28 | 189 (EN 7, OE1 5, OE2 4, PSS 3:2, NSS 0) | `EN`, `OE1` and `NSS` cannot be set. |
-| R3 | M | C | Q10 | `STKPTR` (0xFFC) mask | 63 | 31 (STKPTR[4:0]) | Bit 5 writable. |
-| R4 | M | C | Q10 | `OSCCON3` (0xED5) reset | `00-00---` | `01-00---` (SOSCPWR = 1) | Wrong power-on value. |
-| R5 | M | C | Q41 | `PCON1` (0x4F1) reset | `-----111` | `-----10q` (MEMV = 0 on POR/BOR) | Wrong power-on value of MEMV. |
-| R6 | M | C | Q41 | `U2CON0`, `U3CON0` mask and reset | 247, `0000-000` | 255, `00000000` (U1CON0 already 255) | MODE bit 3 of UART2/3 cannot be set. |
-| R7 | M | C | Q41; 16F13145 | `CRCCON0` mask | 255 | 251 (bit 2 absent) | Bit 2 writable. Check the other 16F parts with a CRC. |
-| R8 | M | C | Q41 | `OSCSTAT` (0xB2) mask, reset | 253, `qqqqqq-q` | 255, `00000000` (all 8 bits read only) | Bit 1 reads as 0 and is missing. |
-| R9 | M | C | Q41 | `I2C1STAT0` (0x298) mask | 224 | 248 (7:3) | Bits 4:3 dropped although the fields exist. |
-| R10 | M | C | Q41 | `CCPTMRS0` (0x34C) mask, reset | 3, `------01` | 63, `--010101` | C2TSEL/C3TSEL dropped. |
-| R11 | M | C | Q41 | `DMASELECT` (0xE8) mask, reset | 3, `------00` | 7, `-----000` | Check the channel count of each part before widening. |
+| R3 | M | C | Q10 | `STKPTR` (0xFFC) mask | 63 | 31 (STKPTR[4:0]) | Bit 5 writable. Fixed (mask 31). |
+| R4 | M | C | Q10 | `OSCCON3` (0xED5) reset | `00-00---` | `01-00---` (SOSCPWR = 1) | Wrong power-on value. Fixed. |
+| R5 | M | C | Q41 | `PCON1` (0x4F1) reset | `-----111` | `-----10q` (MEMV = 0 on POR/BOR) | Wrong power-on value of MEMV. Fixed (`-----10q`). |
+| R6 | M | C | Q41 | `U2CON0`, `U3CON0` mask and reset | 247, `0000-000` | 255, `00000000` (U1CON0 already 255) | MODE bit 3 of UART2/3 cannot be set. Fixed. |
+| R7 | M | C | Q41; 16F13145 | `CRCCON0` mask | 255 | 251 (bit 2 absent) | Bit 2 writable. Check the other 16F parts with a CRC. **Not an error:** DS40002214G 13.12.1 and the register summary give SETUP[1:0] as bits 3:2, so bit 2 exists; mask 255 stays. |
+| R8 | M | C | Q41 | `OSCSTAT` (0xB2) mask, reset | 253, `qqqqqq-q` | 255, `00000000` (all 8 bits read only) | Bit 1 reads as 0 and is missing. Fixed. |
+| R9 | M | C | Q41 | `I2C1STAT0` (0x298) mask | 224 | 248 (7:3) | Bits 4:3 dropped although the fields exist. Fixed (248). |
+| R10 | M | C | Q41 | `CCPTMRS0` (0x34C) mask, reset | 3, `------01` | 63, `--010101` | C2TSEL/C3TSEL dropped. Fixed. |
+| R11 | M | C | Q41 | `DMASELECT` (0xE8) mask, reset | 3, `------00` | 7, `-----000` | Check the channel count of each part before widening. Fixed (mask 7; the Q41 data sheet lists SLCT[2:0]). |
 | R12 | L | C | Q41 | `ADCON0` (0x3F3) mask | 221 | 213 (bit 3 absent) | Bit 3 writable. |
 | R13 | L | C | Q41 | `ADREF` (0x3F8) mask | 255 | 19 (bits 4, 1:0) | Reserved bits writable. |
 | R14 | L | C | Q41 | `PWM1ERS`-`PWM3ERS` mask | 255 | 15 | |
