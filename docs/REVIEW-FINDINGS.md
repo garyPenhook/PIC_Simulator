@@ -29,14 +29,14 @@ that is too wide (writes stick that should not).
 | R9 | M | C | Q41 | `I2C1STAT0` (0x298) mask | 224 | 248 (7:3) | Bits 4:3 dropped although the fields exist. Fixed (248). |
 | R10 | M | C | Q41 | `CCPTMRS0` (0x34C) mask, reset | 3, `------01` | 63, `--010101` | C2TSEL/C3TSEL dropped. Fixed. |
 | R11 | M | C | Q41 | `DMASELECT` (0xE8) mask, reset | 3, `------00` | 7, `-----000` | Check the channel count of each part before widening. Fixed (mask 7; the Q41 data sheet lists SLCT[2:0]). |
-| R12 | L | C | Q41 | `ADCON0` (0x3F3) mask | 221 | 213 (bit 3 absent) | Bit 3 writable. |
-| R13 | L | C | Q41 | `ADREF` (0x3F8) mask | 255 | 19 (bits 4, 1:0) | Reserved bits writable. |
-| R14 | L | C | Q41 | `PWM1ERS`-`PWM3ERS` mask | 255 | 15 | |
-| R15 | L | P | Q41 | `PWM1CLK`-`PWM3CLK`, `PWM1LDS`-`PWM3LDS` mask | 255 | 15 | |
-| R16 | L | C | Q41 | `NCO1CLK` mask | 255 | 239 (bit 4 absent) | |
-| R17 | L | C | Q41 | `I2C1CLK`, `I2C1BTOC` mask | 31, 15 | 15, 7 | |
-| R18 | M | P | Q41 | `DMAnSIRQ`, `DMAnAIRQ` mask, reset | 127, `-0000000` | 255, `00000000` | Check against the highest trigger number (93). |
-| R19 | M | P | Q41; 16F17146 | `CWG1AS1` mask, reset | 127, `-0000000` | 255, `00000000` | |
+| R12 | L | C | Q41 | `ADCON0` (0x3F3) mask | 221 | 213 (bit 3 absent) | Bit 3 writable. Fixed. |
+| R13 | L | C | Q41 | `ADREF` (0x3F8) mask | 255 | 19 (bits 4, 1:0) | Reserved bits writable. Fixed. |
+| R14 | L | C | Q41 | `PWM1ERS`-`PWM3ERS` mask | 255 | 15 | Fixed. |
+| R15 | L | P | Q41 | `PWM1CLK`-`PWM3CLK`, `PWM1LDS`-`PWM3LDS` mask | 255 | 15 | Fixed. |
+| R16 | L | C | Q41 | `NCO1CLK` mask | 255 | 239 (bit 4 absent) | Fixed. |
+| R17 | L | C | Q41 | `I2C1CLK`, `I2C1BTOC` mask | 31, 15 | 15, 7 | Fixed. |
+| R18 | M | P | Q41 | `DMAnSIRQ`, `DMAnAIRQ` mask, reset | 127, `-0000000` | 255, `00000000` | Check against the highest trigger number (93). Fixed. |
+| R19 | M | C (Q41, DS40002214G 31.14.7) | Q41; 16F17146 | `CWG1AS1` mask, reset | 127, `-0000000` | 255, `00000000` | Q41 fixed (DS40002214G 31.14.7, DMAnSIRQ p.279). 16F17146 not yet checked against its data sheet. |
 | R20 | M | P | Q10 | `CCP1CAP`, `CCP2CAP` mask, reset | 3, `------00` | 15, `----0000` | CTS[3:2] cannot be set; `periph/ccp.rs` models only CTS = 0. |
 | R21 | M | P | Q10 | `T2CLKCON`, `T4CLKCON`, `T6CLKCON` mask, reset | 15, `----0000` | 31, `---00000` | Clock source 16-31 cannot be selected. |
 | R22 | M | P | Q10 | `CLKRCLK`, `SCANTRIG`, `MDCARH`, `MDCARL`, `MDSRC` mask, reset | 7, 15, 7, 7, 15 | 15, 31, 15, 15, 31 | One bit short each. |

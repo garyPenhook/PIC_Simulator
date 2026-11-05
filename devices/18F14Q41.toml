@@ -6429,10 +6429,10 @@ width = 2
 name = "DMAnAIRQ"
 addr = 254
 width = 8
-por = "-0000000"
-mclr = "-0000000"
-access = "-nnnnnnn"
-implemented = 127
+por = "00000000"
+mclr = "00000000"
+access = "nnnnnnnn"
+implemented = 255
 module = "DOS-03034_dma_8bit_v1_overlaid"
 
 [[sfr.fields]]
@@ -6479,10 +6479,10 @@ width = 1
 name = "DMAnSIRQ"
 addr = 255
 width = 8
-por = "-0000000"
-mclr = "-0000000"
-access = "-nnnnnnn"
-implemented = 127
+por = "00000000"
+mclr = "00000000"
+access = "nnnnnnnn"
+implemented = 255
 module = "DOS-03034_dma_8bit_v1_overlaid"
 
 [[sfr.fields]]
@@ -9617,10 +9617,10 @@ width = 8
 name = "I2C1CLK"
 addr = 670
 width = 8
-por = "---00000"
-mclr = "---00000"
-access = "---nnnnn"
-implemented = 31
+por = "----0000"
+mclr = "----0000"
+access = "----nnnn"
+implemented = 15
 module = "DOS-03057_i2c_8bit_v3"
 
 [[sfr.fields]]
@@ -9637,10 +9637,10 @@ width = 8
 name = "I2C1BTOC"
 addr = 671
 width = 8
-por = "----xxxx"
-mclr = "----uuuu"
-access = "----nnnn"
-implemented = 15
+por = "-----xxx"
+mclr = "-----uuu"
+access = "-----nnn"
+implemented = 7
 module = "DOS-03057_i2c_8bit_v3"
 
 [[sfr.fields]]
@@ -16394,10 +16394,10 @@ width = 1
 name = "CWG1AS1"
 addr = 963
 width = 8
-por = "-0000000"
-mclr = "-0000000"
-access = "-nnnnnnn"
-implemented = 127
+por = "00000000"
+mclr = "00000000"
+access = "nnnnnnnn"
+implemented = 255
 module = "DOS-02485_wg_ecwg_v1_generic"
 
 [[sfr.fields]]
@@ -17964,10 +17964,10 @@ width = 1
 name = "ADCON0"
 addr = 1011
 width = 8
-por = "00-000-0"
-mclr = "00-000-0"
-access = "nn-nnn-n"
-implemented = 221
+por = "00-0-0-0"
+mclr = "00-0-0-0"
+access = "nn-n-n-n"
+implemented = 213
 module = "DOS-03191_adc_sarcore_mp_ctrl_v2_generic"
 
 [[sfr.fields]]
@@ -18274,10 +18274,10 @@ width = 1
 name = "ADREF"
 addr = 1016
 width = 8
-por = "00000000"
-mclr = "00000000"
-access = "nnnnnnnn"
-implemented = 255
+por = "---0--00"
+mclr = "---0--00"
+access = "---n--nn"
+implemented = 19
 module = "DOS-03191_adc_sarcore_mp_ctrl_v2_generic"
 
 [[sfr.fields]]
@@ -19674,10 +19674,10 @@ width = 1
 name = "NCO1CLK"
 addr = 1095
 width = 8
-por = "00000000"
-mclr = "00000000"
-access = "nnnnnnnn"
-implemented = 255
+por = "000-0000"
+mclr = "000-0000"
+access = "nnn-nnnn"
+implemented = 239
 module = "DOS-02547_tmr_dds_v2_generic"
 
 [[sfr.fields]]
@@ -20058,10 +20058,10 @@ width = 1
 name = "PWM1ERS"
 addr = 1120
 width = 8
-por = "00000000"
-mclr = "00000000"
-access = "nnnnnnnn"
-implemented = 255
+por = "----0000"
+mclr = "----0000"
+access = "----nnnn"
+implemented = 15
 module = "DOS-03855_pwm_cmp_v1_1Slice"
 
 [[sfr.fields]]
@@ -20113,10 +20113,10 @@ width = 1
 name = "PWM1CLK"
 addr = 1121
 width = 8
-por = "00000000"
-mclr = "00000000"
-access = "nnnnnnnn"
-implemented = 255
+por = "----0000"
+mclr = "----0000"
+access = "----nnnn"
+implemented = 15
 module = "DOS-03855_pwm_cmp_v1_1Slice"
 
 [[sfr.fields]]
@@ -20168,10 +20168,10 @@ width = 1
 name = "PWM1LDS"
 addr = 1122
 width = 8
-por = "00000000"
-mclr = "00000000"
-access = "nnnnnnnn"
-implemented = 255
+por = "----0000"
+mclr = "----0000"
+access = "----nnnn"
+implemented = 15
 module = "DOS-03855_pwm_cmp_v1_1Slice"
 
 [[sfr.fields]]
@@ -20458,10 +20458,10 @@ width = 8
 name = "PWM2ERS"
 addr = 1135
 width = 8
-por = "00000000"
-mclr = "00000000"
-access = "nnnnnnnn"
-implemented = 255
+por = "----0000"
+mclr = "----0000"
+access = "----nnnn"
+implemented = 15
 module = "DOS-03855_pwm_cmp_v1_1Slice"
 
 [[sfr.fields]]
@@ -20513,10 +20513,10 @@ width = 1
 name = "PWM2CLK"
 addr = 1136
 width = 8
-por = "00000000"
-mclr = "00000000"
-access = "nnnnnnnn"
-implemented = 255
+por = "----0000"
+mclr = "----0000"
+access = "----nnnn"
+implemented = 15
 module = "DOS-03855_pwm_cmp_v1_1Slice"
 
 [[sfr.fields]]
@@ -20568,10 +20568,10 @@ width = 1
 name = "PWM2LDS"
 addr = 1137
 width = 8
-por = "00000000"
-mclr = "00000000"
-access = "nnnnnnnn"
-implemented = 255
+por = "----0000"
+mclr = "----0000"
+access = "----nnnn"
+implemented = 15
 module = "DOS-03855_pwm_cmp_v1_1Slice"
 
 [[sfr.fields]]
@@ -20858,10 +20858,10 @@ width = 8
 name = "PWM3ERS"
 addr = 1150
 width = 8
-por = "00000000"
-mclr = "00000000"
-access = "nnnnnnnn"
-implemented = 255
+por = "----0000"
+mclr = "----0000"
+access = "----nnnn"
+implemented = 15
 module = "DOS-03855_pwm_cmp_v1_1Slice"
 
 [[sfr.fields]]
@@ -20913,10 +20913,10 @@ width = 1
 name = "PWM3CLK"
 addr = 1151
 width = 8
-por = "00000000"
-mclr = "00000000"
-access = "nnnnnnnn"
-implemented = 255
+por = "----0000"
+mclr = "----0000"
+access = "----nnnn"
+implemented = 15
 module = "DOS-03855_pwm_cmp_v1_1Slice"
 
 [[sfr.fields]]
@@ -20968,10 +20968,10 @@ width = 1
 name = "PWM3LDS"
 addr = 1152
 width = 8
-por = "00000000"
-mclr = "00000000"
-access = "nnnnnnnn"
-implemented = 255
+por = "----0000"
+mclr = "----0000"
+access = "----nnnn"
+implemented = 15
 module = "DOS-03855_pwm_cmp_v1_1Slice"
 
 [[sfr.fields]]
