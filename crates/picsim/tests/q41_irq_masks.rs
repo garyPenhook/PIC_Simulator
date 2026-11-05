@@ -30,6 +30,32 @@ fn q41_masks() {
 }
 
 #[test]
+fn q41_ipr_reset_high_priority() {
+    // IPR0-IPR10 reset to 1 in every implemented bit (IPR0 bit 6 CRCIP resets to 0): IPR0 p.163, IPR1 p.164, IPR2 p.165 (DS40002214G).
+    for part in Q41 {
+        let dev = load(part);
+        for i in 0..=10 {
+            let n = format!("IPR{i}");
+            let s = dev.find_sfr(&n).unwrap_or_else(|| panic!("no {n}"));
+            let want = if i == 0 { "10111111" } else { "" };
+            for (l, v) in [("por", &s.por), ("mclr", &s.mclr)] {
+                if want.is_empty() {
+                    assert!(v.chars().all(|c| c == '1' || c == '-'), "{part} {n} {l} = {v}");
+                } else {
+                    assert_eq!(v, want, "{part} {n} {l}");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn q10_dac1con0_mask() {
+    // EN 7, OE1 5, OE2 4, PSS 3:2, NSS 0 (DS40002043F p.543).
+    assert_eq!(mask(&load("18F27Q10"), "DAC1CON0"), 189);
+}
+
+#[test]
 fn q10_masks() {
     // PMD0 p.77, PMD2 p.80 (6, 5, 2:0), PMD3 p.81, PMD4 p.82 (7:4, 0), PMD5 p.83 (7:4, 0), PIE3 p.210 and IPR3 p.218 (all 8).
     let dev = load("18F27Q10");

@@ -11827,7 +11827,7 @@ width = 8
 por = "0-0000-0"
 mclr = "0-0000-0"
 access = "n-nnnn-n"
-implemented = 28
+implemented = 189
 module = "DOS-02567_dac_nbit_ctrl_v2"
 
 [[sfr.fields]]
