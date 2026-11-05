@@ -357,9 +357,12 @@ NACKed and a read from nobody gives FFh.
   (pin set at the Timer2 period match, cleared after CCPR * TOSC * prescale; FMT alignment; duty 0 never sets). CCPTMRS picks the timer: Timer1/3/5 for
   capture and compare, Timer2/4/6 (FOSC/4) for PWM (reserved code 00 and timers the part lacks give a note).
 * `[A61]` Compare match on the Timer1 clock that makes TMR1 = CCPRx; with clearing (MODE 1, 11) TMR1 goes to 0 on the next clock,
-  so the period is CCPRx + 1 clocks.
-* `[A62]` In PWM mode CCPxIF is set when the pin clears.
-* `[A63]` Pulse output (MODE 10, 11) sets the flag (and clears TMR1 for 11) but does not drive the pin: the pulse width is not documented.
+  so the period is CCPRx + 1 clocks. Basis: DS40002043F 22.3 (p.348) says only that a match sets the flag and drives the pin and that
+  MODE 0001/1011 reset TMRx; it gives no clock-exact timing. This is a modelling choice, to be checked on hardware (MDB is not a reference).
+* `[A62]` In PWM mode CCPxIF is set when the pin clears. Basis: none beyond Figure 22-4's "set CCPIF" arrow; PIR6 (p.205) calls the flag
+  unused in PWM mode. Modelling choice, to be checked on hardware.
+* `[A63]` Pulse output (MODE 10, 11) sets the flag (and clears TMR1 for 11) but does not drive the pin: the data sheet (Table 22-6, 22.3)
+  gives no pulse width.
 * Timers 3-6 are the same models as Timer1 (3, 5: 16-bit, T3GATE/T3GPPS gate table DS40002043F p.311) and Timer2 (4, 6); their
   flags are TMRxIF. Hook codes 226-235 and 244-253 are the extra instances.
 * Not modelled: capture sources other than the pin, the ADC auto-conversion trigger from a compare, PWM3/PWM4. A CCPTMRS write

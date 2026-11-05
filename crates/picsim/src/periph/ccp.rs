@@ -15,7 +15,7 @@
 //!   CCPR * TOSC * prescale (Eq. 22-2), period = (T2PR + 1) * 4 * TOSC * prescale (Eq. 22-1). A pulse width greater
 //!   than or equal to the period leaves the pin unchanged. FMT = 0 right-aligned (CCPRH[1:0]:CCPRL), FMT = 1
 //!   left-aligned (CCPRH:CCPRL[7:6]) (p.358).
-//! Assumptions `[A#]` (to be measured against MDB):
+//! Assumptions `[A#]` (the data sheet gives no timing for them; to be checked on hardware, MDB is not a reference):
 //! * `[A61]` A compare match is seen on the Timer1 clock that makes TMR1 equal CCPRx; the flag and the pin change
 //!   are on that instruction cycle. With TMR1 clearing (MODE 0001/1011) TMR1 goes to 0 on the next clock, like the
 //!   Timer2 period match, so CCPRx is the period register with a period of CCPRx + 1 clocks (20.11, p.314).

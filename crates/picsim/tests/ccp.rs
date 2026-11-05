@@ -356,3 +356,18 @@ fn pwm3_follows_timer4_and_stops_when_disabled() {
     assert!(m.cpu.p.pin_log.len() <= n2 + 1);
     assert_eq!(r(&mut m, "PWM3CON") & 0x20, 0);
 }
+
+#[test]
+fn compare_set_on_match_with_a_small_count() {
+    // DS40002043F Table 22-6 (p.356): MODE 1000 sets the output on a match and sets CCPxIF.
+    let mut m = machine("");
+    w(&mut m, "T1CLK", 1); // CS = FOSC/4 (Table 20-2, p.306)
+    w(&mut m, "CCPR1H", 0);
+    w(&mut m, "CCPR1L", 5);
+    w(&mut m, "CCP1CON", 0x88);
+    w(&mut m, "T1CON", 0x01); // ON = 1, GE = 0: always on (Table 20-1)
+    let start = m.cpu.cycles;
+    run_to(&mut m, start + 4000); // 1 ms at 16 MHz is 4000 instruction cycles
+    assert_eq!(r(&mut m, "PIR6") & 0x01, 1, "CCP1IF");
+    assert_eq!(r(&mut m, "CCP1CON") & 0x20, 0x20, "OUT set");
+}
