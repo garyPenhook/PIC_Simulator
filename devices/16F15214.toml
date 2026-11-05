@@ -2005,10 +2005,10 @@ width = 1
 name = "T1CLK"
 addr = 529
 width = 8
-por = "----0000"
-mclr = "----uuuu"
-access = "----nnnn"
-implemented = 15
+por = "---00000"
+mclr = "---uuuuu"
+access = "---nnnnn"
+implemented = 31
 module = "DOS-02655_tmr_mid1_v6_8bit_rev2"
 aliases = ["TMR1CLK", "PR1"]
 
@@ -2086,7 +2086,7 @@ width = 8
 por = "00000000"
 mclr = "00000000"
 access = "nnnnnnnn"
-implemented = 127
+implemented = 255
 module = "DOS-02777_tmr_mid2_v2_184xx"
 
 [[sfr.fields]]
@@ -3126,7 +3126,7 @@ width = 1
 name = "PCON1"
 addr = 2068
 width = 8
-por = "------0-"
+por = "------1-"
 mclr = "------u-"
 access = "------n-"
 implemented = 2

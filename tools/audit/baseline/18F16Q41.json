@@ -111,27 +111,6 @@
    "0x356",
    255,
    251
-  ],
-  [
-   "DAC1CON",
-   "DACxCON",
-   "0x7f",
-   60,
-   189
-  ],
-  [
-   "DAC2CON",
-   "DACxCON",
-   "0xa2",
-   12,
-   141
-  ],
-  [
-   "OPA1CON0",
-   "OPAxCON0",
-   "0xa3",
-   168,
-   171
   ]
  ],
  "por": [
@@ -232,13 +211,6 @@
    "0xae",
    "-000-000",
    "-fffffff"
-  ],
-  [
-   "OPA1OFFSET",
-   "OPAxOFFSET",
-   "0xa8",
-   "00000000",
-   "mmmmmmmm"
   ]
  ]
 }

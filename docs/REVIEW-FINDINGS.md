@@ -37,15 +37,15 @@ that is too wide (writes stick that should not).
 | R17 | L | C | Q41 | `I2C1CLK`, `I2C1BTOC` mask | 31, 15 | 15, 7 | Fixed. |
 | R18 | M | P | Q41 | `DMAnSIRQ`, `DMAnAIRQ` mask, reset | 127, `-0000000` | 255, `00000000` | Check against the highest trigger number (93). Fixed. |
 | R19 | M | C (Q41, DS40002214G 31.14.7) | Q41; 16F17146 | `CWG1AS1` mask, reset | 127, `-0000000` | 255, `00000000` | Q41 fixed (DS40002214G 31.14.7, DMAnSIRQ p.279). 16F17146 not yet checked against its data sheet. |
-| R20 | M | P | Q10 | `CCP1CAP`, `CCP2CAP` mask, reset | 3, `------00` | 15, `----0000` | CTS[3:2] cannot be set; `periph/ccp.rs` models only CTS = 0. |
-| R21 | M | P | Q10 | `T2CLKCON`, `T4CLKCON`, `T6CLKCON` mask, reset | 15, `----0000` | 31, `---00000` | Clock source 16-31 cannot be selected. |
-| R22 | M | P | Q10 | `CLKRCLK`, `SCANTRIG`, `MDCARH`, `MDCARL`, `MDSRC` mask, reset | 7, 15, 7, 7, 15 | 15, 31, 15, 15, 31 | One bit short each. |
-| R23 | L | P | Q10 | `CLC1SEL0`-`CLC8SEL3` (32 registers) mask | 255 | 63 | |
-| R24 | L | P | Q10 | `CWG1ISM` mask; `CWG1AS1` mask, reset | 31; 63, `--000000` | 15; 255, `00000000` | |
-| R25 | M | P | Q41 | `DAC1CON`, `DAC2CON`, `OPA1CON0` mask | 60, 12, 168 | 189, 141, 171 (generic `DACxCON`/`OPAxCON0` page: instances differ) | Read both instances before changing. |
-| R26 | L | P | Q41 | `OPA1OFFSET` / 16F `OPA1OFFSET` reset | `00000000` | `mmmmmmmm` (factory trim) | Reset is not zero; decide how to model. |
-| R27 | M | P | 16F152xx | `T1CLK` mask, reset; `T2CON` mask; `PCON1`, `BAUD1CON`, `FVRCON` reset | 15, `----0000`; 127; `------0-`, `01-00-00`, `01----00` | 31, `---00000`; 255; `------1-`, `00-00-00`, `00----00` | 16F15243; check the other 152xx parts. |
-| R28 | L | P | 16F171x6 | `CLCSELECT` mask, reset; `OPA1CON0` mask | 3, `------00`; 168 | 15, `----0000`; 171 | 16F17146. |
+| R20 | M | P | Q10 | `CCP1CAP`, `CCP2CAP` mask, reset | 3, `------00` | 15, `----0000` | CTS[3:2] cannot be set; `periph/ccp.rs` models only CTS = 0. **Fixed 2026-11-05** (CTS[3:0], DS40002043F 22.6.2 p.357). |
+| R21 | M | P | Q10 | `T2CLKCON`, `T4CLKCON`, `T6CLKCON` mask, reset | 15, `----0000` | 31, `---00000` | Clock source 16-31 cannot be selected. **Fixed 2026-11-05** (CS[4:0], 21.9.5 p.343; T2/T4/T6). |
+| R22 | M | P | Q10 | `CLKRCLK`, `SCANTRIG`, `MDCARH`, `MDCARL`, `MDSRC` mask, reset | 7, 15, 7, 7, 15 | 15, 31, 15, 15, 31 | One bit short each. **Fixed 2026-11-05** (CLKRCLK p.66 CLK[3:0], SCANTRIG p.192 TSEL[4:0], MDCARH/MDCARL CHS/CLS[3:0] p.437-438, MDSRC p.439 SRCS[4:0]). |
+| R23 | L | P | Q10 | `CLC1SEL0`-`CLC8SEL3` (32 registers) mask | 255 | 63 | **Fixed 2026-11-05** (D1S-D4S[5:0], 26.8.3-26.8.6 p.418-421; reset `--xxxxxx`). |
+| R24 | L | P | Q10 | `CWG1ISM` mask; `CWG1AS1` mask, reset | 31; 63, `--000000` | 15; 255, `00000000` | **Fixed 2026-11-05** (CWG1ISM ISM[3:0] p.400; CWG1AS1 AS7E-AS0E p.403). |
+| R25 | M | P | Q41 | `DAC1CON`, `DAC2CON`, `OPA1CON0` mask | 60, 12, 168 | 189, 141, 171 (generic `DACxCON`/`OPAxCON0` page: instances differ) | Read both instances before changing. **Fixed 2026-11-05:** DS40002214G 41.5.1 p.763 (DAC1: EN, OE, PSS, NSS = 189), 41.5.2 p.764 (DAC2: EN, PSS, NSS = 141), 42.5.1 p.772 (OPA1CON0 = 171, bit 2 absent; `access` and reset also corrected). |
+| R26 | L | P | Q41 | `OPA1OFFSET` / 16F `OPA1OFFSET` reset | `00000000` | `mmmmmmmm` (factory trim) | Reset is not zero; decide how to model. **Fixed 2026-11-05:** reset written as `mmmmmmmm` (DS40002214G 42.5.6 p.777). The loader sets only `1` bits, so the model still starts at 0 (no offset). 16F17126/46 done too (DS40002343F 34.5.6 p.546). |
+| R27 | M | P | 16F152xx | `T1CLK` mask, reset; `T2CON` mask; `PCON1`, `BAUD1CON`, `FVRCON` reset | 15, `----0000`; 127; `------0-`, `01-00-00`, `01----00` | 31, `---00000`; 255; `------1-`, `00-00-00`, `00----00` | 16F15243; check the other 152xx parts. **Fixed 2026-11-05 for the six 152xx parts (one data sheet, DS40002195E):** `T1CLK` (20.11.3 p.174), `T2CON` (21.10.3 p.194), `PCON1` MEMV (10.12.3 p.75). **Not changed:** `BAUD1CON` (reset `01-00-00` kept: this data sheet lists RCIDL reset 0, the Q10 data sheet 29.6.6 lists 1, and an idle receiver reads 1) and `FVRCON` (`01----00` kept: its note 2 says FVRRDY is always 1); both look like data sheet errors. |
+| R28 | L | P | 16F171x6 | `CLCSELECT` mask, reset; `OPA1CON0` mask | 3, `------00`; 168 | 15, `----0000`; 171 | 16F17146. **Fixed 2026-11-05** for 16F17126 and 16F17146 (DS40002343F 30.8.1 p.376 SLCT[3:0]; 34.5.1 p.541 OPA1CON0 = 171). |
 
 Not errors, do not change: Q10 `PORTE`, `WPUE`, `INLVLE` (the data sheet covers the 47Q10, the 27Q10 has RE3 only); `INDFn`, `PLUSWn`,
 `PREINCn`, `POSTINCn`, `POSTDECn` mask 0 (virtual registers); Q41 `TRISA` bit 3 (MCLR, read-only 1: the data sheet lists it as Reserved);

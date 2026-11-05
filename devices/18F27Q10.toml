@@ -1478,10 +1478,10 @@ width = 1
 name = "CLC1SEL0"
 addr = 3625
 width = 8
-por = "xxxxxxxx"
-mclr = "uuuuuuuu"
-access = "nnnnnnnn"
-implemented = 255
+por = "--xxxxxx"
+mclr = "--uuuuuu"
+access = "--nnnnnn"
+implemented = 63
 module = "DOS-02286_cla_clc_v5_8bit"
 
 [[sfr.fields]]
@@ -1498,10 +1498,10 @@ width = 8
 name = "CLC1SEL1"
 addr = 3626
 width = 8
-por = "xxxxxxxx"
-mclr = "uuuuuuuu"
-access = "nnnnnnnn"
-implemented = 255
+por = "--xxxxxx"
+mclr = "--uuuuuu"
+access = "--nnnnnn"
+implemented = 63
 module = "DOS-02286_cla_clc_v5_8bit"
 
 [[sfr.fields]]
@@ -1518,10 +1518,10 @@ width = 8
 name = "CLC1SEL2"
 addr = 3627
 width = 8
-por = "xxxxxxxx"
-mclr = "uuuuuuuu"
-access = "nnnnnnnn"
-implemented = 255
+por = "--xxxxxx"
+mclr = "--uuuuuu"
+access = "--nnnnnn"
+implemented = 63
 module = "DOS-02286_cla_clc_v5_8bit"
 
 [[sfr.fields]]
@@ -1538,10 +1538,10 @@ width = 8
 name = "CLC1SEL3"
 addr = 3628
 width = 8
-por = "xxxxxxxx"
-mclr = "uuuuuuuu"
-access = "nnnnnnnn"
-implemented = 255
+por = "--xxxxxx"
+mclr = "--uuuuuu"
+access = "--nnnnnn"
+implemented = 63
 module = "DOS-02286_cla_clc_v5_8bit"
 
 [[sfr.fields]]
@@ -2028,10 +2028,10 @@ width = 1
 name = "CLC2SEL0"
 addr = 3635
 width = 8
-por = "xxxxxxxx"
-mclr = "uuuuuuuu"
-access = "nnnnnnnn"
-implemented = 255
+por = "--xxxxxx"
+mclr = "--uuuuuu"
+access = "--nnnnnn"
+implemented = 63
 module = "DOS-02286_cla_clc_v5_8bit"
 
 [[sfr.fields]]
@@ -2048,10 +2048,10 @@ width = 8
 name = "CLC2SEL1"
 addr = 3636
 width = 8
-por = "xxxxxxxx"
-mclr = "uuuuuuuu"
-access = "nnnnnnnn"
-implemented = 255
+por = "--xxxxxx"
+mclr = "--uuuuuu"
+access = "--nnnnnn"
+implemented = 63
 module = "DOS-02286_cla_clc_v5_8bit"
 
 [[sfr.fields]]
@@ -2068,10 +2068,10 @@ width = 8
 name = "CLC2SEL2"
 addr = 3637
 width = 8
-por = "xxxxxxxx"
-mclr = "uuuuuuuu"
-access = "nnnnnnnn"
-implemented = 255
+por = "--xxxxxx"
+mclr = "--uuuuuu"
+access = "--nnnnnn"
+implemented = 63
 module = "DOS-02286_cla_clc_v5_8bit"
 
 [[sfr.fields]]
@@ -2088,10 +2088,10 @@ width = 8
 name = "CLC2SEL3"
 addr = 3638
 width = 8
-por = "xxxxxxxx"
-mclr = "uuuuuuuu"
-access = "nnnnnnnn"
-implemented = 255
+por = "--xxxxxx"
+mclr = "--uuuuuu"
+access = "--nnnnnn"
+implemented = 63
 module = "DOS-02286_cla_clc_v5_8bit"
 
 [[sfr.fields]]
@@ -2578,10 +2578,10 @@ width = 1
 name = "CLC3SEL0"
 addr = 3645
 width = 8
-por = "xxxxxxxx"
-mclr = "uuuuuuuu"
-access = "nnnnnnnn"
-implemented = 255
+por = "--xxxxxx"
+mclr = "--uuuuuu"
+access = "--nnnnnn"
+implemented = 63
 module = "DOS-02286_cla_clc_v5_8bit"
 
 [[sfr.fields]]
@@ -2598,10 +2598,10 @@ width = 8
 name = "CLC3SEL1"
 addr = 3646
 width = 8
-por = "xxxxxxxx"
-mclr = "uuuuuuuu"
-access = "nnnnnnnn"
-implemented = 255
+por = "--xxxxxx"
+mclr = "--uuuuuu"
+access = "--nnnnnn"
+implemented = 63
 module = "DOS-02286_cla_clc_v5_8bit"
 
 [[sfr.fields]]
@@ -2618,10 +2618,10 @@ width = 8
 name = "CLC3SEL2"
 addr = 3647
 width = 8
-por = "xxxxxxxx"
-mclr = "uuuuuuuu"
-access = "nnnnnnnn"
-implemented = 255
+por = "--xxxxxx"
+mclr = "--uuuuuu"
+access = "--nnnnnn"
+implemented = 63
 module = "DOS-02286_cla_clc_v5_8bit"
 
 [[sfr.fields]]
@@ -2638,10 +2638,10 @@ width = 8
 name = "CLC3SEL3"
 addr = 3648
 width = 8
-por = "xxxxxxxx"
-mclr = "uuuuuuuu"
-access = "nnnnnnnn"
-implemented = 255
+por = "--xxxxxx"
+mclr = "--uuuuuu"
+access = "--nnnnnn"
+implemented = 63
 module = "DOS-02286_cla_clc_v5_8bit"
 
 [[sfr.fields]]
@@ -3128,10 +3128,10 @@ width = 1
 name = "CLC4SEL0"
 addr = 3655
 width = 8
-por = "xxxxxxxx"
-mclr = "uuuuuuuu"
-access = "nnnnnnnn"
-implemented = 255
+por = "--xxxxxx"
+mclr = "--uuuuuu"
+access = "--nnnnnn"
+implemented = 63
 module = "DOS-02286_cla_clc_v5_8bit"
 
 [[sfr.fields]]
@@ -3148,10 +3148,10 @@ width = 8
 name = "CLC4SEL1"
 addr = 3656
 width = 8
-por = "xxxxxxxx"
-mclr = "uuuuuuuu"
-access = "nnnnnnnn"
-implemented = 255
+por = "--xxxxxx"
+mclr = "--uuuuuu"
+access = "--nnnnnn"
+implemented = 63
 module = "DOS-02286_cla_clc_v5_8bit"
 
 [[sfr.fields]]
@@ -3168,10 +3168,10 @@ width = 8
 name = "CLC4SEL2"
 addr = 3657
 width = 8
-por = "xxxxxxxx"
-mclr = "uuuuuuuu"
-access = "nnnnnnnn"
-implemented = 255
+por = "--xxxxxx"
+mclr = "--uuuuuu"
+access = "--nnnnnn"
+implemented = 63
 module = "DOS-02286_cla_clc_v5_8bit"
 
 [[sfr.fields]]
@@ -3188,10 +3188,10 @@ width = 8
 name = "CLC4SEL3"
 addr = 3658
 width = 8
-por = "xxxxxxxx"
-mclr = "uuuuuuuu"
-access = "nnnnnnnn"
-implemented = 255
+por = "--xxxxxx"
+mclr = "--uuuuuu"
+access = "--nnnnnn"
+implemented = 63
 module = "DOS-02286_cla_clc_v5_8bit"
 
 [[sfr.fields]]
@@ -3678,10 +3678,10 @@ width = 1
 name = "CLC5SEL0"
 addr = 3665
 width = 8
-por = "xxxxxxxx"
-mclr = "uuuuuuuu"
-access = "nnnnnnnn"
-implemented = 255
+por = "--xxxxxx"
+mclr = "--uuuuuu"
+access = "--nnnnnn"
+implemented = 63
 module = "DOS-02286_cla_clc_v5_8bit"
 
 [[sfr.fields]]
@@ -3698,10 +3698,10 @@ width = 8
 name = "CLC5SEL1"
 addr = 3666
 width = 8
-por = "xxxxxxxx"
-mclr = "uuuuuuuu"
-access = "nnnnnnnn"
-implemented = 255
+por = "--xxxxxx"
+mclr = "--uuuuuu"
+access = "--nnnnnn"
+implemented = 63
 module = "DOS-02286_cla_clc_v5_8bit"
 
 [[sfr.fields]]
@@ -3718,10 +3718,10 @@ width = 8
 name = "CLC5SEL2"
 addr = 3667
 width = 8
-por = "xxxxxxxx"
-mclr = "uuuuuuuu"
-access = "nnnnnnnn"
-implemented = 255
+por = "--xxxxxx"
+mclr = "--uuuuuu"
+access = "--nnnnnn"
+implemented = 63
 module = "DOS-02286_cla_clc_v5_8bit"
 
 [[sfr.fields]]
@@ -3738,10 +3738,10 @@ width = 8
 name = "CLC5SEL3"
 addr = 3668
 width = 8
-por = "xxxxxxxx"
-mclr = "uuuuuuuu"
-access = "nnnnnnnn"
-implemented = 255
+por = "--xxxxxx"
+mclr = "--uuuuuu"
+access = "--nnnnnn"
+implemented = 63
 module = "DOS-02286_cla_clc_v5_8bit"
 
 [[sfr.fields]]
@@ -4228,10 +4228,10 @@ width = 1
 name = "CLC6SEL0"
 addr = 3675
 width = 8
-por = "xxxxxxxx"
-mclr = "uuuuuuuu"
-access = "nnnnnnnn"
-implemented = 255
+por = "--xxxxxx"
+mclr = "--uuuuuu"
+access = "--nnnnnn"
+implemented = 63
 module = "DOS-02286_cla_clc_v5_8bit"
 
 [[sfr.fields]]
@@ -4248,10 +4248,10 @@ width = 8
 name = "CLC6SEL1"
 addr = 3676
 width = 8
-por = "xxxxxxxx"
-mclr = "uuuuuuuu"
-access = "nnnnnnnn"
-implemented = 255
+por = "--xxxxxx"
+mclr = "--uuuuuu"
+access = "--nnnnnn"
+implemented = 63
 module = "DOS-02286_cla_clc_v5_8bit"
 
 [[sfr.fields]]
@@ -4268,10 +4268,10 @@ width = 8
 name = "CLC6SEL2"
 addr = 3677
 width = 8
-por = "xxxxxxxx"
-mclr = "uuuuuuuu"
-access = "nnnnnnnn"
-implemented = 255
+por = "--xxxxxx"
+mclr = "--uuuuuu"
+access = "--nnnnnn"
+implemented = 63
 module = "DOS-02286_cla_clc_v5_8bit"
 
 [[sfr.fields]]
@@ -4288,10 +4288,10 @@ width = 8
 name = "CLC6SEL3"
 addr = 3678
 width = 8
-por = "xxxxxxxx"
-mclr = "uuuuuuuu"
-access = "nnnnnnnn"
-implemented = 255
+por = "--xxxxxx"
+mclr = "--uuuuuu"
+access = "--nnnnnn"
+implemented = 63
 module = "DOS-02286_cla_clc_v5_8bit"
 
 [[sfr.fields]]
@@ -4778,10 +4778,10 @@ width = 1
 name = "CLC7SEL0"
 addr = 3685
 width = 8
-por = "xxxxxxxx"
-mclr = "uuuuuuuu"
-access = "nnnnnnnn"
-implemented = 255
+por = "--xxxxxx"
+mclr = "--uuuuuu"
+access = "--nnnnnn"
+implemented = 63
 module = "DOS-02286_cla_clc_v5_8bit"
 
 [[sfr.fields]]
@@ -4798,10 +4798,10 @@ width = 8
 name = "CLC7SEL1"
 addr = 3686
 width = 8
-por = "xxxxxxxx"
-mclr = "uuuuuuuu"
-access = "nnnnnnnn"
-implemented = 255
+por = "--xxxxxx"
+mclr = "--uuuuuu"
+access = "--nnnnnn"
+implemented = 63
 module = "DOS-02286_cla_clc_v5_8bit"
 
 [[sfr.fields]]
@@ -4818,10 +4818,10 @@ width = 8
 name = "CLC7SEL2"
 addr = 3687
 width = 8
-por = "xxxxxxxx"
-mclr = "uuuuuuuu"
-access = "nnnnnnnn"
-implemented = 255
+por = "--xxxxxx"
+mclr = "--uuuuuu"
+access = "--nnnnnn"
+implemented = 63
 module = "DOS-02286_cla_clc_v5_8bit"
 
 [[sfr.fields]]
@@ -4838,10 +4838,10 @@ width = 8
 name = "CLC7SEL3"
 addr = 3688
 width = 8
-por = "xxxxxxxx"
-mclr = "uuuuuuuu"
-access = "nnnnnnnn"
-implemented = 255
+por = "--xxxxxx"
+mclr = "--uuuuuu"
+access = "--nnnnnn"
+implemented = 63
 module = "DOS-02286_cla_clc_v5_8bit"
 
 [[sfr.fields]]
@@ -5328,10 +5328,10 @@ width = 1
 name = "CLC8SEL0"
 addr = 3695
 width = 8
-por = "xxxxxxxx"
-mclr = "uuuuuuuu"
-access = "nnnnnnnn"
-implemented = 255
+por = "--xxxxxx"
+mclr = "--uuuuuu"
+access = "--nnnnnn"
+implemented = 63
 module = "DOS-02286_cla_clc_v5_8bit"
 
 [[sfr.fields]]
@@ -5348,10 +5348,10 @@ width = 8
 name = "CLC8SEL1"
 addr = 3696
 width = 8
-por = "xxxxxxxx"
-mclr = "uuuuuuuu"
-access = "nnnnnnnn"
-implemented = 255
+por = "--xxxxxx"
+mclr = "--uuuuuu"
+access = "--nnnnnn"
+implemented = 63
 module = "DOS-02286_cla_clc_v5_8bit"
 
 [[sfr.fields]]
@@ -5368,10 +5368,10 @@ width = 8
 name = "CLC8SEL2"
 addr = 3697
 width = 8
-por = "xxxxxxxx"
-mclr = "uuuuuuuu"
-access = "nnnnnnnn"
-implemented = 255
+por = "--xxxxxx"
+mclr = "--uuuuuu"
+access = "--nnnnnn"
+implemented = 63
 module = "DOS-02286_cla_clc_v5_8bit"
 
 [[sfr.fields]]
@@ -5388,10 +5388,10 @@ width = 8
 name = "CLC8SEL3"
 addr = 3698
 width = 8
-por = "xxxxxxxx"
-mclr = "uuuuuuuu"
-access = "nnnnnnnn"
-implemented = 255
+por = "--xxxxxx"
+mclr = "--uuuuuu"
+access = "--nnnnnn"
+implemented = 63
 module = "DOS-02286_cla_clc_v5_8bit"
 
 [[sfr.fields]]
@@ -12277,10 +12277,10 @@ width = 1
 name = "CLKRCLK"
 addr = 3898
 width = 8
-por = "-----000"
-mclr = "-----000"
-access = "-----nnn"
-implemented = 7
+por = "----0000"
+mclr = "----0000"
+access = "----nnnn"
+implemented = 15
 
 [[sfr.fields]]
 name = "CLK"
@@ -12327,10 +12327,10 @@ width = 1
 name = "CWG1ISM"
 addr = 3900
 width = 8
-por = "---00000"
-mclr = "---00000"
-access = "---nnnnn"
-implemented = 31
+por = "----0000"
+mclr = "----0000"
+access = "----nnnn"
+implemented = 15
 module = "DOS-02485_wg_cwg_v1_K40_8bit"
 
 [[sfr.fields]]
@@ -12612,10 +12612,10 @@ width = 1
 name = "CWG1AS1"
 addr = 3906
 width = 8
-por = "--000000"
-mclr = "--000000"
-access = "--nnnnnn"
-implemented = 63
+por = "00000000"
+mclr = "00000000"
+access = "nnnnnnnn"
+implemented = 255
 module = "DOS-02485_wg_cwg_v1_K40_8bit"
 
 [[sfr.fields]]
@@ -13102,10 +13102,10 @@ width = 1
 name = "SCANTRIG"
 addr = 3915
 width = 8
-por = "----0000"
-mclr = "----0000"
-access = "----nnnn"
-implemented = 15
+por = "---00000"
+mclr = "---00000"
+access = "---nnnnn"
+implemented = 31
 module = "DOS-02730_dma_nvm_v2_8bit"
 
 [[sfr.fields]]
@@ -13237,10 +13237,10 @@ width = 1
 name = "MDSRC"
 addr = 3918
 width = 8
-por = "----0000"
-mclr = "----0000"
-access = "----nnnn"
-implemented = 15
+por = "---00000"
+mclr = "---00000"
+access = "---nnnnn"
+implemented = 31
 module = "DOS-02566_txm_mod_v3_xxK40_8bit"
 
 [[sfr.fields]]
@@ -13272,10 +13272,10 @@ width = 4
 name = "MDCARL"
 addr = 3919
 width = 8
-por = "-----000"
-mclr = "-----000"
-access = "-----nnn"
-implemented = 7
+por = "----0000"
+mclr = "----0000"
+access = "----nnnn"
+implemented = 15
 module = "DOS-02566_txm_mod_v3_xxK40_8bit"
 
 [[sfr.fields]]
@@ -13292,10 +13292,10 @@ width = 3
 name = "MDCARH"
 addr = 3920
 width = 8
-por = "-----000"
-mclr = "-----000"
-access = "-----nnn"
-implemented = 7
+por = "----0000"
+mclr = "----0000"
+access = "----nnnn"
+implemented = 15
 module = "DOS-02566_txm_mod_v3_xxK40_8bit"
 
 [[sfr.fields]]
@@ -16974,10 +16974,10 @@ width = 1
 name = "CCP2CAP"
 addr = 4008
 width = 8
-por = "------00"
-mclr = "------00"
-access = "------nn"
-implemented = 3
+por = "----0000"
+mclr = "----0000"
+access = "----nnnn"
+implemented = 15
 module = "DOS-02493_ccp_v4"
 
 [[sfr.fields]]
@@ -17074,10 +17074,10 @@ width = 1
 name = "CCP1CAP"
 addr = 4012
 width = 8
-por = "------00"
-mclr = "------00"
-access = "------nn"
-implemented = 3
+por = "----0000"
+mclr = "----0000"
+access = "----nnnn"
+implemented = 15
 module = "DOS-02493_ccp_v4"
 
 [[sfr.fields]]
@@ -17290,10 +17290,10 @@ width = 1
 name = "T6CLKCON"
 addr = 4018
 width = 8
-por = "----0000"
-mclr = "----0000"
-access = "----nnnn"
-implemented = 15
+por = "---00000"
+mclr = "---00000"
+access = "---nnnnn"
+implemented = 31
 module = "DOS-02458_tmr_mid2_v1_PIC16F188xx"
 aliases = ["T6CLK"]
 
@@ -17493,10 +17493,10 @@ width = 1
 name = "T4CLKCON"
 addr = 4024
 width = 8
-por = "----0000"
-mclr = "----0000"
-access = "----nnnn"
-implemented = 15
+por = "---00000"
+mclr = "---00000"
+access = "---nnnnn"
+implemented = 31
 module = "DOS-02458_tmr_mid2_v1_PIC16F188xx"
 aliases = ["T4CLK"]
 
@@ -17696,10 +17696,10 @@ width = 1
 name = "T2CLKCON"
 addr = 4030
 width = 8
-por = "----0000"
-mclr = "----0000"
-access = "----nnnn"
-implemented = 15
+por = "---00000"
+mclr = "---00000"
+access = "---nnnnn"
+implemented = 31
 module = "DOS-02458_tmr_mid2_v1_PIC16F188xx"
 aliases = ["T2CLK"]
 

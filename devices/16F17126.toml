@@ -6812,10 +6812,10 @@ width = 1
 name = "CLCSELECT"
 addr = 1686
 width = 8
-por = "------00"
-mclr = "------00"
-access = "------nn"
-implemented = 3
+por = "----0000"
+mclr = "----0000"
+access = "----nnnn"
+implemented = 15
 module = "DOS-04189-cla_clc_v6_RevA1"
 
 [[sfr.fields]]
@@ -8346,7 +8346,7 @@ width = 8
 por = "0-0-0-00"
 mclr = "0-0-0-00"
 access = "n-n-n-nn"
-implemented = 168
+implemented = 171
 module = "DOS-04501_opamp_v7-KV00F"
 
 [[sfr.fields]]
@@ -8593,8 +8593,8 @@ width = 1
 name = "OPA1OFFSET"
 addr = 2321
 width = 8
-por = "00000000"
-mclr = "00000000"
+por = "mmmmmmmm"
+mclr = "mmmmmmmm"
 access = "nnnnnnnn"
 implemented = 255
 module = "DOS-04501_opamp_v7-KV00F"
