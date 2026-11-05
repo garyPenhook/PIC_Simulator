@@ -1003,7 +1003,7 @@ width = 8
 por = "xxxxxxxx"
 mclr = "uuuuuuuu"
 access = "nnnnnnnn"
-implemented = 192
+implemented = 255
 
 [[sfr.fields]]
 name = "RC0"

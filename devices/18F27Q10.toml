@@ -7726,7 +7726,7 @@ width = 8
 por = "11111111"
 mclr = "11111111"
 access = "--nn-nnn"
-implemented = 55
+implemented = 255
 
 [[sfr.fields]]
 name = "SSPIP"
@@ -8043,7 +8043,7 @@ width = 8
 por = "00000000"
 mclr = "00000000"
 access = "--nn--nn"
-implemented = 51
+implemented = 255
 
 [[sfr.fields]]
 name = "SSPIE"
@@ -9232,7 +9232,7 @@ width = 8
 por = "00x00000"
 mclr = "00u00000"
 access = "nnnnnnnn"
-implemented = 32
+implemented = 255
 module = "DOS-02264-pmd-mid8-v1-KFAE"
 
 [[sfr.fields]]
@@ -9327,7 +9327,7 @@ width = 8
 por = "-00--000"
 mclr = "-00--000"
 access = "-nn--nnn"
-implemented = 6
+implemented = 103
 module = "DOS-02264-pmd-mid8-v1-KFAE"
 
 [[sfr.fields]]
@@ -9362,7 +9362,7 @@ width = 8
 por = "00000000"
 mclr = "00000000"
 access = "nnnnnnnn"
-implemented = 15
+implemented = 255
 module = "DOS-02264-pmd-mid8-v1-KFAE"
 
 [[sfr.fields]]
@@ -9412,7 +9412,7 @@ width = 8
 por = "0000---0"
 mclr = "0000---0"
 access = "nnnn---n"
-implemented = 161
+implemented = 241
 module = "DOS-02264-pmd-mid8-v1-KFAE"
 
 [[sfr.fields]]
@@ -9452,7 +9452,7 @@ width = 8
 por = "0000---0"
 mclr = "0000---0"
 access = "nnnn---n"
-implemented = 1
+implemented = 241
 module = "DOS-02264-pmd-mid8-v1-KFAE"
 
 [[sfr.fields]]

@@ -1511,7 +1511,7 @@ width = 8
 por = "00000-00"
 mclr = "00000-00"
 access = "nnnnn-nn"
-implemented = 32
+implemented = 251
 module = "DOS-02264_pmd_mid8_v1-Q41"
 
 [[sfr.fields]]
@@ -1556,7 +1556,7 @@ width = 8
 por = "00000000"
 mclr = "00000000"
 access = "nnnnnnnn"
-implemented = 127
+implemented = 255
 module = "DOS-02264_pmd_mid8_v1-Q41"
 
 [[sfr.fields]]
@@ -1606,7 +1606,7 @@ width = 8
 por = "00000000"
 mclr = "00000000"
 access = "nnnnnnnn"
-implemented = 158
+implemented = 255
 module = "DOS-02264_pmd_mid8_v1-Q41"
 
 [[sfr.fields]]
@@ -1706,7 +1706,7 @@ width = 8
 por = "00000000"
 mclr = "00000000"
 access = "nnnnnnnn"
-implemented = 143
+implemented = 255
 module = "DOS-02264_pmd_mid8_v1-Q41"
 
 [[sfr.fields]]
@@ -1921,7 +1921,7 @@ width = 8
 por = "----0000"
 mclr = "----0000"
 access = "----nnnn"
-implemented = 0
+implemented = 15
 module = "DOS-02566_txm_mod_v3_generic"
 
 [[sfr.fields]]
@@ -2330,7 +2330,7 @@ width = 8
 por = "00000000"
 mclr = "00000000"
 access = "rrrrrrrr"
-implemented = 0
+implemented = 255
 module = "DOS-02448_wdt_windowed_v1_generic"
 
 [[sfr.fields]]
@@ -2350,7 +2350,7 @@ width = 8
 por = "00000000"
 mclr = "00000000"
 access = "rrrrrrrr"
-implemented = 0
+implemented = 255
 module = "DOS-02448_wdt_windowed_v1_generic"
 
 [[sfr.fields]]
@@ -2440,7 +2440,7 @@ width = 8
 por = "00000000"
 mclr = "00000000"
 access = "nnnnnnnn"
-implemented = 0
+implemented = 255
 module = "DOS-04058_dac_nbit_ctrl_v6"
 
 [[sfr.fields]]
@@ -3850,7 +3850,7 @@ width = 8
 por = "00000000"
 mclr = "00000000"
 access = "nnnnnnnn"
-implemented = 0
+implemented = 255
 module = "DOS-04058_dac_nbit_ctrl_v6"
 
 [[sfr.fields]]
@@ -4871,7 +4871,7 @@ width = 8
 por = "----0000"
 mclr = "----0000"
 access = "----nnnn"
-implemented = 0
+implemented = 15
 
 [[sfr.fields]]
 name = "CLC1OUT"
@@ -15015,7 +15015,7 @@ width = 8
 por = "00000000"
 mclr = "00000000"
 access = "rnnnnrnn"
-implemented = 223
+implemented = 255
 module = "DOS-xxxx_Interrupts_Q41_8bit"
 
 [[sfr.fields]]
@@ -15120,7 +15120,7 @@ width = 8
 por = "0000---0"
 mclr = "0000---0"
 access = "nnnn---n"
-implemented = 0
+implemented = 241
 module = "DOS-xxxx_Interrupts_Q41_8bit"
 
 [[sfr.fields]]
@@ -20722,7 +20722,7 @@ width = 8
 por = "00000000"
 mclr = "00000000"
 access = "rnnnnrnn"
-implemented = 223
+implemented = 255
 module = "DOS-xxxx_Interrupts_Q41_8bit"
 
 [[sfr.fields]]
@@ -20827,7 +20827,7 @@ width = 8
 por = "0000---0"
 mclr = "0000---0"
 access = "nnnn---n"
-implemented = 0
+implemented = 241
 module = "DOS-xxxx_Interrupts_Q41_8bit"
 
 [[sfr.fields]]
@@ -21232,7 +21232,7 @@ width = 8
 por = "00000000"
 mclr = "00000000"
 access = "rnnnnrnn"
-implemented = 223
+implemented = 255
 module = "DOS-xxxx_Interrupts_Q41_8bit"
 
 [[sfr.fields]]
@@ -21337,7 +21337,7 @@ width = 8
 por = "0000---0"
 mclr = "0000---0"
 access = "nnnn---n"
-implemented = 0
+implemented = 241
 module = "DOS-xxxx_Interrupts_Q41_8bit"
 
 [[sfr.fields]]

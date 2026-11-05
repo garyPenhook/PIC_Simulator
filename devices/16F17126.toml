@@ -1413,7 +1413,7 @@ width = 8
 por = "--xxxxxx"
 mclr = "--uuuuuu"
 access = "--nnnnnn"
-implemented = 0
+implemented = 63
 
 [[sfr.fields]]
 name = "RC0"
@@ -2409,7 +2409,7 @@ width = 8
 por = "00000000"
 mclr = "00000000"
 access = "rrrrrrrr"
-implemented = 0
+implemented = 255
 module = "DOS-04112_wdt_windowed_v3"
 
 [[sfr.fields]]
@@ -2429,7 +2429,7 @@ width = 8
 por = "00000000"
 mclr = "00000000"
 access = "rrrrrrrr"
-implemented = 0
+implemented = 255
 module = "DOS-04112_wdt_windowed_v3"
 
 [[sfr.fields]]

@@ -974,7 +974,7 @@ width = 8
 por = "--xxxxxx"
 mclr = "--uuuuuu"
 access = "--nnnnnn"
-implemented = 0
+implemented = 63
 
 [[sfr.fields]]
 name = "RC0"
