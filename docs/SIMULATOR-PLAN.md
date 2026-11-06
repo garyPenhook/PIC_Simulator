@@ -131,7 +131,7 @@ yet), PIC16 single vector with automatic context save. Vector addresses from `[v
 |---|---|---|
 | S0 | devdesc 0.2 (reset values, access, implemented mask, module), devgen, regenerated devices | `check-devices.sh` passes; compiler output byte-identical |
 | S1 | Crate skeleton, hex + sym loader, `Pic18Core` cycle exact, latch SFRs, halt detection, CLI dump | peripheral-free `tests/exec` programs match MDB (RAM and cycles) on 18F27Q10 and 18F16Q41 |
-| S2 | `Pic16ECore` | same on 16F17146, 16F13145, 16F18346, 16F15244 |
+| S2 | `Pic16ECore` | same on 16F17146, 16F13145, 16F18346, 16F15244. **Done for 16F17146** (core only, `pic16.rs`; matches MDB on the ten peripheral-free `exec_p16` programs, `docs/FACTS-SIM.md`); 16F13145, 16F18346, 16F15244 and 16F18056/76 still to run |
 | S3 | Interrupt controllers, timers, configuration words | `' cycles:` and ISR tests pass |
 | S4 | Ports, PPS, UART, ADC, stimulus file | `serial`, `adc`, `exec_pins` pass |
 | S5 | NVM/EEPROM, SPI, I2C, Q41 I2C host, DMA | `exec_rtcc`, DMA and I2C tests pass; `picsim.py`, `dma_sim.py` retired |

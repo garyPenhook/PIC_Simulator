@@ -26,6 +26,25 @@ impl Config {
         Config { fields }
     }
 
+    /// The same for a part whose configuration words are 14-bit words at word addresses (PIC16 enhanced mid-range):
+    /// the hex file holds word `a` in the bytes at `2a` (low) and `2a + 1` (high); a word the image does not
+    /// contain keeps the unprogrammed `default`.
+    pub fn decode_words(regs: &[ConfigRegister], image: &BTreeMap<u32, u8>) -> Config {
+        let mut fields = BTreeMap::new();
+        for r in regs {
+            let (lo, hi) = (image.get(&(2 * r.addr)), image.get(&(2 * r.addr + 1)));
+            let v = if lo.is_none() && hi.is_none() {
+                r.default
+            } else {
+                u32::from(lo.copied().unwrap_or(0xFF)) | u32::from(hi.copied().unwrap_or(0x3F)) << 8
+            };
+            for f in &r.fields {
+                fields.insert(f.name.clone(), (v >> f.pos) & ((1u32 << f.width) - 1));
+            }
+        }
+        Config { fields }
+    }
+
     pub fn get(&self, name: &str) -> Option<u32> {
         self.fields.get(name).copied()
     }

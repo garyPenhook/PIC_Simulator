@@ -49,6 +49,12 @@ fn run() -> Result<ExitCode, String> {
     }
     let hex = hex.ok_or("usage: basil-sim prog.hex --device PART [--asm prog.S] [--until SYM] [--dump A,B:2]")?;
     let dev = devdesc::Device::load(&root.join(format!("{device}.toml"))).map_err(|e| e.to_string())?;
+    if dev.device.family == "pic16e" {
+        if stim.is_some() || show_cfg {
+            return Err("--stim and --config are not supported for PIC16 parts yet (no peripherals are modelled)".into());
+        }
+        return run16(dev, &hex, asm, until, &dump, max, trace, &bps, bp_max);
+    }
     let mut m = Machine::new(dev)?;
     let given = hex.clone();
     let hex = picsim::lines::program_hex(&hex)?;
@@ -194,6 +200,73 @@ fn run() -> Result<ExitCode, String> {
     }
     if !m.cpu.m.unmodelled.is_empty() {
         eprintln!("note: unmodelled SFRs touched: {}", m.cpu.m.unmodelled.iter().cloned().collect::<Vec<_>>().join(" "));
+    }
+    Ok(if stop == Stop::Halt || until.is_none() { ExitCode::SUCCESS } else { ExitCode::from(1) })
+}
+
+/// The PIC16 enhanced mid-range path: the core only, no peripherals (milestone S2 of docs/SIMULATOR-PLAN.md).
+#[allow(clippy::too_many_arguments)]
+fn run16(
+    dev: devdesc::Device,
+    hex: &std::path::Path,
+    asm: Option<PathBuf>,
+    until: Option<String>,
+    dump: &[String],
+    max: u64,
+    trace: Option<(u64, u64)>,
+    bps: &[String],
+    bp_max: usize,
+) -> Result<ExitCode, String> {
+    let mut m = picsim::machine16::Machine16::new(dev)?;
+    let hex = picsim::lines::program_hex(hex)?;
+    m.load_hex(&std::fs::read_to_string(&hex).map_err(|e| format!("{}: {e}", hex.display()))?)?;
+    let asm = asm.unwrap_or_else(|| hex.with_extension("S"));
+    if let Ok(t) = std::fs::read_to_string(&asm) {
+        m.load_symbols_from_asm(&t);
+    }
+    let stop_at = match &until {
+        Some(s) => Some(*m.syms.get(s).ok_or(format!("symbol {s} not found (no {})", asm.display()))?),
+        None => None,
+    };
+    if let Some((from, to)) = trace {
+        m.run(None, from);
+        while m.cpu.cycles < to {
+            let pc = m.cpu.pc;
+            let c0 = m.cpu.cycles;
+            let text = picsim::pic16::disasm(m.cpu.fetch(pc));
+            m.cpu.step();
+            println!("{:>8} {:04X}  {:<28} +{}  W={:02X} STATUS={:02X}", c0, pc, text, m.cpu.cycles - c0, m.cpu.mem[9], m.cpu.mem[3]);
+        }
+        return Ok(ExitCode::SUCCESS);
+    }
+    for b in bps {
+        m.breakpoints.push(*m.syms.get(b).ok_or(format!("symbol {b} not found"))?);
+    }
+    let mut stop = m.run(stop_at, max);
+    let mut n = 0;
+    while let Stop::Breakpoint(pc) = stop {
+        n += 1;
+        let name = m.syms.iter().find(|(_, v)| **v == pc).map_or("?", |(k, _)| k.as_str());
+        println!("bp {n} {name} cycles {} tos {:#06X}", m.cpu.cycles, m.cpu.tos());
+        if n >= bp_max {
+            break;
+        }
+        let left = max.saturating_sub(m.cpu.cycles);
+        stop = m.run(stop_at, left);
+    }
+    println!("stop: {stop:?}  cycles: {}  instructions: {}", m.cpu.cycles, m.cpu.icount);
+    for d in dump {
+        let (name, len) = d.split_once(':').map_or((d.as_str(), 1), |(n, l)| (n, l.parse().unwrap_or(1)));
+        let addr = m.syms.get(name).copied().or_else(|| m.dev.find_sfr(name).map(|s| s.addr)).ok_or(format!("unknown symbol {name}"))?;
+        let b = m.peek(addr, len);
+        let v: u64 = b.iter().rev().fold(0, |a, x| a << 8 | u64::from(*x));
+        println!("{name} = {v}  ({})", b.iter().map(|x| format!("{x:02X}")).collect::<Vec<_>>().join(" "));
+    }
+    for n in &m.cpu.notes {
+        eprintln!("note: {n}");
+    }
+    if !m.cpu.unmodelled.is_empty() {
+        eprintln!("note: unmodelled SFRs touched: {}", m.cpu.unmodelled.iter().cloned().collect::<Vec<_>>().join(" "));
     }
     Ok(if stop == Stop::Halt || until.is_none() { ExitCode::SUCCESS } else { ExitCode::from(1) })
 }

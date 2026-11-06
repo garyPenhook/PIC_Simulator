@@ -104,23 +104,7 @@ impl Machine {
     /// Symbols from the assembly listing basil writes next to the hex: `;SYM name 0xADDR` for code labels and
     /// `name equ 0xADDR` for variables.
     pub fn load_symbols_from_asm(&mut self, asm: &str) {
-        for l in asm.lines() {
-            if let Some(r) = l.strip_prefix(";SYM ") {
-                let mut it = r.split_whitespace();
-                if let (Some(n), Some(a)) = (it.next(), it.next())
-                    && let Some(v) = a.strip_prefix("0x").and_then(|h| u32::from_str_radix(h, 16).ok())
-                {
-                    self.syms.insert(n.to_string(), v);
-                }
-            } else {
-                let mut it = l.split_whitespace();
-                if let (Some(n), Some("equ"), Some(a)) = (it.next(), it.next(), it.next())
-                    && let Some(v) = a.strip_prefix("0x").and_then(|h| u32::from_str_radix(h, 16).ok())
-                {
-                    self.syms.insert(n.to_string(), v);
-                }
-            }
-        }
+        self.syms.extend(parse_asm_symbols(asm));
     }
 
     /// Hardware stack depth (STKPTR).
@@ -205,4 +189,28 @@ impl Machine {
     pub fn peek(&self, addr: u32, len: usize) -> Vec<u8> {
         (0..len).map(|i| self.cpu.peek(addr + i as u32)).collect()
     }
+}
+
+/// The symbols of an assembly listing basil writes: `;SYM name 0xADDR` for code labels and `name equ 0xADDR` for variables.
+pub fn parse_asm_symbols(asm: &str) -> Vec<(String, u32)> {
+    let hex = |a: &str| a.strip_prefix("0x").and_then(|h| u32::from_str_radix(h, 16).ok());
+    let mut out = Vec::new();
+    for l in asm.lines() {
+        if let Some(r) = l.strip_prefix(";SYM ") {
+            let mut it = r.split_whitespace();
+            if let (Some(n), Some(a)) = (it.next(), it.next())
+                && let Some(v) = hex(a)
+            {
+                out.push((n.to_string(), v));
+            }
+        } else {
+            let mut it = l.split_whitespace();
+            if let (Some(n), Some("equ"), Some(a)) = (it.next(), it.next(), it.next())
+                && let Some(v) = hex(a)
+            {
+                out.push((n.to_string(), v));
+            }
+        }
+    }
+    out
 }

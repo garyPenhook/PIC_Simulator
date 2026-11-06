@@ -6,8 +6,10 @@ pub mod disasm;
 pub mod hex;
 pub mod lines;
 pub mod machine;
+pub mod machine16;
 pub mod mem;
 pub mod periph;
+pub mod pic16;
 pub mod pic18;
 pub mod stimulus;
 
