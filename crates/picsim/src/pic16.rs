@@ -118,6 +118,9 @@ pub struct Pic16 {
     sleeping: bool,
     /// The instruction after SLEEP always runs before an interrupt is taken (12.7 p.113).
     no_irq: bool,
+    /// TMRxIF-style request (PIE & PIR) at the start of the previous step: a request that was not yet there then
+    /// arrived while the program was running (`[A108]`).
+    flag_prev: bool,
     stk_fault: Option<Reset>,
     /// A reset requested by the instruction that is executing, done at its end.
     reset_req: Option<Reset>,
@@ -212,6 +215,7 @@ impl Pic16 {
             vector: dev.vectors.interrupt_high,
             sleeping: false,
             no_irq: false,
+            flag_prev: false,
             stk_fault: None,
             reset_req: None,
             extra: 0,
@@ -866,6 +870,7 @@ impl Pic16 {
         self.pc = self.reset_vector;
         self.sleeping = false;
         self.no_irq = false;
+        self.flag_prev = false;
         self.stk_fault = None;
         self.reset_req = None;
     }
@@ -946,22 +951,44 @@ impl Pic16 {
                 return 1;
             }
         }
-        if !self.interrupt() {
-            self.no_irq = false;
-            let w = self.fetch(self.pc);
-            self.pc = self.inc_pc(self.pc);
-            self.cycles += 1;
-            self.icount += 1;
-            self.extra = 0;
-            self.flash_cycle = false;
-            self.exec(w);
-            self.cycles += self.extra + u64::from(self.flash_cycle);
+        // [A108] A request that arrived while the program was running lets the instruction already fetched at the
+        // return address finish; the PC stacked is the one after it, and the vector is reached 3 cycles after that
+        // instruction started (MDB; Fig. 12-2 p.112 shows the fetched instruction executing before the two NOPs).
+        // A request that was already pending (GIE just set by BSF or RETFIE) is taken at once.
+        let pending = self.enabled_flag();
+        let fresh = !self.flag_prev && pending;
+        self.flag_prev = pending;
+        if fresh && self.mem[self.a_intcon] & 0x80 != 0 && !self.no_irq {
+            self.run_one();
+            self.sync_timers();
+            let len = self.cycles - start; // 1 or 2 (a longer one is counted as 2)
+            // The vector is 3 cycles after that instruction started: 2 cycles of entry after a 1-cycle instruction,
+            // 1 after a 2-cycle one. interrupt() adds the 2; take one back for the longer instruction.
+            let ran = self.reset_req.is_none() && self.stk_fault.is_none() && self.interrupt();
+            if ran && len >= 2 {
+                self.cycles -= 1;
+            }
+        } else if !self.interrupt() {
+            self.run_one();
         }
         self.sync_timers();
         if let Some(k) = self.stk_fault.or(self.reset_req) {
             self.do_reset(k);
         }
         (self.cycles - start) as u32
+    }
+
+    /// Fetch and execute one instruction.
+    fn run_one(&mut self) {
+        self.no_irq = false;
+        let w = self.fetch(self.pc);
+        self.pc = self.inc_pc(self.pc);
+        self.cycles += 1;
+        self.icount += 1;
+        self.extra = 0;
+        self.flash_cycle = false;
+        self.exec(w);
+        self.cycles += self.extra + u64::from(self.flash_cycle);
     }
 
     fn skip(&mut self) {
