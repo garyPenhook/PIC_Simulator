@@ -4,8 +4,8 @@
 //!
 //! Cycle counts are the data sheet's (p.591): 1; 2 for CALL, CALLW, RETURN, RETLW, RETFIE, GOTO, BRA, BRW, a taken
 //! skip and a write to PCL; +1 when an instruction reaches program flash through an INDFn register.
-//! There are no peripherals yet (milestone S3/S4): their registers are plain storage and `unmodelled` lists the ones
-//! a program touched. The facts the core relies on, with their pages, are in `docs/FACTS-SIM.md` (PIC16 core).
+//! Of the peripherals only Timer0 exists (milestone S3/S4): the other registers are plain storage and `unmodelled` lists
+//! the ones a program touched. The facts the core relies on, with their pages, are in `docs/FACTS-SIM.md` (PIC16 core).
 
 use crate::config::Config;
 use devdesc::Device;
@@ -21,6 +21,21 @@ pub const NTO: u8 = 16;
 const MEM: usize = 0x2000;
 /// An empty stack: STKPTR resets to 1Fh (DS40002343F Fig. 9-14 p.53).
 const EMPTY: u8 = 0x1F;
+
+/// Timer0 (DS40002343F ch.22 p.244-249; same behaviour as the PIC18 model in `periph.rs`): Fosc/4 clock only.
+/// 8-bit mode compares TMR0L with the live TMR0H and goes to 0 on the next clock; 16-bit mode rolls over at FFFFh and
+/// buffers TMR0H; prescaler and postscaler are cleared by a write to TMR0L, T0CON0 or T0CON1 `[A106]`.
+struct Timer0 {
+    l: usize,
+    h: usize,
+    c0: usize,
+    c1: usize,
+    flag: (usize, u8),
+    cnt: u16,
+    pre: u64,
+    post: u8,
+    last: u64,
+}
 
 /// Where an access made through a file-register operand or an FSR ends up.
 #[derive(Clone, Copy, Debug)]
@@ -95,6 +110,7 @@ pub struct Pic16 {
     /// MCLR-column reset values: register address, bits set, bits cleared.
     mclr: Vec<(usize, u8, u8)>,
     reset_vector: u32,
+    t0: Option<Timer0>,
 }
 
 fn por_bits(s: &str) -> u8 {
@@ -178,6 +194,7 @@ impl Pic16 {
             irq: Vec::new(),
             mclr: Vec::new(),
             reset_vector: dev.vectors.reset,
+            t0: None,
         };
         for g in &d.gpr {
             for a in g.start..g.end {
@@ -243,6 +260,20 @@ impl Pic16 {
                 p.irq.push((r.addr as usize, e.addr as usize));
                 p.core[r.addr as usize] = true;
                 p.core[e.addr as usize] = true;
+            }
+        }
+        if let (Some(l), Some(h), Some(c0), Some(c1)) = (dev.find_sfr("TMR0L"), dev.find_sfr("TMR0H"), dev.find_sfr("T0CON0"), dev.find_sfr("T0CON1")) {
+            let flag = dev
+                .sfr
+                .iter()
+                .filter(|s| s.name.starts_with("PIR"))
+                .find_map(|s| s.fields.iter().chain(s.legacy.iter()).find(|f| f.name == "TMR0IF").map(|f| (s.addr as usize, 1u8 << f.pos)));
+            if let Some(flag) = flag {
+                let (l, h, c0, c1) = (l.addr as usize, h.addr as usize, c0.addr as usize, c1.addr as usize);
+                for a in [l, h, c0, c1] {
+                    p.core[a] = true;
+                }
+                p.t0 = Some(Timer0 { l, h, c0, c1, flag, cnt: 0, pre: 0, post: 0, last: 0 });
             }
         }
         if p.irq.is_empty() || p.implemented[p.a_bsr] != 0x3F {
@@ -360,6 +391,17 @@ impl Pic16 {
             }
             Tgt::Mem(a) => {
                 self.note(a);
+                if self.t0.as_ref().is_some_and(|t| a == t.l || a == t.c0) {
+                    self.sync_t0();
+                    let t = self.t0.as_ref().unwrap();
+                    if a == t.l {
+                        if self.mem[t.c0] & 0x10 != 0 {
+                            self.mem[t.h] = (t.cnt >> 8) as u8;
+                        }
+                        return t.cnt as u8;
+                    }
+                    return self.mem[a];
+                }
                 if a == 2 {
                     self.pc as u8
                 } else if a == self.a_tos || a == self.a_tos + 1 {
@@ -394,10 +436,75 @@ impl Pic16 {
                         let s = 8 * (a - self.a_tos);
                         self.stack[i] = (self.stack[i] & !(0xFF << s) | u16::from(v) << s) & 0x7FFF;
                     }
+                } else if self.t0.as_ref().is_some_and(|t| [t.l, t.h, t.c0, t.c1].contains(&a)) {
+                    self.write_t0(a, v & self.implemented[a]);
                 } else {
                     self.mem[a] = v & self.implemented[a];
                 }
             }
+        }
+    }
+
+    /// Bring Timer0 to the current cycle: the clock ticks of cycles `last+1 ..= cycles`.
+    fn sync_t0(&mut self) {
+        let now = self.cycles;
+        let Some(t) = self.t0.as_mut() else { return };
+        let dt = now.saturating_sub(t.last);
+        t.last = now;
+        let (c0, c1) = (self.mem[t.c0], self.mem[t.c1]);
+        if c0 & 0x80 == 0 || dt == 0 {
+            return;
+        }
+        if c1 >> 5 != 2 {
+            self.notes.insert(format!("Timer0 clock source CS={} is not modelled (only Fosc/4 is); it does not count", c1 >> 5));
+            return;
+        }
+        let sh = u32::from(c1 & 15);
+        let total = t.pre + dt;
+        t.pre = total & ((1u64 << sh) - 1);
+        for _ in 0..total >> sh {
+            let wrap = if c0 & 0x10 != 0 {
+                t.cnt = t.cnt.wrapping_add(1);
+                t.cnt == 0
+            } else if t.cnt as u8 == self.mem[t.h] {
+                t.cnt = 0;
+                true
+            } else {
+                t.cnt += 1;
+                false
+            };
+            if wrap {
+                if t.post >= c0 & 15 {
+                    t.post = 0;
+                    self.mem[t.c0] ^= 0x20; // T0OUT toggles
+                    self.mem[t.flag.0] |= t.flag.1;
+                } else {
+                    t.post += 1;
+                }
+            }
+        }
+        self.mem[t.l] = t.cnt as u8;
+    }
+
+    /// A write to a Timer0 register takes effect after the cycle of the writing instruction `[A2]`.
+    fn write_t0(&mut self, a: usize, v: u8) {
+        self.sync_t0();
+        let t = self.t0.as_mut().unwrap();
+        if a == t.l {
+            t.pre = 0;
+            t.post = 0;
+            t.cnt = if self.mem[t.c0] & 0x10 != 0 { u16::from(self.mem[t.h]) << 8 | u16::from(v) } else { u16::from(v) };
+            self.mem[a] = v;
+        } else if a == t.h {
+            self.mem[a] = v;
+        } else if a == t.c0 {
+            t.pre = 0;
+            t.post = 0;
+            self.mem[a] = v & !0x20 | self.mem[a] & 0x20; // T0OUT is read only
+        } else {
+            t.pre = 0;
+            t.post = 0;
+            self.mem[a] = v;
         }
     }
 
@@ -514,6 +621,10 @@ impl Pic16 {
             self.mem[a] = (self.mem[a] & !clr | set) & self.implemented[a];
         }
         self.mem[self.a_stkptr] = EMPTY;
+        if let Some(t) = self.t0.as_mut() {
+            (t.cnt, t.pre, t.post, t.last) = (0, 0, 0, self.cycles);
+            self.mem[t.l] = 0;
+        }
         self.pc = self.reset_vector;
         self.sleeping = false;
         self.no_irq = false;
@@ -593,6 +704,9 @@ impl Pic16 {
                 self.no_irq = true; // the instruction after SLEEP runs first
             } else {
                 self.cycles += 1;
+                if let Some(t) = self.t0.as_mut() {
+                    t.last = self.cycles; // Fosc/4 does not run in Sleep
+                }
                 return 1;
             }
         }
@@ -607,6 +721,7 @@ impl Pic16 {
             self.exec(w);
             self.cycles += self.extra + u64::from(self.flash_cycle);
         }
+        self.sync_t0();
         if let Some(k) = self.stk_fault.or(self.reset_req) {
             self.do_reset(k);
         }

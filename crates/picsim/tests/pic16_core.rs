@@ -446,3 +446,72 @@ fn new_devices_and_the_parts_the_core_refuses() {
     let dev = Device::load(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../../devices/16F18346.toml")).unwrap();
     assert!(Machine16::new(dev).is_err());
 }
+
+// ----- Timer0 (DS40002343F ch.22 p.244-249) ---------------------------------------------------------------------
+
+fn t0(m: &mut Machine16, con0: u8, con1: u8, h: u8) {
+    poke(m, "T0CON1", con1);
+    poke(m, "TMR0H", h);
+    poke(m, "T0CON0", con0);
+}
+
+#[test]
+fn timer0_8bit_period_is_tmr0h_plus_one_clocks() {
+    let mut m = machine(&[NOP; 16], &[], true);
+    t0(&mut m, 0x80, 0x40, 3); // EN, 8-bit, Fosc/4, 1:1, period 4
+    run(&mut m, 3);
+    assert_eq!((sfr(&m, "PIR0") & 0x20, sfr(&m, "TMR0L")), (0, 3));
+    run(&mut m, 1);
+    assert_eq!((sfr(&m, "PIR0") & 0x20, sfr(&m, "TMR0L"), sfr(&m, "T0CON0") & 0x20), (0x20, 0, 0x20)); // flag, back to 0, OUT toggled
+    // prescaler 1:4 and postscaler 1:2: a flag every 2 x 4 x 4 cycles
+    let mut m = machine(&[NOP; 40], &[], true);
+    t0(&mut m, 0x81, 0x42, 3);
+    run(&mut m, 31);
+    assert_eq!(sfr(&m, "PIR0") & 0x20, 0);
+    run(&mut m, 1);
+    assert_eq!(sfr(&m, "PIR0") & 0x20, 0x20);
+}
+
+#[test]
+fn timer0_16bit_rolls_over_and_buffers_tmr0h() {
+    // TMR0H = FFh, TMR0L = FEh through the registers; MD16 buffers TMR0H on a TMR0L write and read
+    let prog = [movlb(3), movlw(0xFF), movwf(0x1D), movlw(0xFE), movwf(0x1C), NOP, NOP, NOP, movf(0x1C, 0)];
+    let mut m = machine(&prog, &[], true);
+    poke(&mut m, "T0CON1", 0x40);
+    poke(&mut m, "T0CON0", 0x90); // EN, 16-bit
+    run(&mut m, 5); // TMR0L written: count = FFFEh, counting starts after that instruction
+    assert_eq!((sfr(&m, "TMR0L"), sfr(&m, "PIR0") & 0x20), (0xFE, 0));
+    run(&mut m, 2);
+    assert_eq!(sfr(&m, "PIR0") & 0x20, 0x20); // FFFF, then 0000: roll-over
+    run(&mut m, 2); // NOP; MOVF TMR0L,W reads 02h (count through the reading cycle) and loads TMR0H with the high byte
+    assert_eq!((m.cpu.mem[W], sfr(&m, "TMR0H")), (2, 0));
+}
+
+#[test]
+fn timer0_interrupt_enters_the_vector() {
+    let mut m = machine(&[NOP; 8], &[NOP], true);
+    t0(&mut m, 0x80, 0x40, 1); // period 2
+    poke(&mut m, "PIE0", 0x20);
+    poke(&mut m, "INTCON", 0x80);
+    run(&mut m, 2); // flag set at the end of the second NOP
+    assert_eq!(m.cpu.pc, 2);
+    let c = m.cpu.cycles;
+    m.cpu.step();
+    assert_eq!((m.cpu.pc, m.cpu.cycles - c), (4, 2));
+}
+
+#[test]
+fn timer0_stops_in_sleep_and_other_clocks_are_noted() {
+    let mut m = machine(&[SLEEP, NOP], &[], true);
+    t0(&mut m, 0x80, 0x40, 0xFF);
+    run(&mut m, 1);
+    let n = sfr(&m, "TMR0L");
+    for _ in 0..20 {
+        m.cpu.step();
+    }
+    assert_eq!(sfr(&m, "TMR0L"), n); // Fosc/4 does not run in Sleep
+    let mut m = machine(&[NOP, NOP], &[], true);
+    t0(&mut m, 0x80, 0xA0, 0xFF); // MFINTOSC
+    run(&mut m, 2);
+    assert!(m.cpu.notes.iter().any(|n| n.contains("Timer0")));
+}
