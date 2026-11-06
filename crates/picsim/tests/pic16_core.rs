@@ -496,8 +496,88 @@ fn timer0_interrupt_enters_the_vector() {
     run(&mut m, 2); // flag set at the end of the second NOP
     assert_eq!(m.cpu.pc, 2);
     let c = m.cpu.cycles;
+    m.cpu.step(); // [A108] the NOP already fetched runs first, then the entry: one step, as MDB's STEPI
+    assert_eq!((m.cpu.pc, m.cpu.cycles - c, m.cpu.tos()), (4, 3, 3));
+}
+
+#[test]
+fn a_request_made_pending_by_software_is_taken_at_once() {
+    // [A104] MDB (tests/probe/sw_pending.S): BSF PIR0 or BSF PIE0 with GIE set enters right after the BSF
+    for (pir, pie) in [(0x0C, 0x16), (0x16, 0x0C)] {
+        let prog = [movlb(1), bsf(pie, 5), bsf(0x0B, 7), bsf(pir, 5), NOP, NOP];
+        let mut m = machine(&prog, &[NOP], true);
+        run(&mut m, 4);
+        let c = m.cpu.cycles;
+        m.cpu.step();
+        assert_eq!((m.cpu.pc, m.cpu.cycles - c, m.cpu.tos()), (4, 2, 4));
+    }
+}
+
+#[test]
+fn a_flag_cleared_and_set_again_in_one_step_is_a_fresh_request() {
+    // Woken from Sleep with GIE set, the instruction after SLEEP (BCF PIR0,TMR0IF) runs first (13.2.2 p.139) and
+    // clears the flag; Timer0 (period 1) sets it again at the end of that step. That is a fresh request ([A108]):
+    // the NOP after it runs before the entry, so the stacked PC is the one after the NOP.
+    let bcf_tmr0if = 0x1000 | 5 << 7 | 0x0C;
+    let mut m = machine(&[movlb(1), SLEEP, bcf_tmr0if, NOP], &[NOP], true);
+    t0(&mut m, 0x80, 0x40, 0);
+    run(&mut m, 2);
+    poke(&mut m, "PIE0", 0x20);
+    poke(&mut m, "PIR0", 0x20);
+    poke(&mut m, "INTCON", 0x80);
+    m.cpu.step(); // wakes and runs the BCF
+    assert_eq!(m.cpu.pc, 3);
+    let c = m.cpu.cycles;
+    m.cpu.step(); // the NOP already fetched, then the entry
+    assert_eq!((m.cpu.pc, m.cpu.cycles - c, m.cpu.tos()), (4, 3, 4));
+}
+
+#[test]
+fn a_breakpoint_at_the_stacked_pc_is_not_hit_before_the_entry() {
+    // MDB (tests/probe/int_first.S, CHAIN=1 PERIOD=10): with breakpoints at the stacked PC and at the vector, the
+    // vector is hit first
+    let mut m = machine(&[NOP; 8], &[NOP], true);
+    t0(&mut m, 0x80, 0x40, 1); // period 2: the flag is set at the end of the second NOP
+    poke(&mut m, "PIE0", 0x20);
+    poke(&mut m, "INTCON", 0x80);
+    m.breakpoints.extend([3, 4]);
+    assert_eq!(m.run(None, 100), picsim::Stop::Breakpoint(4));
+    assert_eq!((m.cpu.tos(), m.cpu.cycles), (3, 5));
+}
+
+#[test]
+fn sleep_fetched_as_a_request_arrives_executes_as_a_nop() {
+    // 13.2.2 p.139: an enabled flag set before SLEEP executes makes it a NOP (TO, PD unchanged). MDB, SLEEP as the
+    // instruction already fetched when TMR0IF rises with GIE set: vector 3 cycles after SLEEP started, PD = 1.
+    let mut m = machine(&[NOP, NOP, SLEEP, NOP], &[NOP], true);
+    t0(&mut m, 0x80, 0x40, 1); // the flag is set at the end of the second NOP
+    poke(&mut m, "PIE0", 0x20);
+    poke(&mut m, "INTCON", 0x80);
+    run(&mut m, 2);
+    let c = m.cpu.cycles;
     m.cpu.step();
-    assert_eq!((m.cpu.pc, m.cpu.cycles - c), (4, 2));
+    assert_eq!((m.cpu.pc, m.cpu.cycles - c, m.cpu.tos(), sfr(&m, "STATUS") & 0x18), (4, 3, 3, 0x18));
+    m.cpu.step(); // runs the ISR: the part is not asleep
+    assert_eq!(m.cpu.pc, 5);
+    // with GIE clear the same holds, and execution goes on after SLEEP
+    let mut m = machine(&[SLEEP, NOP], &[], true);
+    poke(&mut m, "PIE0", 0x20);
+    poke(&mut m, "PIR0", 0x20);
+    m.cpu.step();
+    assert!(!m.cpu.sleep_dead());
+    assert_eq!((sfr(&m, "STATUS") & 0x18, m.cpu.step(), m.cpu.pc), (0x18, 1, 2));
+}
+
+#[test]
+fn a_fresh_request_whose_instruction_clears_gie_is_dropped() {
+    let bcf_gie = 0x1000 | 7 << 7 | 0x0B;
+    let mut m = machine(&[NOP, NOP, bcf_gie, NOP], &[NOP], true);
+    t0(&mut m, 0x80, 0x40, 1);
+    poke(&mut m, "PIE0", 0x20);
+    poke(&mut m, "INTCON", 0x80);
+    run(&mut m, 2);
+    m.cpu.step(); // BCF INTCON,GIE: no entry follows
+    assert_eq!((m.cpu.pc, m.cpu.depth(), sfr(&m, "PIR0") & 0x20), (3, 0, 0x20));
 }
 
 #[test]
@@ -631,8 +711,8 @@ fn timer2_interrupt_and_reset() {
     run(&mut m, 2);
     assert_eq!(m.cpu.pc, 2);
     let c = m.cpu.cycles;
-    m.cpu.step();
-    assert_eq!((m.cpu.pc, m.cpu.cycles - c), (4, 2));
+    m.cpu.step(); // [A108] the NOP already fetched, then the entry
+    assert_eq!((m.cpu.pc, m.cpu.cycles - c, m.cpu.tos()), (4, 3, 3));
     // RESET: Timer2 clears T2TMR (MCLR column 0), Timer1 keeps its count (u)
     let prog = [movlb(6), movlw(5), movwf(0x0C), movlb(7), movwf(0x0C), RESET];
     let mut m = machine(&prog, &[], true);

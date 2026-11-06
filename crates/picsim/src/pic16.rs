@@ -118,9 +118,10 @@ pub struct Pic16 {
     sleeping: bool,
     /// The instruction after SLEEP always runs before an interrupt is taken (12.7 p.113).
     no_irq: bool,
-    /// TMRxIF-style request (PIE & PIR) at the start of the previous step: a request that was not yet there then
-    /// arrived while the program was running (`[A108]`).
-    flag_prev: bool,
+    /// A peripheral set a flag that made a request (PIE & PIR, PEIE for the other groups) pending since the previous
+    /// step began (`raise_flag`): the request arrived while the program was running (`[A108]`). A request made pending
+    /// by software (a PIE, PIR or PEIE write) does not set it and is taken at once (`[A104]`).
+    irq_new: bool,
     stk_fault: Option<Reset>,
     /// A reset requested by the instruction that is executing, done at its end.
     reset_req: Option<Reset>,
@@ -215,7 +216,7 @@ impl Pic16 {
             vector: dev.vectors.interrupt_high,
             sleeping: false,
             no_irq: false,
-            flag_prev: false,
+            irq_new: false,
             stk_fault: None,
             reset_req: None,
             extra: 0,
@@ -527,6 +528,7 @@ impl Pic16 {
             return;
         }
         let sh = u32::from(c1 & 15);
+        let mut raised = false;
         let total = t.pre + dt;
         t.pre = total & ((1u64 << sh) - 1);
         for _ in 0..total >> sh {
@@ -544,13 +546,17 @@ impl Pic16 {
                 if t.post >= c0 & 15 {
                     t.post = 0;
                     self.mem[t.c0] ^= 0x20; // T0OUT toggles
-                    self.mem[t.flag.0] |= t.flag.1;
+                    raised = true;
                 } else {
                     t.post += 1;
                 }
             }
         }
         self.mem[t.l] = t.cnt as u8;
+        let f = t.flag;
+        if raised {
+            self.raise_flag(f);
+        }
     }
 
     /// Bring every timer to the current cycle.
@@ -561,6 +567,20 @@ impl Pic16 {
         }
         for i in 0..self.t2.len() {
             self.sync_t2(i);
+        }
+    }
+
+    /// A peripheral sets interrupt flag `(register, bit)`. Every peripheral sets its flag through here: a flag that
+    /// makes a request pending is a request arriving while the program runs (`irq_new`, `[A108]`), also when software
+    /// cleared it earlier in the same step.
+    fn raise_flag(&mut self, (r, b): (usize, u8)) {
+        if self.mem[r] & b != 0 {
+            return;
+        }
+        let before = self.enabled_flag();
+        self.mem[r] |= b;
+        if !before && self.enabled_flag() {
+            self.irq_new = true;
         }
     }
 
@@ -585,6 +605,7 @@ impl Pic16 {
         let dt = now.saturating_sub(t.last);
         t.last = now;
         let (con, cs) = (self.mem[t.con], self.mem[t.clk] & 0x1F);
+        let mut raised = false;
         'run: {
             if con & 1 == 0 || dt == 0 {
                 break 'run;
@@ -601,15 +622,17 @@ impl Pic16 {
             let total = t.pre + if cs == 2 { 4 * dt } else { dt };
             t.pre = total & ((1u64 << sh) - 1);
             let sum = u64::from(t.cnt) + (total >> sh);
-            if sum >= 0x10000 {
-                self.mem[t.flag.0] |= t.flag.1;
-            }
+            raised = sum >= 0x10000;
             t.cnt = sum as u16;
         }
         if con & 2 == 0 {
             self.mem[t.h] = (t.cnt >> 8) as u8;
         }
         self.mem[t.l] = t.cnt as u8;
+        let f = t.flag;
+        if raised {
+            self.raise_flag(f);
+        }
     }
 
     /// Timer2-type timer `i`: the clock ticks of cycles `last+1 ..= cycles`.
@@ -619,6 +642,7 @@ impl Pic16 {
         let dt = now.saturating_sub(t.last);
         t.last = now;
         let con = self.mem[t.con];
+        let mut raised = false;
         if con & 0x80 != 0 && dt > 0 {
             let cs = self.mem[t.clk] & 15;
             let mode = self.mem[t.hlt] & 0x1F;
@@ -649,12 +673,12 @@ impl Pic16 {
                             self.mem[t.con] &= 0x7F; // the match stops the timer (24.1.2)
                             t.pre = 0;
                             t.post = 0;
-                            self.mem[t.flag.0] |= t.flag.1;
+                            raised = true;
                             break;
                         }
                         if t.post >= outps {
                             t.post = 0;
-                            self.mem[t.flag.0] |= t.flag.1;
+                            raised = true;
                         } else {
                             t.post += 1;
                         }
@@ -665,6 +689,10 @@ impl Pic16 {
             }
         }
         self.mem[t.tmr] = t.cnt;
+        let f = t.flag;
+        if raised {
+            self.raise_flag(f);
+        }
     }
 
     /// A read of a timer register: the timers are brought to the reading cycle first (`[A2]`). Reading TMRxL loads the
@@ -870,7 +898,7 @@ impl Pic16 {
         self.pc = self.reset_vector;
         self.sleeping = false;
         self.no_irq = false;
-        self.flag_prev = false;
+        self.irq_new = false;
         self.stk_fault = None;
         self.reset_req = None;
     }
@@ -899,7 +927,8 @@ impl Pic16 {
 
     /// Take the interrupt if one is pending and GIE is set: GIE cleared, PC pushed, context saved in the shadow
     /// registers, PC = the vector (12.5 p.110-111, 12.9 p.113). The two cycles are the forced NOPs of Fig. 12-2 p.112.
-    fn interrupt(&mut self) -> bool {
+    /// `cost` is 2, or 1 after a 2-cycle instruction of a request that arrived while running (`[A108]`).
+    fn interrupt(&mut self, cost: u64) -> bool {
         if self.mem[self.a_intcon] & 0x80 == 0 || self.no_irq || !self.enabled_flag() {
             return false;
         }
@@ -912,7 +941,7 @@ impl Pic16 {
             self.mem[self.shad[i]] = if i == 0 { v & 0x07 } else { v } & self.implemented[self.shad[i]];
         }
         self.pc = self.vector;
-        self.cycles += 2;
+        self.cycles += cost;
         true
     }
 
@@ -951,24 +980,23 @@ impl Pic16 {
                 return 1;
             }
         }
-        // [A108] A request that arrived while the program was running lets the instruction already fetched at the
-        // return address finish; the PC stacked is the one after it, and the vector is reached 3 cycles after that
-        // instruction started (MDB; Fig. 12-2 p.112 shows the fetched instruction executing before the two NOPs).
-        // A request that was already pending (GIE just set by BSF or RETFIE) is taken at once.
-        let pending = self.enabled_flag();
-        let fresh = !self.flag_prev && pending;
-        self.flag_prev = pending;
+        // [A108] A request that a peripheral made pending while the program was running lets the instruction already
+        // fetched at the return address finish; the PC stacked is the one after it, and the vector is reached 3 cycles
+        // after that instruction started (MDB; Fig. 12-2 p.112 shows the fetched instruction executing before the two
+        // NOPs). MDB also steps over the two as one step: STEPI from that instruction stops at the vector, and a
+        // breakpoint at the stacked PC is not hit first. A request that was already pending (GIE just set by BSF or
+        // RETFIE) or that software made pending is taken at once (`[A104]`, MDB: `tests/probe/sw_pending.S`).
+        let fresh = std::mem::take(&mut self.irq_new) && self.enabled_flag();
         if fresh && self.mem[self.a_intcon] & 0x80 != 0 && !self.no_irq {
             self.run_one();
             self.sync_timers();
-            let len = self.cycles - start; // 1 or 2 (a longer one is counted as 2)
-            // The vector is 3 cycles after that instruction started: 2 cycles of entry after a 1-cycle instruction,
-            // 1 after a 2-cycle one. interrupt() adds the 2; take one back for the longer instruction.
-            let ran = self.reset_req.is_none() && self.stk_fault.is_none() && self.interrupt();
-            if ran && len >= 2 {
-                self.cycles -= 1;
+            // 2 cycles of entry after a 1-cycle instruction, 1 after a 2-cycle one (a longer one is counted as 2).
+            // The instruction may have dropped the request (GIE, PIE or the flag cleared) or asked for a reset.
+            let cost = if self.cycles - start >= 2 { 1 } else { 2 };
+            if self.reset_req.is_none() && self.stk_fault.is_none() {
+                self.interrupt(cost);
             }
-        } else if !self.interrupt() {
+        } else if !self.interrupt(2) {
             self.run_one();
         }
         self.sync_timers();
@@ -1254,6 +1282,11 @@ impl Pic16 {
                 self.set_fsr(n, after);
             }
             0x0063 => {
+                // An enabled flag already set: SLEEP executes as a NOP, TO and PD unchanged (13.2.2 p.139; MDB agrees
+                // when the request arrived just before SLEEP with GIE set: vector 3 cycles after SLEEP started, PD = 1).
+                if self.enabled_flag_any() {
+                    return;
+                }
                 // SLEEP: PD = 0, TO = 1
                 self.flags(NPD | NTO, NTO);
                 self.sleeping = true;
