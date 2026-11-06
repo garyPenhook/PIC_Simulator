@@ -515,3 +515,127 @@ fn timer0_stops_in_sleep_and_other_clocks_are_noted() {
     run(&mut m, 2);
     assert!(m.cpu.notes.iter().any(|n| n.contains("Timer0")));
 }
+
+// ----- Timer1 (DS40002343F ch.23 p.252-267) and Timer2 (ch.24 p.268-287) ----------------------------------------
+
+// TMR1L/H = 30Ch/30Dh (bank 6), T2TMR/T2PR/T2CON = 38Ch/38Dh/38Eh (bank 7); TMR1IF is PIR1 bit 6, TMR2IF PIR2 bit 2.
+
+#[test]
+fn timer1_counts_through_the_prescaler_and_rolls_over() {
+    // TMR1H = FFh, TMR1L = FDh through the registers; counting resumes after the TMR1L write
+    let prog = [movlb(6), movlw(0xFF), movwf(0x0D), movlw(0xFD), movwf(0x0C), NOP, NOP, NOP, NOP];
+    let mut m = machine(&prog, &[], true);
+    poke(&mut m, "T1CLK", 1); // Fosc/4
+    poke(&mut m, "T1CON", 0x01);
+    run(&mut m, 7);
+    assert_eq!((sfr(&m, "TMR1H"), sfr(&m, "TMR1L"), sfr(&m, "PIR1") & 0x40), (0xFF, 0xFF, 0));
+    run(&mut m, 1);
+    assert_eq!((sfr(&m, "TMR1H"), sfr(&m, "TMR1L"), sfr(&m, "PIR1") & 0x40), (0, 0, 0x40)); // FFFF -> 0000: TMR1IF
+    // prescaler 1:2 halves, Fosc (CS = 2) is four ticks a cycle
+    let mut m = machine(&[NOP; 16], &[], true);
+    poke(&mut m, "T1CLK", 1);
+    poke(&mut m, "T1CON", 0x11);
+    run(&mut m, 9);
+    assert_eq!(sfr(&m, "TMR1L"), 4);
+    let mut m = machine(&[NOP; 16], &[], true);
+    poke(&mut m, "T1CLK", 2);
+    poke(&mut m, "T1CON", 0x01);
+    run(&mut m, 2);
+    assert_eq!(sfr(&m, "TMR1L"), 8);
+}
+
+#[test]
+fn timer1_rd16_buffers_tmr1h() {
+    // RD16 + 1:8 prescaler: TMR1H (buffer) then TMR1L write 1234h; a TMR1L read returns 34h and loads the buffer with 12h
+    let prog = [movlb(6), movlw(0x12), movwf(0x0D), movlw(0x34), movwf(0x0C), NOP, movf(0x0C, 0), NOP, NOP];
+    let mut m = machine(&prog, &[], true);
+    poke(&mut m, "T1CLK", 1);
+    poke(&mut m, "T1CON", 0x33);
+    run(&mut m, 7);
+    assert_eq!((m.cpu.mem[W], sfr(&m, "TMR1H")), (0x34, 0x12));
+}
+
+#[test]
+fn timer1_gate_and_unknown_clocks_are_noted_and_it_stops_in_sleep() {
+    let mut m = machine(&[NOP; 4], &[], true);
+    poke(&mut m, "T1CLK", 1);
+    poke(&mut m, "T1GCON", 0x80);
+    poke(&mut m, "T1CON", 0x01);
+    run(&mut m, 3);
+    assert_eq!(sfr(&m, "TMR1L"), 0);
+    assert!(m.cpu.notes.iter().any(|n| n.contains("Timer1 gate")));
+    let mut m = machine(&[NOP; 4], &[], true);
+    poke(&mut m, "T1CLK", 8); // SOSC
+    poke(&mut m, "T1CON", 0x01);
+    run(&mut m, 3);
+    assert!(m.cpu.notes.iter().any(|n| n.contains("Timer1 clock source")));
+    let mut m = machine(&[SLEEP, NOP], &[], true);
+    poke(&mut m, "T1CLK", 1);
+    poke(&mut m, "T1CON", 0x01);
+    run(&mut m, 1);
+    let n = sfr(&m, "TMR1L");
+    run(&mut m, 20);
+    assert_eq!(sfr(&m, "TMR1L"), n);
+}
+
+fn t2(m: &mut Machine16, con: u8, hlt: u8, pr: u8) {
+    poke(m, "T2CLKCON", 1);
+    poke(m, "T2HLT", hlt);
+    poke(m, "T2PR", pr);
+    poke(m, "T2CON", con);
+}
+
+#[test]
+fn timer2_period_is_pr_plus_one_clocks_with_prescaler_and_postscaler() {
+    let mut m = machine(&[NOP; 40], &[], true);
+    t2(&mut m, 0x80, 0, 3);
+    run(&mut m, 3);
+    assert_eq!((sfr(&m, "T2TMR"), sfr(&m, "PIR2") & 4), (3, 0));
+    run(&mut m, 1);
+    assert_eq!((sfr(&m, "T2TMR"), sfr(&m, "PIR2") & 4), (0, 4)); // matched at 3, back to 0 on the next clock
+    // 1:4 prescaler, 1:2 postscaler: a flag every 2 x 4 x 4 cycles
+    let mut m = machine(&[NOP; 40], &[], true);
+    t2(&mut m, 0xA1, 0, 3);
+    run(&mut m, 31);
+    assert_eq!(sfr(&m, "PIR2") & 4, 0);
+    run(&mut m, 1);
+    assert_eq!(sfr(&m, "PIR2") & 4, 4);
+}
+
+#[test]
+fn timer2_one_shot_stops_at_the_match_and_con_write_keeps_t2tmr() {
+    let mut m = machine(&[NOP; 16], &[], true);
+    t2(&mut m, 0x80, 0x08, 2); // software-start one-shot
+    run(&mut m, 2);
+    assert_eq!((sfr(&m, "T2TMR"), sfr(&m, "T2CON") & 0x80), (2, 0x80));
+    run(&mut m, 1);
+    assert_eq!((sfr(&m, "T2TMR"), sfr(&m, "T2CON") & 0x80, sfr(&m, "PIR2") & 4), (0, 0, 4));
+    run(&mut m, 5);
+    assert_eq!(sfr(&m, "T2TMR"), 0); // stays stopped
+    // a T2CON write does not clear T2TMR; a T2TMR write sets it
+    let prog = [movlb(7), NOP, NOP, movlw(0x80), movwf(0x0E), NOP, movlw(5), movwf(0x0C), NOP];
+    let mut m = machine(&prog, &[], true);
+    t2(&mut m, 0x80, 0, 0xFF);
+    run(&mut m, 5);
+    assert_eq!(sfr(&m, "T2TMR"), 5); // cycles 1..5 counted; the T2CON write at cycle 5 left the count
+    run(&mut m, 4);
+    assert_eq!(sfr(&m, "T2TMR"), 6); // 5 written by MOVWF at cycle 8, one more tick in cycle 9
+}
+
+#[test]
+fn timer2_interrupt_and_reset() {
+    let mut m = machine(&[NOP; 8], &[NOP], true);
+    t2(&mut m, 0x80, 0, 1);
+    poke(&mut m, "PIE2", 0x04);
+    poke(&mut m, "INTCON", 0xC0); // GIE, PEIE
+    run(&mut m, 2);
+    assert_eq!(m.cpu.pc, 2);
+    let c = m.cpu.cycles;
+    m.cpu.step();
+    assert_eq!((m.cpu.pc, m.cpu.cycles - c), (4, 2));
+    // RESET: Timer2 clears T2TMR (MCLR column 0), Timer1 keeps its count (u)
+    let prog = [movlb(6), movlw(5), movwf(0x0C), movlb(7), movwf(0x0C), RESET];
+    let mut m = machine(&prog, &[], true);
+    run(&mut m, 6);
+    assert_eq!((m.cpu.pc, sfr(&m, "TMR1L"), sfr(&m, "T2TMR")), (0, 5, 0));
+}

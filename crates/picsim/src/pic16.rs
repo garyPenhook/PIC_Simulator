@@ -4,7 +4,7 @@
 //!
 //! Cycle counts are the data sheet's (p.591): 1; 2 for CALL, CALLW, RETURN, RETLW, RETFIE, GOTO, BRA, BRW, a taken
 //! skip and a write to PCL; +1 when an instruction reaches program flash through an INDFn register.
-//! Of the peripherals only Timer0 exists (milestone S3/S4): the other registers are plain storage and `unmodelled` lists
+//! Of the peripherals only the timers (0, 1/3, 2/4/6; milestone S3/S4) exist: the other registers are plain storage and `unmodelled` lists
 //! the ones a program touched. The facts the core relies on, with their pages, are in `docs/FACTS-SIM.md` (PIC16 core).
 
 use crate::config::Config;
@@ -32,6 +32,38 @@ struct Timer0 {
     c1: usize,
     flag: (usize, u8),
     cnt: u16,
+    pre: u64,
+    post: u8,
+    last: u64,
+}
+
+/// Timer1/Timer3 (DS40002343F ch.23 p.252-267): 16-bit up counter, prescaler 1:1-1:8, TMRxIF on the roll-over from FFFFh to
+/// 0000h. RD16 buffers TMRxH like Timer0; only a write to TMRxL clears the prescaler (23.6). Fosc/4 and Fosc clocks `[A107]`.
+struct Timer1 {
+    n: u8,
+    l: usize,
+    h: usize,
+    con: usize,
+    clk: usize,
+    gcon: usize,
+    flag: (usize, u8),
+    cnt: u16,
+    pre: u64,
+    last: u64,
+}
+
+/// Timer2/4/6 (DS40002343F ch.24 p.268-287): T2TMR counts up, matches T2PR and goes to 0 on the next clock; the postscaler
+/// counts matches and TMRxIF is set when it reaches OUTPS+1. Prescaler and postscaler are cleared by a write to T2TMR or
+/// T2CON (T2TMR is not cleared by T2CON, 24.1). Software-gate and software-start one-shot modes only `[A107]`.
+struct Timer2 {
+    n: u8,
+    tmr: usize,
+    pr: usize,
+    con: usize,
+    hlt: usize,
+    clk: usize,
+    flag: (usize, u8),
+    cnt: u8,
     pre: u64,
     post: u8,
     last: u64,
@@ -111,6 +143,10 @@ pub struct Pic16 {
     mclr: Vec<(usize, u8, u8)>,
     reset_vector: u32,
     t0: Option<Timer0>,
+    t1: Vec<Timer1>,
+    t2: Vec<Timer2>,
+    /// Registers of any timer: an access first brings the timers to the current cycle.
+    tmr_reg: Vec<bool>,
 }
 
 fn por_bits(s: &str) -> u8 {
@@ -195,6 +231,9 @@ impl Pic16 {
             mclr: Vec::new(),
             reset_vector: dev.vectors.reset,
             t0: None,
+            t1: Vec::new(),
+            t2: Vec::new(),
+            tmr_reg: vec![false; MEM],
         };
         for g in &d.gpr {
             for a in g.start..g.end {
@@ -262,18 +301,50 @@ impl Pic16 {
                 p.core[e.addr as usize] = true;
             }
         }
-        if let (Some(l), Some(h), Some(c0), Some(c1)) = (dev.find_sfr("TMR0L"), dev.find_sfr("TMR0H"), dev.find_sfr("T0CON0"), dev.find_sfr("T0CON1")) {
-            let flag = dev
-                .sfr
+        let flag_of = |name: &str| {
+            dev.sfr
                 .iter()
                 .filter(|s| s.name.starts_with("PIR"))
-                .find_map(|s| s.fields.iter().chain(s.legacy.iter()).find(|f| f.name == "TMR0IF").map(|f| (s.addr as usize, 1u8 << f.pos)));
-            if let Some(flag) = flag {
-                let (l, h, c0, c1) = (l.addr as usize, h.addr as usize, c0.addr as usize, c1.addr as usize);
-                for a in [l, h, c0, c1] {
+                .find_map(|s| s.fields.iter().chain(s.legacy.iter()).find(|f| f.name == name).map(|f| (s.addr as usize, 1u8 << f.pos)))
+        };
+        let addr = |name: &str| dev.find_sfr(name).map(|s| s.addr as usize);
+        if let (Some(l), Some(h), Some(c0), Some(c1), Some(flag)) = (addr("TMR0L"), addr("TMR0H"), addr("T0CON0"), addr("T0CON1"), flag_of("TMR0IF")) {
+            for a in [l, h, c0, c1] {
+                p.core[a] = true;
+                p.tmr_reg[a] = true;
+            }
+            p.t0 = Some(Timer0 { l, h, c0, c1, flag, cnt: 0, pre: 0, post: 0, last: 0 });
+        }
+        for n in [1u8, 3] {
+            if let (Some(l), Some(h), Some(con), Some(clk), Some(gcon), Some(flag)) = (
+                addr(&format!("TMR{n}L")),
+                addr(&format!("TMR{n}H")),
+                addr(&format!("T{n}CON")),
+                addr(&format!("T{n}CLK")),
+                addr(&format!("T{n}GCON")),
+                flag_of(&format!("TMR{n}IF")),
+            ) {
+                for a in [l, h, con, clk, gcon] {
                     p.core[a] = true;
+                    p.tmr_reg[a] = true;
                 }
-                p.t0 = Some(Timer0 { l, h, c0, c1, flag, cnt: 0, pre: 0, post: 0, last: 0 });
+                p.t1.push(Timer1 { n, l, h, con, clk, gcon, flag, cnt: 0, pre: 0, last: 0 });
+            }
+        }
+        for n in [2u8, 4, 6] {
+            if let (Some(tmr), Some(pr), Some(con), Some(hlt), Some(clk), Some(flag)) = (
+                addr(&format!("T{n}TMR")),
+                addr(&format!("T{n}PR")),
+                addr(&format!("T{n}CON")),
+                addr(&format!("T{n}HLT")),
+                addr(&format!("T{n}CLKCON")),
+                flag_of(&format!("TMR{n}IF")),
+            ) {
+                for a in [tmr, pr, con, hlt, clk] {
+                    p.core[a] = true;
+                    p.tmr_reg[a] = true;
+                }
+                p.t2.push(Timer2 { n, tmr, pr, con, hlt, clk, flag, cnt: 0, pre: 0, post: 0, last: 0 });
             }
         }
         if p.irq.is_empty() || p.implemented[p.a_bsr] != 0x3F {
@@ -391,16 +462,8 @@ impl Pic16 {
             }
             Tgt::Mem(a) => {
                 self.note(a);
-                if self.t0.as_ref().is_some_and(|t| a == t.l || a == t.c0) {
-                    self.sync_t0();
-                    let t = self.t0.as_ref().unwrap();
-                    if a == t.l {
-                        if self.mem[t.c0] & 0x10 != 0 {
-                            self.mem[t.h] = (t.cnt >> 8) as u8;
-                        }
-                        return t.cnt as u8;
-                    }
-                    return self.mem[a];
+                if self.tmr_reg[a] {
+                    return self.read_tmr(a);
                 }
                 if a == 2 {
                     self.pc as u8
@@ -436,8 +499,8 @@ impl Pic16 {
                         let s = 8 * (a - self.a_tos);
                         self.stack[i] = (self.stack[i] & !(0xFF << s) | u16::from(v) << s) & 0x7FFF;
                     }
-                } else if self.t0.as_ref().is_some_and(|t| [t.l, t.h, t.c0, t.c1].contains(&a)) {
-                    self.write_t0(a, v & self.implemented[a]);
+                } else if self.tmr_reg[a] {
+                    self.write_tmr(a, v & self.implemented[a]);
                 } else {
                     self.mem[a] = v & self.implemented[a];
                 }
@@ -484,6 +547,174 @@ impl Pic16 {
             }
         }
         self.mem[t.l] = t.cnt as u8;
+    }
+
+    /// Bring every timer to the current cycle.
+    fn sync_timers(&mut self) {
+        self.sync_t0();
+        for i in 0..self.t1.len() {
+            self.sync_t1(i);
+        }
+        for i in 0..self.t2.len() {
+            self.sync_t2(i);
+        }
+    }
+
+    /// Sleep: Fosc/4 and Fosc stop, so no timer counts and none owes ticks when the part wakes.
+    fn park_timers(&mut self) {
+        let now = self.cycles;
+        if let Some(t) = self.t0.as_mut() {
+            t.last = now;
+        }
+        for t in &mut self.t1 {
+            t.last = now;
+        }
+        for t in &mut self.t2 {
+            t.last = now;
+        }
+    }
+
+    /// Timer1-type timer `i`: the Fosc/4 (CS = 1) or Fosc (CS = 2, four ticks a cycle) clock ticks of cycles `last+1 ..= cycles`.
+    fn sync_t1(&mut self, i: usize) {
+        let now = self.cycles;
+        let t = &mut self.t1[i];
+        let dt = now.saturating_sub(t.last);
+        t.last = now;
+        let (con, cs) = (self.mem[t.con], self.mem[t.clk] & 0x1F);
+        'run: {
+            if con & 1 == 0 || dt == 0 {
+                break 'run;
+            }
+            if self.mem[t.gcon] & 0x80 != 0 {
+                self.notes.insert(format!("Timer{} gate (GE = 1) is not modelled; the timer holds its count", t.n));
+                break 'run;
+            }
+            if cs != 1 && cs != 2 {
+                self.notes.insert(format!("Timer{} clock source CS={cs} is not modelled (only Fosc/4 and Fosc); it does not count", t.n));
+                break 'run;
+            }
+            let sh = u32::from((con >> 4) & 3);
+            let total = t.pre + if cs == 2 { 4 * dt } else { dt };
+            t.pre = total & ((1u64 << sh) - 1);
+            let sum = u64::from(t.cnt) + (total >> sh);
+            if sum >= 0x10000 {
+                self.mem[t.flag.0] |= t.flag.1;
+            }
+            t.cnt = sum as u16;
+        }
+        if con & 2 == 0 {
+            self.mem[t.h] = (t.cnt >> 8) as u8;
+        }
+        self.mem[t.l] = t.cnt as u8;
+    }
+
+    /// Timer2-type timer `i`: the clock ticks of cycles `last+1 ..= cycles`.
+    fn sync_t2(&mut self, i: usize) {
+        let now = self.cycles;
+        let t = &mut self.t2[i];
+        let dt = now.saturating_sub(t.last);
+        t.last = now;
+        let con = self.mem[t.con];
+        if con & 0x80 != 0 && dt > 0 {
+            let cs = self.mem[t.clk] & 15;
+            let mode = self.mem[t.hlt] & 0x1F;
+            if cs != 1 && cs != 2 {
+                self.notes.insert(format!("Timer{} clock source CS={cs} is not modelled (only Fosc/4 and Fosc); it does not count", t.n));
+            } else {
+                if mode != 0 && mode != 8 {
+                    self.notes.insert(format!("Timer{} MODE={mode:#04x} needs an external reset/gate source; run as the software mode", t.n));
+                }
+                let one_shot = mode >> 3 == 1;
+                let sh = u32::from((con >> 4) & 7);
+                let total = t.pre + if cs == 2 { 4 * dt } else { dt };
+                t.pre = total & ((1u64 << sh) - 1);
+                let mut left = total >> sh;
+                let (outps, pr) = (con & 15, self.mem[t.pr]);
+                while left > 0 {
+                    // Jump straight to the next period end when no event can happen before it.
+                    if t.cnt < pr && left > 1 {
+                        let step = u64::from(pr - t.cnt).min(left - 1);
+                        t.cnt += step as u8;
+                        left -= step;
+                        continue;
+                    }
+                    left -= 1;
+                    if t.cnt == pr {
+                        t.cnt = 0;
+                        if one_shot {
+                            self.mem[t.con] &= 0x7F; // the match stops the timer (24.1.2)
+                            t.pre = 0;
+                            t.post = 0;
+                            self.mem[t.flag.0] |= t.flag.1;
+                            break;
+                        }
+                        if t.post >= outps {
+                            t.post = 0;
+                            self.mem[t.flag.0] |= t.flag.1;
+                        } else {
+                            t.post += 1;
+                        }
+                    } else {
+                        t.cnt = t.cnt.wrapping_add(1);
+                    }
+                }
+            }
+        }
+        self.mem[t.tmr] = t.cnt;
+    }
+
+    /// A read of a timer register: the timers are brought to the reading cycle first (`[A2]`). Reading TMRxL loads the
+    /// TMRxH buffer when RD16 is set (23.6).
+    fn read_tmr(&mut self, a: usize) -> u8 {
+        self.sync_timers();
+        if let Some(t) = &self.t0
+            && a == t.l
+        {
+            if self.mem[t.c0] & 0x10 != 0 {
+                self.mem[t.h] = (t.cnt >> 8) as u8;
+            }
+            return t.cnt as u8;
+        }
+        for t in &self.t1 {
+            if a == t.l {
+                if self.mem[t.con] & 2 != 0 {
+                    self.mem[t.h] = (t.cnt >> 8) as u8;
+                }
+                return t.cnt as u8;
+            }
+            if a == t.h && self.mem[t.con] & 2 == 0 {
+                return (t.cnt >> 8) as u8;
+            }
+        }
+        self.mem[a]
+    }
+
+    /// A write to a timer register; `v` is already masked to the implemented bits.
+    fn write_tmr(&mut self, a: usize, v: u8) {
+        self.sync_timers();
+        if self.t0.as_ref().is_some_and(|t| [t.l, t.h, t.c0, t.c1].contains(&a)) {
+            return self.write_t0(a, v);
+        }
+        for t in &mut self.t1 {
+            if a == t.l {
+                t.pre = 0;
+                t.cnt = if self.mem[t.con] & 2 != 0 { u16::from(self.mem[t.h]) << 8 | u16::from(v) } else { t.cnt & 0xFF00 | u16::from(v) };
+            } else if a == t.h && self.mem[t.con] & 2 == 0 {
+                t.cnt = t.cnt & 0xFF | u16::from(v) << 8; // a TMRxH write does not clear the prescaler (23.6)
+            }
+            if a == t.gcon {
+                self.mem[a] = v & !4 | self.mem[a] & 4; // GVAL is read only
+                return;
+            }
+        }
+        for t in &mut self.t2 {
+            if a == t.tmr {
+                (t.cnt, t.pre, t.post) = (v, 0, 0);
+            } else if a == t.con {
+                (t.pre, t.post) = (0, 0);
+            }
+        }
+        self.mem[a] = v;
     }
 
     /// A write to a Timer0 register takes effect after the cycle of the writing instruction `[A2]`.
@@ -625,6 +856,13 @@ impl Pic16 {
             (t.cnt, t.pre, t.post, t.last) = (0, 0, 0, self.cycles);
             self.mem[t.l] = 0;
         }
+        // Timer1 keeps its count in every reset but POR (TMRxL/H MCLR column u); Timer2/4/6 clear T2TMR (MCLR column 0).
+        for t in &mut self.t1 {
+            (t.pre, t.last) = (0, self.cycles);
+        }
+        for t in &mut self.t2 {
+            (t.cnt, t.pre, t.post, t.last) = (0, 0, 0, self.cycles);
+        }
         self.pc = self.reset_vector;
         self.sleeping = false;
         self.no_irq = false;
@@ -704,9 +942,7 @@ impl Pic16 {
                 self.no_irq = true; // the instruction after SLEEP runs first
             } else {
                 self.cycles += 1;
-                if let Some(t) = self.t0.as_mut() {
-                    t.last = self.cycles; // Fosc/4 does not run in Sleep
-                }
+                self.park_timers(); // Fosc/4 does not run in Sleep
                 return 1;
             }
         }
@@ -721,7 +957,7 @@ impl Pic16 {
             self.exec(w);
             self.cycles += self.extra + u64::from(self.flash_cycle);
         }
-        self.sync_t0();
+        self.sync_timers();
         if let Some(k) = self.stk_fault.or(self.reset_req) {
             self.do_reset(k);
         }
