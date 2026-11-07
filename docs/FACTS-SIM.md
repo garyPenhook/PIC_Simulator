@@ -122,10 +122,10 @@ note is logged when a program turns one on.
   framing error (`serial_rx_q41`) and sending two bytes with `SerialFlush` (`serial_tx_q41`, sim only: MDB never
   drains the Q41 transmit buffer).
 
-## ADC (S4, `Adc` in `periph.rs`; Q10 only)
+## ADC (S4, `periph/adc.rs`, shared by `Periph` and the PIC16 core)
 
-Basic mode of the ADCC, PIC18F27/47Q10 (DS40002043F ch.33). Other parts get a note ("the ADC of this part is not modelled")
-until their timing is read from their own data sheet.
+Basic mode of the ADCC, PIC18F27/47Q10 (DS40002043F ch.33), then the Q41 and the PIC16 converters below. Parts whose data sheet is
+not in the document set get a note ("the ADC of this part is not modelled") until their timing is read from it.
 
 * ADGO = 1 with ADON = 1 starts a conversion (33.2.1 p.551). It lasts ADPRE + ADACQ ADC clocks (0 = not included,
   33.7.9 p.575, 33.7.10 p.576) plus **11.5 TAD** (33.1.4 p.549; the lib comments say 12). TAD = 2(ADCLK+1) Fosc periods
@@ -158,6 +158,50 @@ GO cleared on completion (40.2.2 p.720). Differences from the Q10:
 * Same not-modelled list as the Q10 (ADCRC, computation, double sampling, ADACT, ADCP/CPRDY). Errata DS80000901H: 1.1.1 (ADC
   dead on LFINTOSC/SOSC with BOR and FVR off) and 1.1.2 (double sample) are not modelled.
 * Tests: `q41_*` in `crates/picsim/tests/adc.rs`, `tests/exec_q41/lib_adc.bas` on the sim, `tests/sim/adc_q41.bas` (stimulus).
+
+### PIC16 (`Pic16`: `sync_adc`, `adc_feed`, `tests/pic16_adc.rs`, `tests/sim/adc_p16.bas`)
+
+Three converters, picked by `Adc::find` from the part name (the resolution is not in the device description: the 10-bit
+PIC16F13145 and the 12-bit PIC16F17146 share a register layout and a module name). A write to ADCON0 syncs the ADC and starts
+or stops it; a read of ADCON0, ADRESL/H or a PIRn register syncs it first; the end of every instruction does too. ADIF is raised
+through `raise_flag`, so it is a request arriving while the program runs (`[A108]`). The stimulus is `[[adc]]` as on the PIC18
+(`Stimulus::apply16`; checked before anything is applied).
+* **ADCC, 12 bits, PIC16F17126/46** (DS40002343F ch.33 p.485-536): the Q41 model. ADPRE/ADACQ 13 bits in Fosc clocks (Table 33-8/33-9
+  p.519-520, ACQ = 0 with PRE != 0 is 8192), 14 TAD + 2 TCY (AD21 p.635), TAD = 2(ADCLK+1) Fosc (33.5.6 p.515), GO not set by the
+  instruction that turns ON on (33.2.1 p.494). ADCON0 resets to 02h: IC = 1, differential mode (33.5.1 p.509). **Differential mode**
+  (IC = 1, ADNCH is the negative channel, 33.1.1 p.487, 33.5.9 p.518): the result is the code of the ADPCH channel minus that of
+  the ADNCH channel in the format FM[1:0] selects: 00 left justified two's complement, 01 right justified two's complement (sign
+  extended), 10 left sign/magnitude, 11 right sign/magnitude (33.1.7 p.491-492; the examples 0x8020 = -2 and -2046 on p.493 agree).
+  `[A112]` The data sheet gives no transfer function, so the difference of the two codes is taken as it is and limited to the
+  range of the format: -2047 .. 2046 in two's complement (Equation 33-4 p.493), +-2047 in sign/magnitude (Equation 33-3 p.492).
+* **ADCC, 10 bits, PIC16F131xx** (DS40002519D ch.32 p.441-473): the same registers without IC, FM and ADNCH; the result is 10 bits
+  (Figure 32-3 p.443: left justified it fills ADRES bits 15..6), timing as above (AD21 p.557, ADACQ Table 32-8 p.467).
+* **Simple 10-bit ADC, PIC16F152xx and PIC16F183xx** (DS40002195E ch.27 p.318-335, DS40001839E ch.22 p.236-250): ADCON0 = CHS<5:0>,
+  GO (bit 1), ON (bit 0); ADCON1 = FM (bit 7), CS<2:0>; no ADCLK, ADPCH, ADPRE or ADACQ (the program waits the acquisition time),
+  no continuous mode. TAD = 2, 4, 8, 16, 32, 64 Fosc for CS = 000, 100, 001, 101, 010, 110 (Table 27-1 p.320-321, Table 22-1 p.238);
+  CS = x11 is ADCRC (not modelled: note, GO never clears). The input is the stimulus value of channel CHS at the cycle GO is set.
+  GO is not set by the instruction that turns ON on (27.2.1 p.322, 22.2.1 p.240).
+  `[A113]` **Conversion = 11.5 TAD.** The data sheets disagree: 22.1.4 p.237 says 12 TAD, AD22 (p.378 and p.430) 11 TAD typ. MDB on the
+  PIC16F18346 clears GO at 11.5 TAD at every ADCS (`tests/probe/adc_simple_n.S`, first N with GO clear, edges at TAD = 0.5, 1, 2, 4, 8, 16
+  cycles, 20 of 20 variants equal), which is also what the Q10 data sheet says of its ADC (33.1.4 p.549).
+  `[A114]` **SLEEP:** the simple ADC aborts a running conversion unless the clock is ADCRC (27.2.3 p.323, 22.2.3 p.240 "turned off,
+  ON remains set"): GO is cleared, ADRES and ADIF are left alone, a later GO converts again (not documented, not measured). The
+  ADCC says only that the ADC runs in Sleep with ADCRC: a conversion in flight at SLEEP waits for the wake-up and continues (as on the
+  Q10, `Periph::thaw`), with a note.
+* **Not modelled:** PIC16F18056/76 (DS40002325C is not in the document set; the note says so), ADCRC, computation, ADACT triggers, double
+  sampling, ADCAP, guard rings, a partial result when GO is cleared mid-conversion (33.5.1 note 2 says ADRES gets "the results up to this
+  point"; here ADRES keeps its value).
+* FVRCON on the PIC16 core: FVRRDY (bit 6, read only) follows FVREN (bit 7) at once, `[A15]` (PIC16F17126/46 37.2 p.569: set when the
+  circuits are stable; no time given); on the PIC16F152xx it is always 1 (DS40002195E 26.3.1 p.316 note 2). Both equal MDB
+  (`tests/probe/fvr_rdy.S` on 16F17146, 16F13145, 16F15244, 16F18346).
+* D-SIM-6: MDB does not finish an ADC conversion on the PIC16F17146 (`tests/probe/adc_conv.S`: GO is still set after 10 million cycles, with the Fosc or the ADCRC clock, single-ended or differential),
+  so the ADCC timing has no MDB check; the Q41 model it is built on is the data sheet's. On the PIC16F15244 MDB's conversion takes
+  5.5 cycles whatever ADCS says (`adc_simple_n.S`), the simulator follows Table 27-1. `lib_adc` itself converts nothing and gives MDB's
+  variables and cycle counts on 16F17146, 16F13145, 16F15244 and 16F18346 (`--engine both`).
+* D-SIM-7: the PIC16F183xx data sheet says FVRRDY is always 1 (Register 16-1 p.180 note 1) but also lists the bit as R-q/q; MDB follows
+  FVREN there, the simulator does too.
+* Tests: `crates/picsim/tests/pic16_adc.rs` (conversion times, formats, differential mode, continuous mode, interrupt, simple ADC on
+  four parts, Sleep, FVR), `tests/sim/adc_p16.bas` (Basil `ADin` on 16F17146 with the Q41's stimulus file: 2748, 0, 291).
 
 ## Ports and pins (S4)
 
@@ -547,7 +591,7 @@ Assumptions (the data sheet is silent):
 * `[A110]` Timer timing measured against MDB (probes run with `tools/probe.py`, which assembles each variant and compares basil-sim with MDB; `tests/probe/t1h_prescaler.S` on PIC16F18346 and PIC16F17146, `tests/probe/t2_f183.S` on PIC16F18346; samples of TMR1L/TMR2/PIR1 every two cycles at two phases, so to the cycle, and the cycle count at `done`): (1) Timer1 counts its first clock one cycle later after TMRxON goes 0 -> 1 than the `[A2]` rule gives for a running timer (both parts; Timer3/5 too, see below); the PIC16F183xx's Timer2 does the same after TMR2ON goes 0 -> 1 (not measured on the newer Timer2, which keeps `[A2]`). (2) With RD16 = 0 a write to TMR1H clears the prescaler on both parts, as DS40002343F 23.3 and DS40001839E 27.3 say (23.6/27.4 "only TMRxL" is RD16 mode). (3) A read of a PIRn register sees a flag that Timer1/3/5 (both layouts) or the PIC16F183xx's Timer2/4/6 sets in the reading cycle, as a timer register read sees the count (`[A2]`). Timer0 (PIC16F17146 and PIC16F18346) and the newer Timer2/4/6 (with TxHLT; PIC16F17146) set their flags after the access instead: a read in that cycle does not see it yet. (4) Accordingly a BCF, CLRF or MOVWF that clears TMR1IF or the 183xx's TMR2IF in the cycle the timer sets it leaves it clear, while one that clears TMR0IF or the newer TMR2IF in that cycle leaves it set. Measured with `tests/probe/t1_poll.S` (both parts), `t2_f183.S` (CLR = 1-3), `t2_poll.S` (PIC16F17146) and `t0_poll.S` (both parts): the clear and the poll swept over 14 phases, cycle count at `done` identical in all variants (Timer1 on the PIC16F17146: the three variants whose clear removes an already set flag wait 65536 cycles for the next overflow and were not completed in MDB). Timer3/5 have Timer1's one-cycle start delay (1), measured with `tests/probe/t135_start.S` (PIC16F18346 Timer1/3/5, PIC16F17146 Timer1/3); their flags are taken to behave like Timer1's (not measured). The data sheets are silent on (1), (3) and (4). A write through an FSR to the EEPROM range is ignored without an extra cycle (4.5.3 gives the cycle for reads only; not measured).
 * Not modelled: the watchdog (CLRWDT only sets TO and PD), oscillator and `RSTOSC` reset values, all peripherals but the timers, Timer1/3/5 clocks other than Fosc/4 and Fosc and the gate, ELF debug information (the compiler emits none for the enhanced mid-range core yet, so `run16` needs the `.S` listing), the Memory Execution Violation reset, NVM/EEPROM/flash writes.
 
-Status: `Basic_Compiler/scripts/exec-test.py --device 16F17146 --engine both` (run from the Basic_Compiler repo) on its `tests/exec_p16` (addressof_byref, addressof_table, delay_1ms, delay_50, delay_us, delay_var, float_random, lib_i2c, lib_pwm, lib_spi) gives MDB's variables and cycle counts exactly. `lib_i2c`, `lib_pwm` and `lib_spi` pass because registers are plain storage, as in MDB-compatible register-protocol tests; they say nothing about the peripherals. `isr_single` also passes now (Timer0/Timer2 interrupts, 262004 cycles, same as MDB). The other five (lib_adc, lib_eeprom, lib_flashwrite, lib_serial, lib_serial2) need the ADC, NVM and the EUSART (S3-S5) and fail.
+Status: `Basic_Compiler/scripts/exec-test.py --device 16F17146 --engine both` (run from the Basic_Compiler repo) on its `tests/exec_p16` (addressof_byref, addressof_table, delay_1ms, delay_50, delay_us, delay_var, float_random, lib_i2c, lib_pwm, lib_spi) gives MDB's variables and cycle counts exactly. `lib_i2c`, `lib_pwm` and `lib_spi` pass because registers are plain storage, as in MDB-compatible register-protocol tests; they say nothing about the peripherals. `isr_single` also passes now (Timer0/Timer2 interrupts, 262004 cycles, same as MDB). The other five (lib_adc, lib_eeprom, lib_flashwrite, lib_serial, lib_serial2) needed the ADC, NVM and the EUSART (S3-S5); lib_adc, lib_serial and lib_serial2 pass now, lib_eeprom and lib_flashwrite wait for the NVM.
 PIC16F18056/76 (device files copied from Basic_Compiler 0.1.152; same `Pic16` core, DS40002325C not re-read for the core): the register-only `Basic_Compiler/tests/exec_p180` programs (lib_i2c, lib_intosc, lib_spi) halt; the others need Timer0/1/2, the ADC, the EUSART or the oscillator registers (`lib_system` reads OSCSTAT-dependent bits). `float_compare`, `lib_floatlib_edge`, `arith_integer` and `arith_word`, which MDB gets wrong on these parts (it ignores writes to 5A0h-5A3h), give the expected results here with identical cycle counts on 16F18056, 16F18076 and 16F17146 (`Basic_Compiler/scripts/exec-test.py --engine sim`; in this repo `tests/pic16_core.rs` only runs a four-instruction smoke program on each of 16F17126/46, 16F18056/76, 16F13145 and 16F15244).
 PIC16F183xx: `Basic_Compiler/scripts/exec-test.py --engine both --device 16F18346` gives MDB's variables and cycle counts on `tests/exec_p16` (addressof_byref, addressof_table, delay_1ms, delay_50, delay_ms, delay_us, delay_var, float_random, isr_single 261701 cycles) and `tests/exec_p183` (lib_i2c, lib_pwm, lib_spi, lib_system, lib_timer_f183, pinmode); the same set passes on 16F18326, and on 16F18313 the programs that fit it (addressof_byref, delay_1ms, delay_var, isr_single, lib_timer_f183, lib_system). `exec_p16/lib_i2c` and `lib_spi` report the part's own PPS codes (24/25 on the 183xx; MDB gives the same), not the 17146's in their `' expect:` line. lib_adc, lib_eeprom, lib_flashwrite, lib_serial and `exec_p183_parts/small` need the ADC, NVM and EUSART. After `[A110]` the five 6-bit parts were run again with the same results (16F17146 isr_single 262004 cycles).
 * D-SIM-5: with PR2 = 0 MDB never sets TMR2IF on the PIC16F18346 (`t2_f183.S` CON = 04h/06h, PR = 0: TMR2 reads 0 and the poll does not end in 27 million cycles). The data sheet gives the period as PRx + 1 (Register 28-3 p.300) and the match resets TMR2 on the next clock (28.1 p.298), so the sim sets the flag every (prescaler x postscaler) cycles.

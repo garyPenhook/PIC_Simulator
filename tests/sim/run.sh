@@ -36,6 +36,13 @@ for l in "ADQ_A0 = 2748" "ADQ_A1 = 0 " "ADQ_A2 = 291"; do
     echo "$out" | grep -q "^$l" || { echo "FAIL adc_q41: missing '$l'"; echo "$out"; exit 1; }
 done
 echo "PASS adc_q41"
+cp tests/sim/adc_p16.bas "$w/"
+"$BASIL" --keep-vars "$w/adc_p16.bas" >/dev/null
+out=$(./target/release/basil-sim "$w/adc_p16.hex" --device 16F17146 --stim tests/sim/adc_q41.stim.toml --dump ADP_A0:2,ADP_A1:2,ADP_A2:2 2>/dev/null)
+for l in "ADP_A0 = 2748" "ADP_A1 = 0 " "ADP_A2 = 291"; do
+    echo "$out" | grep -q "^$l" || { echo "FAIL adc_p16: missing '$l'"; echo "$out"; exit 1; }
+done
+echo "PASS adc_p16"
 cp tests/sim/spi_q41.bas "$w/"
 "$BASIL" --keep-vars "$w/spi_q41.bas" >/dev/null
 out=$(./target/release/basil-sim "$w/spi_q41.hex" --device 18F16Q41 --stim tests/sim/spi_q41.stim.toml --dump SQ1_SQ_INIT,SQ1_SQ_R0,SQ1_SQ_R1,SQ1_SQ_R2,SQ1_SQ_ST 2>/dev/null)

@@ -142,7 +142,7 @@ fn characters_during_sleep_are_lost_and_other_sections_are_refused() {
     assert_eq!(pir4(&m) & RCIF, RCIF, "control: the same character arrives when the part is awake");
     let dev = Device::load(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../../devices/16F17146.toml")).unwrap();
     let mut m = Machine16::new(dev).unwrap();
-    assert!(m.load_stimulus("[[adc]]\nchannel = 1\nvalue = 5\n").is_err());
+    assert!(m.load_stimulus("[[analog]]\npin = \"RA0\"\nvolts = 1.5\n").is_err(), "[[analog]] is not modelled on PIC16 parts yet");
     assert!(m.load_stimulus("[[uart]]\nport = 3\nbytes = \"U\"\n").is_err(), "the 16F17146 has EUSART1 and 2 only");
 }
 

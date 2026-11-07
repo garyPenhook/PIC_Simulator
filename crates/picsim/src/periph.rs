@@ -24,6 +24,7 @@ use crate::mem::{DataMem, Special};
 use devdesc::Device;
 use std::collections::{BTreeSet, VecDeque};
 
+pub(crate) mod adc;
 mod board;
 mod ccp;
 mod clc;
@@ -311,35 +312,6 @@ pub struct RxStream {
     pub bad_stop: bool,
 }
 
-/// ADC with computation (ADCC) of the PIC18F27/47Q10, basic mode (DS40002043F ch.33 p.546-553, 566-576).
-/// * ADGO = 1 with ADON = 1 starts a conversion; it takes ADPRE + ADACQ ADC clocks (0 = not included) and then
-///   11.5 TAD (33.1.4 p.549); TAD = 2(ADCLK+1) Fosc periods (Table 33-2). It then loads ADRES (right or left
-///   justified by ADFM, 10 bits), clears ADGO unless ADCONT = 1, and sets ADIF (33.2.2). Clearing ADGO or ADON
-///   terminates it, ADRES keeps its value (33.2.3).
-/// * The input is the stimulus value of the channel in ADPCH at the end of acquisition (0 without one).
-/// * Not modelled, with a note: the FRC clock (ADCS = 1), computation (filter, threshold, ADPREV/ADACC), triggers
-///   (ADACT) and double sampling.
-/// * `[A12]` The conversion starts in the cycle of the instruction that sets ADGO. `[A13]` ADGO written 1 while
-///   ADON = 0 reads back 0 and starts nothing. `[A14]` With ADCONT = 1 the next conversion starts in the cycle the
-///   previous one ended.
-struct Adc {
-    con: usize,
-    clk: usize,
-    pre: usize,
-    acq: usize,
-    /// High bytes of ADPRE and ADACQ (Q41: 13-bit values counted in Fosc clocks).
-    q41: Option<(usize, usize)>,
-    pch: usize,
-    resl: usize,
-    resh: usize,
-    flag: Flag,
-    bits: u32,
-    /// Cycle the running conversion ends, and the value it will load.
-    end: Option<(u64, u16)>,
-    /// Stimulus: (channel, from cycle, code), in the order given.
-    feed: Vec<(u8, u64, u16)>,
-}
-
 struct Timer0 {
     l: usize,
     h: usize,
@@ -455,7 +427,7 @@ pub struct Periph {
     spis: Vec<Spi>,
     mssps: Vec<Mssp>,
     i2cqs: Vec<I2cQ>,
-    adc: Option<Adc>,
+    adc: Option<adc::Adc>,
     nvm: Option<Nvm>,
     nvmq: Option<NvmQ>,
     /// Cycles the CPU is stalled by a program flash operation; the core takes them after the write (`take_stall`).
@@ -613,32 +585,12 @@ impl Periph {
                 p.t2.push(Timer2 { n, tmr, pr, con, hlt, clk, flag, cnt: 0, pre: 0, post: 0, last: 0 });
             }
         }
-        let q41 = addr(dev, "ADCPCON").is_some();
-        if let (Some(con), Some(clk), Some(pre), Some(acq), Some(pch), Some(resl), Some(resh), Some(flag)) = (
-            addr(dev, "ADCON0"),
-            addr(dev, "ADCLK"),
-            addr(dev, if q41 { "ADPREL" } else { "ADPRE" }),
-            addr(dev, if q41 { "ADACQL" } else { "ADACQ" }),
-            addr(dev, "ADPCH"),
-            addr(dev, "ADRESL"),
-            addr(dev, "ADRESH"),
-            Flag::find(dev, "ADIF"),
-        ) {
-            // The Q10 (DS40002043F ch.33) and the Q41 (DS40002214G ch.40) are sourced; the PIC16 converters differ.
-            if q41 {
-                let hi = (addr(dev, "ADPREH"), addr(dev, "ADACQH"));
-                if let (Some(ph), Some(ah)) = hi {
-                    hook(con, ADC0);
-                    p.adc = Some(Adc { con, clk, pre, acq, q41: Some((ph, ah)), pch, resl, resh, flag, bits: 12, end: None, feed: Vec::new() });
-                } else {
-                    p.notes.insert("the ADC of this part is not modelled; ADGO never clears".into());
-                }
-            } else if addr(dev, "PRODL").is_some() {
-                hook(con, ADC0);
-                p.adc = Some(Adc { con, clk, pre, acq, q41: None, pch, resl, resh, flag, bits: 10, end: None, feed: Vec::new() });
-            } else {
-                p.notes.insert("the ADC of this part is not modelled; ADGO never clears".into());
-            }
+        if let Some(a) = adc::Adc::find(dev) {
+            // The Q10 (DS40002043F ch.33), the Q41 (DS40002214G ch.40) and the PIC16 ADCC parts are sourced.
+            hook(a.con, ADC0);
+            p.adc = Some(a);
+        } else if addr(dev, "ADCON0").is_some() && addr(dev, "ADCLK").is_some() {
+            p.notes.insert("the ADC of this part is not modelled; ADGO never clears".into());
         }
         for letter in b'A'..=b'H' {
             let l = letter as char;
@@ -1216,8 +1168,8 @@ impl Periph {
         self.spis.iter_mut().for_each(|q| q.shift(d));
         self.mssps.iter_mut().for_each(|q| q.shift(d));
         self.i2cqs.iter_mut().for_each(|q| q.shift(d));
-        if let Some(Some((e, _))) = self.adc.as_mut().map(|a| a.end.as_mut()) {
-            *e += d;
+        if let Some(a) = self.adc.as_mut() {
+            a.shift(d);
         }
     }
 
@@ -2056,20 +2008,10 @@ impl Periph {
         self.apply_sched(m, now, &mut ev); // comparator edges can schedule CWG dead-band changes
         self.t1_late(m, now, false, &late, &comps, &mut ev);
         self.sig_prune_to(4 * self.t1.iter().map(|t| t.last).min().unwrap_or(now));
-        if let Some(a) = &mut self.adc {
-            while let Some((e, v)) = a.end.filter(|(e, _)| *e <= now) {
-                a.end = None;
-                let word = if m.mem[a.con] & 4 != 0 { v } else { v << (16 - a.bits) };
-                m.mem[a.resl] = word as u8;
-                m.mem[a.resh] = (word >> 8) as u8;
-                a.flag.set(m);
-                ev.push(e);
-                if m.mem[a.con] & 0x40 != 0 {
-                    Self::adc_start(a, m, e); // [A14]
-                } else {
-                    m.mem[a.con] &= !1;
-                }
-            }
+        if let Some(a) = &mut self.adc
+            && a.sync(&mut m.mem, now, &mut ev)
+        {
+            a.flag.set(m);
         }
         for u in &mut self.uarts {
             u.sync(&mut m.mem, now, &mut ev, &mut self.tx, &mut self.notes);
@@ -2252,22 +2194,7 @@ impl Periph {
             }
             ADC0 => {
                 let a = self.adc.as_mut().unwrap();
-                // Q41: GO is not set by the instruction that turns the ADC on (DS40002214G 40.2.1 p.720). `[A20]`
-                let was_on = m.mem[a.con] & 0x80 != 0;
-                let (on, go) = (v & 0x80 != 0, v & 1 != 0 && (a.q41.is_none() || was_on));
-                let mut new = v & !1;
-                if !(on && go) {
-                    a.end = None;
-                } else {
-                    new |= 1;
-                    if v & 0x10 != 0 {
-                        self.notes.insert("the ADC FRC clock (ADCS = 1) is not modelled; ADGO never clears".into());
-                    } else if a.end.is_none() {
-                        m.mem[a.con] = new;
-                        Self::adc_start(a, m, now);
-                    }
-                }
-                m.mem[a.con] = new;
+                a.write_con(&mut m.mem, v, now, &mut self.notes);
             }
             T0L => {
                 let t = self.t0.as_mut().unwrap();
@@ -2392,30 +2319,6 @@ impl Periph {
             }
             _ => unreachable!("write of hook {k} has no model"),
         }
-    }
-
-    /// Start a conversion at cycle `t`: end cycle and the code it will load.
-    fn adc_start(a: &mut Adc, m: &DataMem, t: u64) {
-        let n = u64::from(m.mem[a.clk] & 0x3F) + 1; // TAD = 2n Fosc periods
-        let (sample, end);
-        if let Some((ph, ah)) = a.q41 {
-            // Q41: precharge and acquisition are counted in Fosc clocks (ADACQ = 0 with ADPRE != 0 is 8192),
-            // the conversion is 14 TAD + 2 TCY (DS40002214G 40.7.9, 40.7.10, AD21 p.903). `[A18]`
-            let pre = u64::from(m.mem[ph] & 0x1F) << 8 | u64::from(m.mem[a.pre]);
-            let mut acq = u64::from(m.mem[ah] & 0x1F) << 8 | u64::from(m.mem[a.acq]);
-            if acq == 0 && pre != 0 {
-                acq = 8192;
-            }
-            sample = t + (pre + acq).div_ceil(4);
-            end = sample + (2 * n * 14).div_ceil(4) + 2;
-        } else {
-            let lead = u64::from(m.mem[a.pre]) + u64::from(m.mem[a.acq]);
-            sample = t + (2 * n * lead).div_ceil(4);
-            end = t + (n * (2 * lead + 23)).div_ceil(4);
-        }
-        let ch = if a.q41.is_some() { m.mem[a.pch] } else { m.mem[a.pch] & 0x3F };
-        let code = a.feed.iter().filter(|(c, at, _)| *c == ch && *at <= sample).last().map_or(0, |f| f.2);
-        a.end = Some((end, code.min((1u16 << a.bits) - 1)));
     }
 
     /// Levels of the pins of port `i` at cycle `now`. An output pin shows its latch, an input pin what the outside world
@@ -2627,8 +2530,7 @@ impl Periph {
     pub fn adc_feed(&mut self, ch: u8, at: u64, v: u16) -> bool {
         match &mut self.adc {
             Some(a) => {
-                a.feed.push((ch, at, v));
-                a.feed.sort_by_key(|f| f.1); // stable: same cycle keeps file order
+                a.push_feed(ch, at, v);
                 true
             }
             None => false,

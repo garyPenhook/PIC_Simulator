@@ -10,6 +10,7 @@
 //! the ones a program touched. The facts the core relies on, with their pages, are in `docs/FACTS-SIM.md` (PIC16 core).
 
 use crate::config::Config;
+use crate::periph::adc::Adc;
 use crate::periph::uart::{self, Uart};
 use crate::periph::RxStream;
 use devdesc::Device;
@@ -184,6 +185,15 @@ pub struct Pic16 {
     pub tx: Vec<(u8, u64, u8)>,
     /// Cycle SLEEP was executed (the EUSARTs owe the cycles of Sleep when the part wakes).
     sleep_at: u64,
+    /// The ADC (`periph/adc.rs`, the ADCC of the Q41) and which addresses are its ADCON0 or ADRES (a read of them sees
+    /// the conversion that has just ended).
+    adc: Option<Adc>,
+    adc_reg: Vec<bool>,
+    /// FVRCON: FVRRDY (bit 6, read only) follows FVREN (bit 7) `[A15]`; on the PIC16F152xx it is always 1 (DS40002195E
+    /// 26.3.1 p.316 note 2; MDB agrees). The PIC16F183xx data sheet says the same (Register 16-1 p.180 note 1) but also
+    /// lists the bit as "R-q/q", and MDB follows FVREN there, so the model does too (D-SIM-7).
+    a_fvr: Option<usize>,
+    fvr_always: bool,
 }
 
 fn por_bits(s: &str) -> u8 {
@@ -281,6 +291,10 @@ impl Pic16 {
             uart_reg: vec![None; MEM],
             tx: Vec::new(),
             sleep_at: 0,
+            adc: None,
+            adc_reg: vec![false; MEM],
+            a_fvr: None,
+            fvr_always: false,
         };
         for g in &d.gpr {
             for a in g.start..g.end {
@@ -430,6 +444,29 @@ impl Pic16 {
                 p.uarts.push(u);
             }
         }
+        if let Some(a) = dev.find_sfr("FVRCON").map(|s| s.addr as usize).filter(|&a| a < MEM) {
+            p.core[a] = true;
+            p.a_fvr = Some(a);
+            let n = dev.device.name.as_str();
+            p.fvr_always = n.starts_with("PIC16F152");
+            if p.fvr_always {
+                p.mem[a] |= 0x40;
+            }
+        }
+        if let Some(a) = Adc::find(dev) {
+            let regs = a.regs();
+            if regs.iter().all(|&r| r < MEM) {
+                for r in regs {
+                    p.core[r] = true;
+                }
+                for r in [a.con, a.resl, a.resh] {
+                    p.adc_reg[r] = true;
+                }
+                p.adc = Some(a);
+            }
+        } else if dev.find_sfr("ADCON0").is_some() {
+            p.notes.insert("the ADC of this part is not modelled; GO never clears".into());
+        }
         if p.irq.is_empty() {
             return Err(format!("{}: no PIR0/PIE0 interrupt registers", dev.device.name));
         }
@@ -573,6 +610,9 @@ impl Pic16 {
                 if self.flag_reg[a] {
                     self.sync_flag_timers();
                 }
+                if self.adc_reg[a] {
+                    self.sync_adc();
+                }
                 if let Some((i, sub)) = self.uart_reg[a] {
                     self.sync_uarts();
                     if sub == uart::RCREG {
@@ -622,6 +662,19 @@ impl Pic16 {
                     }
                 } else if self.tmr_reg[a] {
                     self.write_tmr(a, v & self.implemented[a]);
+                } else if self.a_fvr == Some(a) {
+                    // RDY is read only and follows EN at once; the data sheets give no start-up time (17146: 37.2 p.569)
+                    let v = v & self.implemented[a];
+                    if v & 0x80 != 0 && !self.fvr_always {
+                        self.notes.insert("FVR start-up time is not modelled; FVRRDY is set at once".into());
+                    }
+                    self.mem[a] = v & !0x40 | if self.fvr_always { 0x40 } else { (v >> 1) & 0x40 };
+                } else if self.adc.as_ref().is_some_and(|x| x.con == a) {
+                    self.sync_adc();
+                    let (now, v) = (self.cycles, v & self.implemented[a]);
+                    if let Some(x) = self.adc.as_mut() {
+                        x.write_con(&mut self.mem, v, now, &mut self.notes);
+                    }
                 } else if let Some((i, sub)) = self.uart_reg[a] {
                     self.sync_uarts();
                     let before = self.flags_of(i);
@@ -701,6 +754,7 @@ impl Pic16 {
     /// Bring every timer to the current cycle.
     fn sync_timers(&mut self) {
         self.sync_uarts();
+        self.sync_adc();
         self.sync_t0();
         for i in 0..self.t1.len() {
             self.sync_t1(i);
@@ -714,6 +768,7 @@ impl Pic16 {
     /// the older Timer2/4/6 (`flag_reg`, `[A110]`).
     fn sync_flag_timers(&mut self) {
         self.sync_uarts();
+        self.sync_adc();
         for i in 0..self.t1.len() {
             self.sync_t1(i);
         }
@@ -752,6 +807,33 @@ impl Pic16 {
             let before = self.flags_of(i as u8);
             self.uarts[i].sync(&mut self.mem, self.cycles, &mut ev, &mut self.tx, &mut self.notes);
             self.flags_after(i as u8, before);
+        }
+    }
+
+    /// Bring the ADC to the current cycle: a conversion that has ended loads ADRES, clears GO and raises ADIF (through
+    /// `raise_flag`, so it is a request arriving while the program runs, `[A108]`).
+    fn sync_adc(&mut self) {
+        let Some(a) = self.adc.as_mut() else { return };
+        let (flag, mut ev) = ((a.flag.addr, a.flag.mask), Vec::new());
+        if a.sync(&mut self.mem, self.cycles, &mut ev) {
+            self.raise_flag(flag);
+        }
+    }
+
+    /// The part has an ADC the simulator models.
+    pub fn has_adc(&self) -> bool {
+        self.adc.is_some()
+    }
+
+    /// Stimulus: the input of ADC channel `ch` is code `v` (full scale = the part's resolution) from cycle `at` on;
+    /// false when the part has no ADC in the simulator.
+    pub fn adc_feed(&mut self, ch: u8, at: u64, v: u16) -> bool {
+        match self.adc.as_mut() {
+            Some(a) => {
+                a.push_feed(ch, at, v);
+                true
+            }
+            None => false,
         }
     }
 
@@ -1123,6 +1205,9 @@ impl Pic16 {
         for t in &mut self.t2 {
             (t.cnt, t.pre, t.post, t.last) = (0, 0, 0, self.cycles);
         }
+        if let Some(a) = self.adc.as_mut() {
+            a.end = None; // a conversion in flight is lost; ADRES is a register with a reset value
+        }
         for u in &mut self.uarts {
             (u.tsr_end, u.pending, u.rx_cur, u.asleep) = (None, None, None, false);
             u.fifo.clear();
@@ -1207,6 +1292,9 @@ impl Pic16 {
             if self.enabled_flag_any() {
                 self.sleeping = false;
                 let slept = self.cycles - self.sleep_at;
+                if let Some(a) = self.adc.as_mut() {
+                    a.shift(slept); // only the ADCRC clock runs in Sleep and it is not modelled: the conversion waits
+                }
                 for u in &mut self.uarts {
                     u.sleep(false, slept);
                     u.bits(&mut self.mem); // RCIDL, TRMT and the rest are current at once
@@ -1538,6 +1626,9 @@ impl Pic16 {
                 self.flags(NPD | NTO, NTO);
                 self.sleeping = true;
                 self.sleep_at = self.cycles;
+                if let Some(a) = self.adc.as_mut() {
+                    a.enter_sleep(&mut self.mem, &mut self.notes);
+                }
                 for u in &mut self.uarts {
                     u.sleep(true, 0);
                 }
