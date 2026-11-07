@@ -459,7 +459,7 @@ fn f183_movlb_is_five_bits_and_the_six_bit_encoding_is_undefined() {
     assert!(m.cpu.notes.iter().any(|n| n.contains("undefined opcode 0x0143")));
     assert_eq!((m.cpu.disasm(movlb5(31)), m.cpu.disasm(movlb(3))), ("movlb   31".to_string(), "dw      0x0143".to_string()));
     // and on a 6-bit part 0020h-003Fh are not MOVLB
-    assert_eq!(picsim::pic16::disasm(movlb5(5)), "dw      0x0025");
+    assert_eq!(picsim::pic16::disasm_for(movlb5(5), false), "dw      0x0025");
 }
 
 #[test]
@@ -614,24 +614,41 @@ fn a_request_made_pending_by_software_is_taken_at_once() {
 
 #[test]
 fn a_flag_cleared_in_the_cycle_a_timer_sets_it_stays_clear_and_the_next_set_is_a_fresh_request() {
-    // Woken from Sleep with GIE set, the instruction after SLEEP (BCF PIR0,TMR0IF) runs first (13.2.2 p.139). Timer0
-    // (period 1) sets the flag in that same cycle; the clear wins (MDB on the PIC16F18346's Timer2,
-    // tests/probe/t2_f183.S CLR = 1, [A110]). Timer0 sets it again at the end of the NOP: a fresh request ([A108]), so
-    // the instruction already fetched after the NOP (word 4) runs before the entry and the stacked PC is 5.
-    let bcf_tmr0if = 0x1000 | 5 << 7 | 0x0C;
-    let mut m = machine(&[movlb(1), SLEEP, bcf_tmr0if, NOP], &[NOP], true);
-    t0(&mut m, 0x80, 0x40, 0);
+    // Woken from Sleep with GIE set, the instruction after SLEEP (BCF PIR1,TMR2IF) runs first (13.2.2 p.139). Timer2
+    // (PR2 = 0: a match every clock) sets the flag in that same cycle; the clear wins (MDB, tests/probe/t2_f183.S
+    // CLR = 1-3, [A110]). Timer2 sets it again at the end of the NOP: a fresh request ([A108]), so the instruction
+    // already fetched after the NOP (word 4) runs before the entry and the stacked PC is 5.
+    let bcf_tmr2if = 0x1000 | 1 << 7 | 0x11;
+    let mut m = machine_on("16F18346", &[movlb5(0), SLEEP, bcf_tmr2if, NOP, NOP], &[NOP], true);
+    poke(&mut m, "PR2", 0);
+    poke(&mut m, "T2CON", 0x04);
     run(&mut m, 2);
-    poke(&mut m, "PIE0", 0x20);
-    poke(&mut m, "PIR0", 0x20);
-    poke(&mut m, "INTCON", 0x80);
+    poke(&mut m, "PIE1", 0x02);
+    poke(&mut m, "PIR1", 0x02);
+    poke(&mut m, "INTCON", 0xC0);
     m.cpu.step(); // wakes and runs the BCF
-    assert_eq!((m.cpu.pc, sfr(&m, "PIR0") & 0x20), (3, 0));
+    assert_eq!((m.cpu.pc, sfr(&m, "PIR1") & 0x02), (3, 0));
     m.cpu.step(); // the NOP; the flag is set again at its end, no entry yet
-    assert_eq!((m.cpu.pc, m.cpu.depth(), sfr(&m, "PIR0") & 0x20), (4, 0, 0x20));
+    assert_eq!((m.cpu.pc, m.cpu.depth(), sfr(&m, "PIR1") & 0x02), (4, 0, 0x02));
     let c = m.cpu.cycles;
     m.cpu.step(); // word 4, then the entry
     assert_eq!((m.cpu.pc, m.cpu.cycles - c, m.cpu.tos()), (4, 3, 5));
+}
+
+#[test]
+fn timer0_sets_its_flag_after_a_pirn_access_in_the_same_cycle() {
+    // MDB (tests/probe/t0_poll.S on PIC16F17146 and PIC16F18346, [A110]): a BCF, CLRF or MOVWF of PIR0 in the cycle
+    // Timer0 sets TMR0IF leaves it set, and a read in that cycle does not see it yet.
+    for clear in [0x1000 | 5 << 7 | 0x0C, clrf(0x0C), movwf(0x0C)] {
+        let mut m = machine(&[movlb(1), movlw(0), NOP, clear, movf(0x0C, 0)], &[], true);
+        t0(&mut m, 0x80, 0x40, 3); // period 4: the flag is set in the fourth cycle, the clear's
+        run(&mut m, 4);
+        assert_eq!(sfr(&m, "PIR0") & 0x20, 0x20, "{clear:#06x}");
+    }
+    let mut m = machine(&[movlb(1), movlw(0), NOP, movf(0x0C, 0), NOP], &[], true);
+    t0(&mut m, 0x80, 0x40, 3);
+    run(&mut m, 4);
+    assert_eq!((m.cpu.mem[W] & 0x20, sfr(&m, "PIR0") & 0x20), (0, 0x20)); // set in the MOVF's cycle, after its read
 }
 
 #[test]
@@ -858,4 +875,85 @@ fn f183_a_pir_write_that_clears_a_flag_rising_in_its_cycle_withdraws_the_fresh_r
     let c = m.cpu.cycles;
     m.cpu.step();
     assert_eq!((m.cpu.pc, m.cpu.cycles - c, m.cpu.tos()), (4, 2, 17));
+}
+
+#[test]
+fn every_part_names_one_timer_layout_and_a_mixed_description_is_not_modelled() {
+    // The older layout (TMRxCS/TMRxON in TxCON, DS40001839E Registers 27-1 and 28-1) and the newer one (RD16/ON with
+    // TxCLK, TxHLT and TxCLKCON, DS40002343F 23.13.1 and 24.10.3) must agree with the registers the description has.
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../devices");
+    let mut built = 0;
+    for e in std::fs::read_dir(&dir).unwrap() {
+        let p = e.unwrap().path();
+        let name = p.file_name().unwrap().to_string_lossy().to_string();
+        if !name.ends_with(".toml") || name.ends_with(".expect.toml") {
+            continue;
+        }
+        let dev = Device::load(&p).unwrap();
+        if dev.device.family != "pic16e" {
+            continue;
+        }
+        let Ok(m) = Machine16::new(dev) else { continue };
+        built += 1;
+        let bad: Vec<_> = m.cpu.notes.iter().filter(|n| n.contains("register layout") || n.contains("only one of")).collect();
+        assert!(bad.is_empty(), "{name}: {bad:?}");
+    }
+    assert!(built > 10, "only {built} PIC16 parts built");
+    // a newer Timer1 without its T1CLK, and an older Timer2 with a T2HLT, are left out with a note
+    let mut dev = Device::load(&dir.join("16F17146.toml")).unwrap();
+    dev.sfr.retain(|s| s.name != "T1CLK");
+    let m = Machine16::new(dev).unwrap();
+    assert!(m.cpu.notes.iter().any(|n| n.starts_with("Timer1: T1CON fields and T1CLK do not agree")), "{:?}", m.cpu.notes);
+    let mut dev = Device::load(&dir.join("16F18346.toml")).unwrap();
+    let mut hlt = dev.find_sfr("T2CON").unwrap().clone();
+    let mut clk = hlt.clone();
+    (hlt.name, hlt.addr, hlt.aliases) = ("T2HLT".into(), 0x7F0, vec![]);
+    (clk.name, clk.addr, clk.aliases) = ("T2CLKCON".into(), 0x7F1, vec![]);
+    dev.sfr.extend([hlt, clk]);
+    let m = Machine16::new(dev).unwrap();
+    assert!(m.cpu.notes.iter().any(|n| n.starts_with("Timer2: T2CON fields and T2HLT/T2CLKCON do not agree")), "{:?}", m.cpu.notes);
+}
+
+#[test]
+fn the_stack_is_empty_at_power_on_on_every_part() {
+    // DS40001839E 4.4 Fig. 4-4 p.57: STKPTR = 1Fh after a reset, also on the PIC16F183xx, whose pack gives it as
+    // unknown at POR
+    for part in ["16F18346", "16F18313", "16F17146"] {
+        let m = machine_on(part, &[NOP], &[], true);
+        assert_eq!((m.cpu.depth(), sfr(&m, "STKPTR")), (0, 0x1F), "{part}");
+    }
+}
+
+/// Runs `setup` then NOPs on a PIC16F17146 and finds the step in which flag bit `bit` of bank-1 register `pir` (offset)
+/// is set; then puts `clear` in that step instead and returns whether the flag is set after it.
+fn clear_in_the_set_cycle(setup: &[u16], pir: u16, bit: u16, clear: u16) -> bool {
+    let mut prog = setup.to_vec();
+    prog.extend([movlb(1), movlw(0)]);
+    let n = prog.len();
+    prog.resize(n + 40, NOP);
+    let mut m = machine(&prog, &[], true);
+    let at = (0..prog.len()).find(|_| {
+        m.cpu.step();
+        m.cpu.mem[0x80 + pir as usize] & 1 << bit != 0
+    });
+    let at = at.expect("the flag is never set");
+    assert!(at >= n, "set during the setup");
+    prog[at] = clear;
+    let mut m = machine(&prog, &[], true);
+    run(&mut m, at + 1);
+    m.cpu.mem[0x80 + pir as usize] & 1 << bit != 0
+}
+
+#[test]
+fn a_clear_in_the_cycle_timer1_or_the_newer_timer2_sets_its_flag() {
+    // MDB ([A110]): Timer1 (tests/probe/t1_poll.S) sets TMR1IF before a PIRn access in that cycle, so BCF, CLRF and
+    // MOVWF clear it; the newer Timer2 (tests/probe/t2_poll.S) sets TMR2IF after it, so the flag stays set.
+    // Timer1: TMR1 = FFFCh, T1CLK = Fosc/4, T1CON = ON; TMR1IF is PIR1 (08Dh) bit 6.
+    let t1 = [movlb(6), movlw(0xFF), movwf(0x0D), movlw(0xFC), movwf(0x0C), movlw(1), movwf(0x11), movwf(0x0E)];
+    // Timer2: T2CLKCON = Fosc/4, T2PR = 3, T2CON = ON; TMR2IF is PIR2 (08Eh) bit 2.
+    let t2 = [movlb(7), movlw(1), movwf(0x10), movlw(3), movwf(0x0D), movlw(0x80), movwf(0x0E)];
+    for (clear1, clear2) in [(0x1000 | 6 << 7 | 0x0D, 0x1000 | 2 << 7 | 0x0E), (clrf(0x0D), clrf(0x0E)), (movwf(0x0D), movwf(0x0E))] {
+        assert!(!clear_in_the_set_cycle(&t1, 0x0D, 6, clear1), "Timer1 {clear1:#06x}");
+        assert!(clear_in_the_set_cycle(&t2, 0x0E, 2, clear2), "Timer2 {clear2:#06x}");
+    }
 }

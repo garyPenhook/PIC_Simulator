@@ -169,9 +169,11 @@ pub struct Pic16 {
     t2: Vec<Timer2>,
     /// Registers of any timer: an access first brings the timers to the current cycle.
     tmr_reg: Vec<bool>,
-    /// The PIRn registers: a read or write first brings the timers to the accessing cycle, so a read sees a flag a timer
-    /// sets in that cycle, as a timer register read sees its count (`[A2]`), and a clear in that cycle wins (MDB,
-    /// `tests/probe/t2_f183.S`, `[A110]`).
+    /// The PIRn registers: a read or write first brings Timer1/3/5 and the PIC16F183xx's Timer2/4/6 to the accessing
+    /// cycle, so a read sees a flag they set in that cycle, as a timer register read sees its count (`[A2]`), and a
+    /// clear in that cycle wins. Timer0 and the newer Timer2/4/6 (with TxHLT) set their flags after the access: a read in
+    /// that cycle misses it and a clear leaves it set (MDB, `tests/probe/t1_poll.S`, `t2_f183.S`, `t2_poll.S`,
+    /// `t0_poll.S`, `[A110]`).
     flag_reg: Vec<bool>,
 }
 
@@ -308,6 +310,9 @@ impl Pic16 {
         p.a_intcon = 11;
         p.a_fsr = [4, 6];
         p.a_stkptr = addr("STKPTR")?;
+        // The stack is empty after any reset (DS40001839E 4.4 Fig. 4-4 p.57); the PIC16F183xx packs give STKPTR's POR
+        // value as unknown (Table 4-4 p.55 likewise), which would read as one entry deep.
+        p.mem[p.a_stkptr] = EMPTY & p.implemented[p.a_stkptr];
         p.a_tos = addr("TOSL")?;
         if addr("TOSH")? != p.a_tos + 1 {
             return Err(format!("{}: TOSH does not follow TOSL", dev.device.name));
@@ -341,6 +346,7 @@ impl Pic16 {
                 .find_map(|s| s.fields.iter().chain(s.legacy.iter()).find(|f| f.name == name).map(|f| (s.addr as usize, 1u8 << f.pos)))
         };
         let addr = |name: &str| dev.find_sfr(name).map(|s| s.addr as usize);
+        let has_field = |reg: &str, field: &str| dev.find_sfr(reg).is_some_and(|s| s.fields.iter().any(|f| f.name == field));
         if let (Some(l), Some(h), Some(c0), Some(c1), Some(flag)) = (addr("TMR0L"), addr("TMR0H"), addr("T0CON0"), addr("T0CON1"), flag_of("TMR0IF")) {
             for a in [l, h, c0, c1] {
                 p.core[a] = true;
@@ -357,7 +363,15 @@ impl Pic16 {
                 addr(&format!("T{n}GCON")),
                 flag_of(&format!("TMR{n}IF")),
             ) {
+                // The layout is the one the TxCON fields name (TMRxCS: clock select in TxCON, DS40001839E Register 27-1;
+                // RD16: DS40002343F 23.13.1 p.261, clock in TxCLK); TxCLK must be there exactly for the newer one.
                 let clk = addr(&format!("T{n}CLK"));
+                let con_name = format!("T{n}CON");
+                let old = has_field(&con_name, &format!("TMR{n}CS"));
+                if old == has_field(&con_name, "RD16") || old == clk.is_some() {
+                    p.notes.insert(format!("Timer{n}: T{n}CON fields and T{n}CLK do not agree on a register layout; it is not modelled"));
+                    continue;
+                }
                 for a in [l, h, con, gcon].into_iter().chain(clk) {
                     p.core[a] = true;
                     p.tmr_reg[a] = true;
@@ -374,7 +388,15 @@ impl Pic16 {
                 p.notes.insert(format!("Timer{n} has only one of T{n}HLT and T{n}CLKCON in the description; it is not modelled"));
                 continue;
             }
-            if let (Some(tmr), Some(pr), Some(con), Some(flag)) = (tmr, pr, addr(&format!("T{n}CON")), flag_of(&format!("TMR{n}IF"))) {
+            let con_name = format!("T{n}CON");
+            if let (Some(tmr), Some(pr), Some(con), Some(flag)) = (tmr, pr, addr(&con_name), flag_of(&format!("TMR{n}IF"))) {
+                // TMRxON in TxCON is the older layout (DS40001839E Register 28-1), ON the newer (DS40002343F 24.10.3
+                // p.284); TxHLT and TxCLKCON must be there exactly for the newer one.
+                let old = has_field(&con_name, &format!("TMR{n}ON"));
+                if old == has_field(&con_name, "ON") || old == hlt.is_some() {
+                    p.notes.insert(format!("Timer{n}: T{n}CON fields and T{n}HLT/T{n}CLKCON do not agree on a register layout; it is not modelled"));
+                    continue;
+                }
                 for a in [tmr, pr, con].into_iter().chain(hlt).chain(clk) {
                     p.core[a] = true;
                     p.tmr_reg[a] = true;
@@ -523,7 +545,7 @@ impl Pic16 {
                     return self.read_tmr(a);
                 }
                 if self.flag_reg[a] {
-                    self.sync_timers();
+                    self.sync_flag_timers();
                 }
                 if a == 2 {
                     self.pc as u8
@@ -567,9 +589,9 @@ impl Pic16 {
                     self.write_tmr(a, v & self.implemented[a]);
                 } else {
                     if self.flag_reg[a] {
-                        // a flag a timer sets in this cycle is set before the write, so a write that clears it wins, also
-                        // for CLRF and MOVWF, which do not read first here (BCF measured, `[A110]`)
-                        self.sync_timers();
+                        // a flag Timer1 or the older Timer2 sets in this cycle is set before the write, so a write that
+                        // clears it wins, also for CLRF and MOVWF; Timer0's and the newer Timer2's come after it (`[A110]`)
+                        self.sync_flag_timers();
                     }
                     self.mem[a] = v & self.implemented[a];
                     if self.flag_reg[a] && self.irq_new && self.irq_new_by.iter().all(|&(r, b)| self.mem[r] & b == 0) {
@@ -634,6 +656,19 @@ impl Pic16 {
         }
         for i in 0..self.t2.len() {
             self.sync_t2(i);
+        }
+    }
+
+    /// Bring the timers whose flags land before a PIRn access in the same cycle to the current cycle: Timer1/3/5 and
+    /// the older Timer2/4/6 (`flag_reg`, `[A110]`).
+    fn sync_flag_timers(&mut self) {
+        for i in 0..self.t1.len() {
+            self.sync_t1(i);
+        }
+        for i in 0..self.t2.len() {
+            if self.t2[i].clk.is_none() {
+                self.sync_t2(i);
+            }
         }
     }
 
@@ -1414,12 +1449,8 @@ impl Pic16 {
     }
 }
 
-/// Disassembly of one word of a 6-bit-BSR part, in the syntax of Table 41-3.
-pub fn disasm(w: u16) -> String {
-    disasm_for(w, false)
-}
-
-/// Disassembly of one word; `bsr5` selects the PIC16F183xx MOVLB encoding (DS40001839E Table 34-3 p.399).
+/// Disassembly of one word in the syntax of Table 41-3; `bsr5` selects the PIC16F183xx MOVLB encoding (DS40001839E
+/// Table 34-3 p.399). `Pic16::disasm` picks it for the loaded part.
 pub fn disasm_for(w: u16, bsr5: bool) -> String {
     let f = w & 0x7F;
     let d = if w & 0x80 != 0 { "f" } else { "w" };
