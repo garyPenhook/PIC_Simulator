@@ -54,7 +54,7 @@
 //! active = "high"     # "high" (default) or "low" (the LED is wired to Vdd through the pin)
 //! name = "LED1"       # optional
 //!
-//! [[oled]]            # an SSD1306 OLED (I2C)
+//! [[oled]]            # an SSD1306 OLED (I2C); on a PIC16 part only bus = "gpio" (the model has no I2C host there yet)
 //! bus = "i2c1"        # "i2c1"/"i2c2": the part's hardware I2C host; "gpio": bit-banged on the pins below
 //! scl = "RC3"         # the PIC pins the OLED is wired to; the code must use the same ones
 //! sda = "RC4"         #   (hardware bus: SSPxCLKPPS/SSPxDATPPS and RxyPPS of both pins; see periph/board.rs)
@@ -356,10 +356,18 @@ impl Stimulus {
             ("i2c", !self.i2c.is_empty()),
             ("analog", !self.analog.is_empty()),
             ("mclr", !self.mclr.is_empty()),
-            ("led/oled", !self.board.is_empty()),
         ];
         if let Some((n, _)) = other.iter().find(|(_, used)| *used) {
-            return Err(format!("{}: [[{n}]] is not modelled on PIC16 parts yet; only [[uart]], [[adc]] and [[pin]]/[[port]] are", dev.device.name));
+            return Err(format!("{}: [[{n}]] is not modelled on PIC16 parts yet; only [[uart]], [[adc]], [[pin]]/[[port]], [[led]] and [[oled]] are", dev.device.name));
+        }
+        if self.board.oleds.iter().any(|o| o.bus != Bus::Gpio) {
+            return Err(format!("{}: a PIC16 part has no I2C host in the simulator yet; an [[oled]] needs bus = \"gpio\" (bit-banged)", dev.device.name));
+        }
+        let pins = cpu.pins();
+        for p in self.board.leds.iter().map(|l| l.pin).chain(self.board.oleds.iter().flat_map(|o| [o.scl, o.sda])) {
+            if !pins.contains(&p) {
+                return Err(format!("{}: no pin {} on this part", dev.device.name, crate::periph::pin_name(p)));
+            }
         }
         if !self.adc.is_empty() && !cpu.has_adc() {
             return Err(format!("{}: no ADC model in the simulator", dev.device.name));
@@ -369,6 +377,9 @@ impl Stimulus {
         }
         if let Some((l, ..)) = self.pins.iter().find(|p| !cpu.has_port(p.0)) {
             return Err(format!("{}: no PORT{} in the simulator", dev.device.name, *l as char));
+        }
+        if !self.board.is_empty() {
+            cpu.set_board(self.board);
         }
         for (letter, at, mask, val) in self.pins {
             cpu.pin_feed(letter, at, mask, val);

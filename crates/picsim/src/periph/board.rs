@@ -590,6 +590,14 @@ pub struct Board {
     pub fosc_mhz: f64,
 }
 
+/// What the parts on the board see of the PIC's pins; each core (`Periph` for the PIC18 parts, `Pic16`) implements it.
+pub trait PinView {
+    /// `(TRISx bit is clear, level)` of a pin; `None` when the part has no such port.
+    fn pin(&self, p: Pin) -> Option<(bool, bool)>;
+    /// Level of a line that the PIC may pull low (open drain with an external pull-up).
+    fn open_drain(&self, p: Pin) -> bool;
+}
+
 impl Board {
     pub fn is_empty(&self) -> bool {
         self.leds.is_empty() && self.oleds.is_empty()
@@ -608,6 +616,43 @@ impl Board {
     /// Length of one instruction cycle in ns (Fosc / 4).
     pub fn cycle_ns(&self) -> f64 {
         4000.0 / if self.fosc_mhz > 0.0 { self.fosc_mhz } else { 64.0 }
+    }
+
+    /// Updates the LEDs and the bit-banged OLEDs after an instruction ended at cycle `now`, and moves every OLED's clock on.
+    /// Returns the pins an OLED holds low (its acknowledge of a byte or of a read). An OLED on a hardware I2C host is
+    /// left to the caller, which owns that host.
+    pub fn poll_pins(&mut self, v: &impl PinView, now: u64, notes: &mut BTreeSet<String>) -> Vec<Pin> {
+        for l in &mut self.leds {
+            let dt = now.saturating_sub(l.last);
+            if l.on {
+                l.on_cycles += dt;
+                l.win_on += dt;
+            }
+            l.win_total += dt;
+            l.last = now;
+            let on = v.pin(l.pin).is_some_and(|(out, level)| out && level == l.active_high);
+            if on != l.on {
+                l.on = on;
+                if l.changes.len() >= MAX_CHANGES {
+                    l.changes.remove(0);
+                }
+                l.changes.push((now, on));
+            }
+        }
+        let cycle_ns = self.cycle_ns();
+        let mut held = Vec::new();
+        for o in &mut self.oleds {
+            let dt = now.saturating_sub(o.last_cycle);
+            o.last_cycle = now;
+            o.advance(dt as f64 * cycle_ns);
+            if o.bus == Bus::Gpio {
+                o.sample(v.open_drain(o.scl), v.open_drain(o.sda), notes);
+                if o.pull_low {
+                    held.push(o.sda);
+                }
+            }
+        }
+        held
     }
 
     /// Brightness 0..1 of each LED over the time since the last call (the last known state when no time passed).
@@ -677,12 +722,9 @@ impl Periph {
         self.ports.iter().flat_map(|q| (0..8u8).filter(move |b| m.implemented[q.port] >> b & 1 != 0).map(move |b| (q.letter, b))).collect()
     }
 
-    /// Level of a line that the PIC may pull low (open drain with an external pull-up).
-    fn line_level(&self, m: &DataMem, p: Pin) -> bool {
-        match self.ports.iter().find(|q| q.letter == p.0) {
-            Some(q) => !(m.mem[q.tris] >> p.1 & 1 == 0 && m.mem[q.lat] >> p.1 & 1 == 0),
-            None => true,
-        }
+    /// Level of a port's pins, for the parts on the board.
+    fn view<'a>(&'a self, m: &'a DataMem, now: u64) -> PeriphPins<'a> {
+        PeriphPins { p: self, m, now }
     }
 
     fn hw_wiring(&self, m: &DataMem, o: &Oled, num: u8) -> Result<(), String> {
@@ -713,55 +755,23 @@ impl Periph {
             return;
         }
         let mut b = std::mem::take(&mut self.board);
-        for l in &mut b.leds {
-            let dt = now.saturating_sub(l.last);
-            if l.on {
-                l.on_cycles += dt;
-                l.win_on += dt;
-            }
-            l.win_total += dt;
-            l.last = now;
-            let on = self.ports.iter().find(|q| q.letter == l.pin.0).is_some_and(|q| {
-                let out = m.mem[q.tris] >> l.pin.1 & 1 == 0;
-                let i = self.ports.iter().position(|r| r.letter == q.letter).unwrap();
-                out && (self.port_levels(i, m, now) >> l.pin.1 & 1 != 0) == l.active_high
-            });
-            if on != l.on {
-                l.on = on;
-                if l.changes.len() >= MAX_CHANGES {
-                    l.changes.remove(0);
-                }
-                l.changes.push((now, on));
-            }
-        }
-        let cycle_ns = b.cycle_ns();
-        for o in &mut b.oleds {
-            let dt = now.saturating_sub(o.last_cycle);
-            o.last_cycle = now;
-            o.advance(dt as f64 * cycle_ns);
-        }
-        let mut forced = if b.oleds.is_empty() { Vec::new() } else { vec![0u8; self.ports.len()] };
         let mut notes = BTreeSet::new();
+        let held = b.poll_pins(&self.view(m, now), now, &mut notes);
         let mut hw = Vec::new();
         for (k, o) in b.oleds.iter_mut().enumerate() {
-            match o.bus {
-                Bus::I2c(n) => {
-                    let w = self.hw_wiring(m, o, n);
-                    o.status = w.clone().err().unwrap_or_default();
-                    hw.push((k, n, w.is_ok()));
-                }
-                Bus::Gpio => {
-                    let (scl, sda) = (self.line_level(m, o.scl), self.line_level(m, o.sda));
-                    o.sample(scl, sda, &mut notes);
-                    if o.pull_low
-                        && let Some(i) = self.ports.iter().position(|q| q.letter == o.sda.0)
-                    {
-                        forced[i] |= 1 << o.sda.1;
-                    }
-                }
+            if let Bus::I2c(n) = o.bus {
+                let w = self.hw_wiring(m, o, n);
+                o.status = w.clone().err().unwrap_or_default();
+                hw.push((k, n, w.is_ok()));
             }
         }
         if !b.oleds.is_empty() {
+            let mut forced = vec![0u8; self.ports.len()];
+            for pin in held {
+                if let Some(i) = self.ports.iter().position(|q| q.letter == pin.0) {
+                    forced[i] |= 1 << pin.1;
+                }
+            }
             self.forced = forced;
         }
         // Hardware I2C: the OLED answers only when wired; bytes come from the bus log.
@@ -1013,5 +1023,26 @@ mod tests {
         cmd(&mut o, &mut n, &[0xA3, 0, 56, 0x29, 0, 0, 0b111, 7, 1, 0x2F]); // 56 scroll rows, 1 row per step
         o.advance(step_ns(2) * 56.01); // a full turn of the area
         assert!(o.pixel(56, 0), "row 0 is back at the top (column moved 56 right)");
+    }
+}
+
+/// `Periph`'s ports as the board sees them.
+struct PeriphPins<'a> {
+    p: &'a Periph,
+    m: &'a DataMem,
+    now: u64,
+}
+
+impl PinView for PeriphPins<'_> {
+    fn pin(&self, p: Pin) -> Option<(bool, bool)> {
+        let i = self.p.ports.iter().position(|q| q.letter == p.0)?;
+        Some((self.m.mem[self.p.ports[i].tris] >> p.1 & 1 == 0, self.p.port_levels(i, self.m, self.now) >> p.1 & 1 != 0))
+    }
+
+    fn open_drain(&self, p: Pin) -> bool {
+        match self.p.ports.iter().find(|q| q.letter == p.0) {
+            Some(q) => !(self.m.mem[q.tris] >> p.1 & 1 == 0 && self.m.mem[q.lat] >> p.1 & 1 == 0),
+            None => true,
+        }
     }
 }

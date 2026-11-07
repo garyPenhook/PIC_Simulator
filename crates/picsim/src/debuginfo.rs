@@ -35,7 +35,7 @@ pub struct Var {
     pub param: bool,
 }
 
-/// A routine's byte-address range `[low, high)`.
+/// A routine's program-address range `[low, high)`: byte addresses on a PIC18 part, word addresses on a PIC16 (the units of the PC).
 #[derive(Clone, Debug)]
 pub struct Func {
     pub name: String,
@@ -96,10 +96,10 @@ impl DebugInfo {
                             Some(AttributeValue::Block(b)) => b.slice().to_vec(),
                             _ => continue,
                         };
-                        if ex.len() != 5 || ex[0] != 0x03 {
-                            continue; // DW_OP_addr <u32> is all the compiler writes
+                        if !matches!(ex.len(), 3 | 5) || ex[0] != 0x03 {
+                            continue; // DW_OP_addr <address> is all the compiler writes: 4 bytes on a PIC18, 2 may do on a PIC16
                         }
-                        let addr = u32::from_le_bytes([ex[1], ex[2], ex[3], ex[4]]);
+                        let addr = ex[1..].iter().rev().fold(0u32, |a, b| a << 8 | u32::from(*b));
                         let Some(AttributeValue::UnitRef(t)) = e.attr_value(gimli::DW_AT_type) else { continue };
                         let Some(ty) = describe(&dwarf, &unit, t) else { continue };
                         info.vars.push(Var { name, addr, bytes: ty.bytes, kind: ty.kind, elem: ty.elem, array: ty.array, ty: ty.name, scope: if e.tag() == gimli::DW_TAG_formal_parameter || cur_func.is_some() { cur_func } else { None }, param: e.tag() == gimli::DW_TAG_formal_parameter });
@@ -207,8 +207,8 @@ pub fn elf_for(program: &std::path::Path) -> Option<std::path::PathBuf> {
     [Some(program.with_extension("elf")), program.parent().and_then(|d| d.parent()).map(|d| d.join(stem).with_extension("elf"))].into_iter().flatten().find(|e| e.is_file())
 }
 
-/// The part an ELF was built for (`18F27Q10`): from the `.note.microchip` section the linker writes (vendor "Microchip", then the
-/// part), else from the `pic18f27q10.inc` file name the assembler records.
+/// The part an ELF was built for (`18F27Q10`, `16F17146`): from the `.note.microchip` section the linker writes (vendor "Microchip", then
+/// the part), else from the `pic18f27q10.inc` / `pic16f17146.inc` file name the assembler records.
 pub fn device_of(elf: &[u8]) -> Option<String> {
     let vendor = b"Microchip\0";
     let mut from = 0;
@@ -221,15 +221,16 @@ pub fn device_of(elf: &[u8]) -> Option<String> {
         }
         from += i + vendor.len();
     }
-    let key = b"pic18f";
-    let mut from = 0;
-    while let Some(i) = elf[from..].windows(key.len()).position(|w| w == key) {
-        let start = from + i + 3; // after "pic"
-        let name: Vec<u8> = elf[start..].iter().copied().take_while(u8::is_ascii_alphanumeric).collect();
-        if elf[start + name.len()..].starts_with(b".inc") && name.len() < 16 {
-            return String::from_utf8(name).ok().map(|n| n.to_ascii_uppercase());
+    for key in [b"pic18f", b"pic16f"] {
+        let mut from = 0;
+        while let Some(i) = elf[from..].windows(key.len()).position(|w| w == key) {
+            let start = from + i + 3; // after "pic"
+            let name: Vec<u8> = elf[start..].iter().copied().take_while(u8::is_ascii_alphanumeric).collect();
+            if elf[start + name.len()..].starts_with(b".inc") && name.len() < 16 {
+                return String::from_utf8(name).ok().map(|n| n.to_ascii_uppercase());
+            }
+            from += i + key.len();
         }
-        from += i + key.len();
     }
     None
 }

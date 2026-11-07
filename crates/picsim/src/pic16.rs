@@ -13,7 +13,7 @@ use crate::config::Config;
 use crate::periph::adc::Adc;
 use crate::periph::nvm16::Nvm16;
 use crate::periph::uart::{self, Uart};
-use crate::periph::RxStream;
+use crate::periph::{Board, Bus, Pin, PinView, RxStream};
 use devdesc::Device;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -223,6 +223,11 @@ pub struct Pic16 {
     pps_out: Vec<(usize, usize, u8)>,
     /// The MCLR pin (index into `ports`, mask): input only, no analog function, and it reads 1 while MCLRE = 1.
     mclr_pin: Option<(usize, u8)>,
+    /// The parts on the board (LEDs, a bit-banged OLED) and, per port, the pins their external pull-ups raise and the
+    /// pins an OLED holds low (see `periph/board.rs`).
+    pub board: Board,
+    pullup: Vec<u8>,
+    forced: Vec<u8>,
 }
 
 fn por_bits(s: &str) -> u8 {
@@ -335,6 +340,9 @@ impl Pic16 {
             pps_reg: vec![false; MEM],
             pps_out: Vec::new(),
             mclr_pin: None,
+            board: Board::default(),
+            pullup: Vec::new(),
+            forced: Vec::new(),
         };
         for g in &d.gpr {
             for a in g.start..g.end {
@@ -847,12 +855,72 @@ impl Pic16 {
                 ext = ext & !mask | val & mask;
             }
         }
-        // a pin without a TRISx bit and the MCLR pin are always inputs, and the MCLR pin has no analog function
+        // the MCLR pin has no analog function
         let m = self.mclr_pin.filter(|&(k, _)| k == i).map_or(0, |(_, m)| m);
-        let tris = self.mem[p.tris] | self.implemented[p.port] & !self.implemented[p.tris] | m;
+        let tris = self.tris_of(i);
         let ana = p.ansel.map_or(0, |a| self.mem[a]) & !m;
         let mclr_high = if self.cfg.get("MCLRE") == Some(1) { m } else { 0 }; // reads 1 while MCLR is enabled (DS40002343F 16.13 p.182)
-        (self.mem[p.lat] & !tris | (ext | mclr_high) & tris & !ana) & self.implemented[p.port]
+        let v = self.mem[p.lat] & !tris | (ext | mclr_high) & tris & !ana;
+        // The OLED's bus lines: an external pull-up on a released pin, held low while the OLED acknowledges.
+        let v = v | self.pullup.get(i).copied().unwrap_or(0) & tris;
+        (v & !self.forced.get(i).copied().unwrap_or(0)) & self.implemented[p.port]
+    }
+
+    /// TRISx of port `i` as the pins see it: a pin without a TRISx bit and the MCLR pin are always inputs.
+    fn tris_of(&self, i: usize) -> u8 {
+        let p = &self.ports[i];
+        let m = self.mclr_pin.filter(|&(k, _)| k == i).map_or(0, |(_, m)| m);
+        self.mem[p.tris] | self.implemented[p.port] & !self.implemented[p.tris] | m
+    }
+
+    /// Every pin of the part, for a pin chooser.
+    pub fn pins(&self) -> Vec<Pin> {
+        self.ports.iter().flat_map(|q| (0..8u8).filter(move |b| self.implemented[q.port] >> b & 1 != 0).map(move |b| (q.letter, b))).collect()
+    }
+
+    /// Replace the parts on the board (their states start at power-on). The PIC16 model has no I2C host yet, so an OLED
+    /// works on `Bus::Gpio` only; one on a hardware bus stays dark and says why in its `status`.
+    pub fn set_board(&mut self, b: Board) {
+        self.board = b.fresh();
+        self.board_wiring();
+    }
+
+    /// Call after the pins or addresses in `board` were edited.
+    pub fn board_wiring(&mut self) {
+        self.pullup = vec![0; self.ports.len()];
+        self.forced = vec![0; self.ports.len()];
+        for o in self.board.oleds.iter().filter(|o| o.bus == Bus::Gpio) {
+            for p in [o.scl, o.sda] {
+                if let Some(i) = self.ports.iter().position(|q| q.letter == p.0) {
+                    self.pullup[i] |= 1 << p.1;
+                }
+            }
+        }
+    }
+
+    /// Update the parts after an instruction ended at the current cycle.
+    fn board_poll(&mut self) {
+        if self.board.is_empty() {
+            return;
+        }
+        let now = self.cycles;
+        let mut b = std::mem::take(&mut self.board);
+        let mut notes = BTreeSet::new();
+        let held = b.poll_pins(&*self, now, &mut notes);
+        for o in b.oleds.iter_mut().filter(|o| matches!(o.bus, Bus::I2c(_))) {
+            o.status = "the PIC16 model has no I2C host yet; use a GPIO (bit-banged) OLED".into();
+        }
+        if !b.oleds.is_empty() {
+            let mut forced = vec![0u8; self.ports.len()];
+            for pin in held {
+                if let Some(i) = self.ports.iter().position(|q| q.letter == pin.0) {
+                    forced[i] |= 1 << pin.1;
+                }
+            }
+            self.forced = forced;
+        }
+        self.notes.extend(notes);
+        self.board = b;
     }
 
     /// The pin level an input selection register (PORT field at bits 5:3, PIN at 2:0; the PIC16F183xx has 5 bits and the
@@ -1530,6 +1598,12 @@ impl Pic16 {
 
     /// Execute one instruction (or take one interrupt); returns the cycles it took (also added to `self.cycles`).
     pub fn step(&mut self) -> u32 {
+        let n = self.step_core();
+        self.board_poll();
+        n
+    }
+
+    fn step_core(&mut self) -> u32 {
         let start = self.cycles;
         if self.sleeping {
             if self.enabled_flag_any() {
@@ -1982,5 +2056,19 @@ pub fn disasm_for(w: u16, bsr5: bool) -> String {
             0xE => format!("addlw   {k8:#04x}"),
             _ => format!("{:<7} {s6}[FSR{n}]", if w & 0x80 == 0 { "moviw" } else { "movwi" }),
         },
+    }
+}
+
+impl PinView for Pic16 {
+    fn pin(&self, p: Pin) -> Option<(bool, bool)> {
+        let i = self.ports.iter().position(|q| q.letter == p.0)?;
+        Some((self.tris_of(i) >> p.1 & 1 == 0, self.port_levels(i) >> p.1 & 1 != 0))
+    }
+
+    fn open_drain(&self, p: Pin) -> bool {
+        match self.ports.iter().position(|q| q.letter == p.0) {
+            Some(i) => !(self.tris_of(i) >> p.1 & 1 == 0 && self.mem[self.ports[i].lat] >> p.1 & 1 == 0),
+            None => true,
+        }
     }
 }

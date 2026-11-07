@@ -1,5 +1,5 @@
 //! Source line table read from the `.debug_line` section of an ELF built with `basil -g`:
-//! program-memory byte address -> (source file, line). The simulator uses it to show the BASIC line that is executing.
+//! program-memory address (bytes on a PIC18, words on a PIC16) -> (source file, line). The simulator uses it to show the BASIC line that is executing.
 
 use gimli::{AttributeValue, EndianSlice, LittleEndian};
 use object::{Object, ObjectSection};
@@ -32,7 +32,7 @@ impl LineMap {
             // Each compilation unit has its own program: step by its initial length field.
             let len = u32::from_le_bytes([data[off], data[off + 1], data[off + 2], data[off + 3]]) as usize;
             let next = off + 4 + len;
-            let prog = dl.program(gimli::DebugLineOffset(off), 4, None, None).map_err(|e| e.to_string())?;
+            let prog = dl.program(gimli::DebugLineOffset(off), address_size(&dl, off), None, None).map_err(|e| e.to_string())?;
             let mut rows = prog.rows();
             let mut local: Vec<PathBuf> = Vec::new();
             while let Some((hdr, row)) = rows.next_row().map_err(|e| e.to_string())? {
@@ -86,6 +86,16 @@ impl LineMap {
         let mut v: Vec<&PathBuf> = self.files.iter().filter(|f| f.extension().is_some_and(|e| e.eq_ignore_ascii_case("bas"))).collect();
         v.sort();
         v
+    }
+}
+
+/// The size of an address in the line program at `off`. A version 2-4 header does not say, so it is read from the first
+/// `DW_LNE_set_address` (`00 len 02 addr...`): the PIC18 tools write 4 bytes, the PIC16 assembler 2.
+fn address_size(dl: &gimli::DebugLine<EndianSlice<'_, LittleEndian>>, off: usize) -> u8 {
+    let Ok(p) = dl.program(gimli::DebugLineOffset(off), 4, None, None) else { return 4 };
+    match p.header().raw_program_buf().slice() {
+        [0, len, 2, ..] if (2..=9).contains(len) => len - 1,
+        _ => 4,
     }
 }
 

@@ -21,10 +21,10 @@ pub enum Stop {
 /// State of a source-line step that runs over several calls of `Machine::line_step`.
 #[derive(Clone, Debug)]
 pub struct LineStep {
-    over: bool,
-    out: bool,
-    here: Option<(std::path::PathBuf, u32)>,
-    d0: u8,
+    pub(crate) over: bool,
+    pub(crate) out: bool,
+    pub(crate) here: Option<(std::path::PathBuf, u32)>,
+    pub(crate) d0: u8,
 }
 
 pub struct Machine {

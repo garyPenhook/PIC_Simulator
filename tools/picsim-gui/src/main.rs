@@ -205,10 +205,10 @@ impl App {
         }
     }
 
-    /// Loads a program for a PIC16 part: the hex, the assembly listing's labels and the stimulus file. There is no ELF
-    /// debug information, Board (LEDs, OLED) or source view for these parts yet.
+    /// Loads a program for a PIC16 part: the hex, the assembly listing's labels, the stimulus file and the ELF beside the hex
+    /// (routines, variables and source lines; its addresses are words, like the PC).
     fn load16(&mut self, dev_note: String) {
-        let res = (|| -> Result<(Machine16, BTreeMap<u32, String>), String> {
+        let res = (|| -> Result<(Machine16, BTreeMap<u32, String>, String), String> {
             let dev = devdesc::Device::load(&self.devices_dir.join(format!("{}.toml", self.device))).map_err(|e| e.to_string())?;
             let mut m = Machine16::new(dev)?;
             let p = picsim::lines::program_hex(std::path::Path::new(self.hex_path.trim()))?;
@@ -228,7 +228,17 @@ impl App {
                 let f = PathBuf::from(self.stim_path.trim());
                 m.load_stimulus(&std::fs::read_to_string(&f).map_err(|e| format!("{}: {e}", f.display()))?).map_err(|e| format!("{}: {e}", f.display()))?;
             }
-            Ok((m, labels))
+            let note = match picsim::debuginfo::elf_for(std::path::Path::new(self.hex_path.trim())) {
+                Some(e) => match m.load_elf(&e) {
+                    Ok(()) => {
+                        self.elf_dir = e.parent().map(PathBuf::from).unwrap_or_default();
+                        if m.debug.lines.source_files().is_empty() { " - ELF has no BASIC lines (basil -g adds none for PIC16 parts yet)".to_string() } else { String::new() }
+                    }
+                    Err(er) => format!(" - {er}"),
+                },
+                None => " - no .elf beside the hex: no source view or variables".to_string(),
+            };
+            Ok((m, labels, note))
         })();
         self.m = None;
         self.sources.clear();
@@ -236,11 +246,22 @@ impl App {
         self.snap = None;
         self.lines = LineMap::default();
         match res {
-            Ok((m, labels)) => {
-                self.msg = format!("loaded {} ({} labels){dev_note} - PIC16: no Board or source view yet", self.hex_path, labels.len());
+            Ok((mut m, labels, note)) => {
+                let mut labels = labels;
+                for f in &m.debug.funcs {
+                    labels.entry(f.low).or_insert_with(|| f.name.clone());
+                }
+                if m.cpu.board.is_empty() {
+                    m.cpu.set_board(self.board_cfg.fresh()); // keep the parts wired in an earlier session
+                } else {
+                    self.board_cfg = m.cpu.board.fresh(); // the stimulus file wired them
+                }
+                self.lines = if m.debug.lines.source_files().is_empty() { LineMap::default() } else { m.debug.lines.clone() };
+                self.src_view = !self.lines.is_empty();
+                self.tab = if m.debug.vars.is_empty() { 0 } else { 4 }; // the Variables tab
+                self.msg = format!("loaded {} ({} labels, {} variables){dev_note}{note}", self.hex_path, labels.len(), m.debug.vars.len());
                 self.labels = labels;
                 self.fosc_mhz = self.fosc_mhz.min(32.0);
-                self.tab = 0;
                 self.m16 = Some(m);
             }
             Err(e) => {
@@ -256,7 +277,7 @@ impl App {
     }
 
     fn snapshot(&mut self) {
-        self.snap = self.m.as_ref().map(|m| m.cpu.m.mem.clone());
+        self.snap = self.m.as_ref().map(|m| m.cpu.m.mem.clone()).or_else(|| self.m16.as_ref().map(|m| m.cpu.mem.clone()));
     }
 
     /// Steps to the next BASIC line. `over` runs calls (and interrupts) to completion; `out` runs until the current
@@ -264,6 +285,8 @@ impl App {
     fn step_line(&mut self, over: bool, out: bool) {
         self.snapshot();
         if let Some(m) = &self.m {
+            self.job = Some(Job::Line(m.begin_line_step(over, out)));
+        } else if let Some(m) = &self.m16 {
             self.job = Some(Job::Line(m.begin_line_step(over, out)));
         }
     }
@@ -306,24 +329,23 @@ impl eframe::App for App {
         if let Some(job) = self.job.take() {
             let mut keep = Some(job);
             if let Some(m) = self.m16.as_mut() {
-                // Only "step over" runs on a PIC16 (there are no source lines to step by).
-                while let Some(Job::Until(t)) = keep.as_ref() {
-                    match m.run(Some(*t), 20_000) {
-                        Stop::Cycles => {}
-                        Stop::Halt => {
-                            self.last_stop = None; // arrived
-                            keep = None;
-                        }
-                        s => {
-                            self.last_stop = Some(s);
-                            keep = None;
-                        }
-                    }
-                    if keep.is_some() && t0.elapsed() > slice {
+                while let Some(j) = keep.as_ref() {
+                    // None: not finished. Some(None): arrived. Some(Some(stop)): a breakpoint or the halt came first.
+                    let finished: Option<Option<Stop>> = match j {
+                        Job::Line(s) => m.line_step(s, 20_000),
+                        Job::Until(t) => match m.run(Some(*t), 20_000) {
+                            Stop::Cycles => None,
+                            Stop::Halt => Some(None), // the target address
+                            s => Some(Some(s)),
+                        },
+                    };
+                    if let Some(r) = finished {
+                        self.last_stop = r;
+                        keep = None;
+                    } else if t0.elapsed() > slice {
                         break;
                     }
                 }
-                keep = keep.filter(|j| matches!(j, Job::Until(_)));
             } else if let Some(m) = self.m.as_mut() {
                 while let Some(j) = keep.as_ref() {
                     // None: not finished. Some(None): arrived. Some(Some(stop)): a breakpoint or the halt came first.
@@ -504,14 +526,15 @@ impl eframe::App for App {
         let Some(m) = self.m.as_mut() else {
             // No program yet: still let the LEDs and OLED be wired; they are kept for the next Load.
             if self.pre_pins.0 != self.device {
-                let pins = devdesc::Device::load(&self.devices_dir.join(format!("{}.toml", self.device))).ok().and_then(|d| Machine::new(d).ok()).map(|m| m.cpu.p.pins(&m.cpu.m)).unwrap_or_default();
+                let pins = devdesc::Device::load(&self.devices_dir.join(format!("{}.toml", self.device)))
+                    .ok()
+                    .and_then(|d| if d.device.family == "pic16e" { Machine16::new(d).ok().map(|m| m.cpu.pins()) } else { Machine::new(d).ok().map(|m| m.cpu.p.pins(&m.cpu.m)) })
+                    .unwrap_or_default();
                 self.pre_pins = (self.device.clone(), pins);
             }
             egui::Panel::right("data").default_size(360.0).show(ui, |ui| {
                 ui.heading("Board");
-                if self.device.starts_with("16F") {
-                    ui.label("LEDs and an OLED are not available for PIC16 parts yet. A stimulus file can still drive the pins.");
-                } else if self.pre_pins.1.is_empty() {
+                if self.pre_pins.1.is_empty() {
                     ui.label("Pick a device to wire LEDs and an OLED.");
                 } else if board_ui(ui, &mut self.board_cfg, &self.pre_pins.1) {
                     self.board_cfg = self.board_cfg.fresh();
@@ -527,37 +550,7 @@ impl eframe::App for App {
         if !m.cpu.p.board.is_empty() {
             let duty = m.cpu.p.board.take_window();
             self.led_duty = duty;
-            egui::Panel::bottom("board").show(ui, |ui| {
-                let b = &m.cpu.p.board;
-                ui.horizontal_wrapped(|ui| {
-                    for (l, d) in b.leds.iter().zip(&self.led_duty) {
-                        ui.vertical(|ui| {
-                            let (r, _) = ui.allocate_exact_size(egui::vec2(26.0, 26.0), egui::Sense::hover());
-                            let v = (60.0 + 195.0 * d.clamp(0.0, 1.0)) as u8;
-                            ui.painter().circle_filled(r.center(), 11.0, egui::Color32::from_rgb(v, (f32::from(v) * 0.15) as u8, (f32::from(v) * 0.1) as u8));
-                            ui.label(format!("{} {}", l.name, pin_name(l.pin)));
-                        });
-                    }
-                    for o in &b.oleds {
-                        ui.vertical(|ui| {
-                            let h = usize::from(o.height);
-                            let (r, _) = ui.allocate_exact_size(egui::vec2(128.0 * 3.0, h as f32 * 3.0), egui::Sense::hover());
-                            ui.painter().rect_filled(r, 0.0, egui::Color32::BLACK);
-                            let on = egui::Color32::from_rgb(120, 200, 255);
-                            for y in 0..h {
-                                for x in 0..128 {
-                                    if o.pixel(x, y) {
-                                        let p = r.min + egui::vec2(x as f32 * 3.0, y as f32 * 3.0);
-                                        ui.painter().rect_filled(egui::Rect::from_min_size(p, egui::vec2(3.0, 3.0)), 0.0, on);
-                                    }
-                                }
-                            }
-                            let st = if o.status.is_empty() { String::new() } else { format!(" - NOT WIRED: {}", o.status) };
-                            ui.label(format!("OLED {} SCL {} SDA {}{st}", match o.bus { Bus::Gpio => "GPIO".to_string(), Bus::I2c(n) => format!("I2C{n}") }, pin_name(o.scl), pin_name(o.sda)));
-                        });
-                    }
-                });
-            });
+            egui::Panel::bottom("board").show(ui, |ui| board_strip(ui, &m.cpu.p.board, &self.led_duty));
         }
         egui::Panel::left("regs").default_size(230.0).show(ui, |ui| {
             ui.heading("CPU");
@@ -662,33 +655,7 @@ impl eframe::App for App {
                         self.board_cfg = m.cpu.p.board.fresh();
                     }
                 }
-                4 => {
-                    if m.debug.vars.is_empty() {
-                        ui.label("No variable information. Build with basil -g and keep the .elf beside the .hex.");
-                    } else {
-                        let f = m.debug.func_at(pc);
-                        ui.label(match f {
-                            Some(i) => format!("in {}", m.debug.funcs[i].name),
-                            None => "in start-up code (globals only)".to_string(),
-                        });
-                        let mem = &m.cpu.m.mem;
-                        let snap = self.snap.as_ref();
-                        egui::ScrollArea::vertical().show(ui, |ui| {
-                            egui::Grid::new("vars").num_columns(3).striped(true).show(ui, |ui| {
-                                for v in m.debug.visible(f) {
-                                    let a = v.addr as usize;
-                                    let changed = snap.is_some_and(|s| s.get(a..a + v.bytes as usize) != mem.get(a..a + v.bytes as usize));
-                                    let col = if changed { egui::Color32::from_rgb(255, 170, 60) } else { ui.visuals().text_color() };
-                                    ui.colored_label(col, format!("{}{}", v.name, if v.param { " (arg)" } else { "" }));
-                                    ui.weak(format!("{} @{:03X}", v.ty, v.addr));
-                                    ui.add(egui::Label::new(egui::RichText::new(v.show(mem)).monospace().color(col)).wrap());
-                                    ui.end_row();
-                                }
-                            });
-                        });
-                        ui.label("orange: changed since the last Step or Run");
-                    }
-                }
+                4 => variables_ui(ui, &m.debug, pc, &m.cpu.m.mem, self.snap.as_ref()),
                 _ => {
                     let (syms, vars, dev) = (&m.syms, &m.debug.vars, &m.dev);
                     watch_ui(ui, &mut self.watch, &mut self.watch_in, |n| syms.get(n).copied().or_else(|| vars.iter().find(|v| v.scope.is_none() && v.name == *n).map(|v| v.addr)).or_else(|| dev.find_sfr(n).map(|s| s.addr)), |a, l| m.peek(a, l));
@@ -719,7 +686,9 @@ impl eframe::App for App {
             }
             if self.src_view && !self.lines.is_empty() {
                 let home = std::path::Path::new(self.hex_path.trim()).file_stem().map(|s| s.to_string_lossy().trim_end_matches("_debug").to_ascii_lowercase());
-                source_pane(ui, &self.lines, &self.elf_dir, &mut self.sources, &mut self.last_src, m, pc, self.follow, if self.stay_home { home } else { None });
+                let sp = usize::from(m.cpu.m.mem[m.cpu.m.regs.stkptr as usize] & 0x7F).min(m.cpu.stack.len() - 1);
+                let callers: Vec<u32> = (1..=sp).rev().map(|i| m.cpu.stack[i].saturating_sub(2)).collect(); // the CALL is the instruction before the return address
+                source_pane(ui, &self.lines, &self.elf_dir, &mut self.sources, &mut self.last_src, &mut m.breakpoints, &callers, pc, self.follow, if self.stay_home { home } else { None });
                 return;
             }
             let prog = &m.cpu.prog;
@@ -767,6 +736,34 @@ impl eframe::App for App {
     }
 }
 
+/// The Variables tab: the globals and the parameters and locals of the routine the PC is in, with their values in `mem`;
+/// those that differ from `snap` (data memory when the last Step or Run began) are marked.
+fn variables_ui(ui: &mut egui::Ui, debug: &picsim::debuginfo::DebugInfo, pc: u32, mem: &[u8], snap: Option<&Vec<u8>>) {
+    if debug.vars.is_empty() {
+        ui.label("No variable information. Build with basil -g and keep the .elf beside the .hex.");
+        return;
+    }
+    let f = debug.func_at(pc);
+    ui.label(match f {
+        Some(i) => format!("in {}", debug.funcs[i].name),
+        None => "in start-up code (globals only)".to_string(),
+    });
+    egui::ScrollArea::vertical().show(ui, |ui| {
+        egui::Grid::new("vars").num_columns(3).striped(true).show(ui, |ui| {
+            for v in debug.visible(f) {
+                let a = v.addr as usize;
+                let changed = snap.is_some_and(|s| s.get(a..a + v.bytes as usize) != mem.get(a..a + v.bytes as usize));
+                let col = if changed { egui::Color32::from_rgb(255, 170, 60) } else { ui.visuals().text_color() };
+                ui.colored_label(col, format!("{}{}", v.name, if v.param { " (arg)" } else { "" }));
+                ui.weak(format!("{} @{:03X}", v.ty, v.addr));
+                ui.add(egui::Label::new(egui::RichText::new(v.show(mem)).monospace().color(col)).wrap());
+                ui.end_row();
+            }
+        });
+    });
+    ui.label("orange: changed since the last Step or Run");
+}
+
 /// The Watch tab: symbols (or SFR names) with a byte count, shown as unsigned, signed and hex. `addr` resolves a name,
 /// `peek` reads bytes without side effects.
 fn watch_ui(ui: &mut egui::Ui, watch: &mut Vec<(String, usize)>, input: &mut String, addr: impl Fn(&str) -> Option<u32>, peek: impl Fn(u32, usize) -> Vec<u8>) {
@@ -806,6 +803,11 @@ impl App {
     fn ui16(&mut self, ui: &mut egui::Ui) {
         let Some(m) = self.m16.as_mut() else { return };
         let pc = m.cpu.pc;
+        m.cpu.board.fosc_mhz = f64::from(self.fosc_mhz);
+        if !m.cpu.board.is_empty() {
+            self.led_duty = m.cpu.board.take_window();
+            egui::Panel::bottom("board").show(ui, |ui| board_strip(ui, &m.cpu.board, &self.led_duty));
+        }
         egui::Panel::left("regs").default_size(230.0).show(ui, |ui| {
             ui.heading("CPU");
             let g = |a: usize| m.cpu.mem[a];
@@ -830,13 +832,29 @@ impl App {
                 row(ui, "Time", format!("{:.3} ms", m.cpu.cycles as f64 / (f64::from(self.fosc_mhz) * 1e6 / 4.0) * 1e3));
             });
             ui.separator();
-            ui.heading("Return stack");
+            let dbg = &m.debug;
+            ui.heading(if dbg.funcs.is_empty() { "Return stack" } else { "Call stack" });
+            // Routine and BASIC line of a program (word) address.
+            let loc = |a: u32| -> String {
+                let f = dbg.func_at(a).map_or("?", |i| dbg.funcs[i].name.as_str());
+                match dbg.lines.lookup(a) {
+                    Some((p, l)) => format!("{f}  {}:{l}", p.file_name().unwrap_or_default().to_string_lossy()),
+                    None => f.to_string(),
+                }
+            };
+            if !dbg.funcs.is_empty() {
+                ui.monospace(format!("> {}", loc(pc)));
+            }
             let depth = m.cpu.depth() as usize;
             for i in (0..depth.min(16)).rev() { // STKPTR keeps counting after an overflow with STVREN = 0, but only 16 entries exist
                 let ret = m.cpu.stack_entry(i);
-                // The entry is the address after the CALL (or the interrupted instruction): name the label at or before it.
-                let near = self.labels.range(..=ret.saturating_sub(1)).next_back().map_or(String::new(), |(a, n)| format!("  {n}+{}", ret.saturating_sub(1) - a));
-                ui.monospace(format!("{:>3}  {ret:04X}{near}", i + 1));
+                if dbg.funcs.is_empty() {
+                    // The entry is the address after the CALL (or the interrupted instruction): name the label at or before it.
+                    let near = self.labels.range(..=ret.saturating_sub(1)).next_back().map_or(String::new(), |(a, n)| format!("  {n}+{}", ret.saturating_sub(1) - a));
+                    ui.monospace(format!("{:>3}  {ret:04X}{near}", i + 1));
+                } else {
+                    ui.monospace(format!("{:>3}  {}", i + 1, loc(ret.saturating_sub(1)))); // the CALL is the word before the return address
+                }
             }
             if !m.cpu.unmodelled.is_empty() || !m.cpu.notes.is_empty() {
                 ui.separator();
@@ -851,7 +869,7 @@ impl App {
         });
         egui::Panel::right("data").default_size(360.0).show(ui, |ui| {
             ui.horizontal(|ui| {
-                for (i, t) in ["Memory", "SFRs", "Watch"].iter().enumerate() {
+                for (i, t) in ["Memory", "SFRs", "Watch", "Board", "Variables"].iter().enumerate() {
                     ui.selectable_value(&mut self.tab, i, *t);
                 }
             });
@@ -882,16 +900,33 @@ impl App {
                         }
                     });
                 }
+                3 => {
+                    let pins = m.cpu.pins();
+                    if board_ui(ui, &mut m.cpu.board, &pins) {
+                        // A pin or address changed: re-attach the parts (the OLED starts blank, as after a power-up).
+                        let b = m.cpu.board.clone();
+                        m.cpu.set_board(b);
+                        self.board_cfg = m.cpu.board.fresh();
+                    }
+                }
+                4 => variables_ui(ui, &m.debug, pc, &m.cpu.mem, self.snap.as_ref()),
                 _ => {
-                    let (syms, dev) = (&m.syms, &m.dev);
-                    watch_ui(ui, &mut self.watch, &mut self.watch_in, |n| syms.get(n).copied().or_else(|| dev.find_sfr(n).map(|s| s.addr)), |a, l| m.peek(a, l));
+                    let (syms, vars, dev) = (&m.syms, &m.debug.vars, &m.dev);
+                    watch_ui(ui, &mut self.watch, &mut self.watch_in, |n| syms.get(n).copied().or_else(|| vars.iter().find(|v| v.scope.is_none() && v.name == *n).map(|v| v.addr)).or_else(|| dev.find_sfr(n).map(|s| s.addr)), |a, l| m.peek(a, l));
                 }
             }
         });
         egui::CentralPanel::default().show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.heading("Program");
+                if !self.lines.is_empty() {
+                    ui.selectable_value(&mut self.src_view, true, "Source");
+                    ui.selectable_value(&mut self.src_view, false, "Disassembly");
+                }
                 ui.checkbox(&mut self.follow, "follow PC");
+                if self.src_view && !self.lines.is_empty() {
+                    ui.checkbox(&mut self.stay_home, "stay in my code").on_hover_text("while the PC is in a library routine (DelaySeconds ...), show the line of your program that called it");
+                }
                 ui.add(egui::TextEdit::singleline(&mut self.goto_in).hint_text("goto 0x… (word)").desired_width(100.0));
                 if ui.button("Go").clicked()
                     && let Some(a) = hex_u32(&self.goto_in)
@@ -900,6 +935,15 @@ impl App {
                     self.follow = false;
                 }
             });
+            if self.lines.is_empty() {
+                ui.colored_label(egui::Color32::from_rgb(255, 150, 80), "No BASIC line information for this program. Source, Line stepping and the call stack with lines need an ELF with BASIC lines beside the .hex (basil -g adds none for PIC16 parts yet).");
+            }
+            if self.src_view && !self.lines.is_empty() {
+                let home = std::path::Path::new(self.hex_path.trim()).file_stem().map(|s| s.to_string_lossy().trim_end_matches("_debug").to_ascii_lowercase());
+                let callers: Vec<u32> = (0..(m.cpu.depth() as usize).min(16)).rev().map(|i| m.cpu.stack_entry(i).saturating_sub(1)).collect(); // the CALL is the word before the return address
+                source_pane(ui, &self.lines, &self.elf_dir, &mut self.sources, &mut self.last_src, &mut m.breakpoints, &callers, pc, self.follow, if self.stay_home { home } else { None });
+                return;
+            }
             // Every instruction is one 14-bit word at a word address, so the listing can start a few words before the PC.
             let start = if self.follow { pc.saturating_sub(4) } else { self.view_addr };
             let lines = ((ui.available_height() / 15.0) as usize).clamp(8, 80);
@@ -932,16 +976,47 @@ impl App {
     }
 }
 
+/// The LEDs (brightness 0..1 in `duty`) and OLEDs of the board, drawn.
+fn board_strip(ui: &mut egui::Ui, b: &Board, duty: &[f32]) {
+                ui.horizontal_wrapped(|ui| {
+                    for (l, d) in b.leds.iter().zip(duty) {
+                        ui.vertical(|ui| {
+                            let (r, _) = ui.allocate_exact_size(egui::vec2(26.0, 26.0), egui::Sense::hover());
+                            let v = (60.0 + 195.0 * d.clamp(0.0, 1.0)) as u8;
+                            ui.painter().circle_filled(r.center(), 11.0, egui::Color32::from_rgb(v, (f32::from(v) * 0.15) as u8, (f32::from(v) * 0.1) as u8));
+                            ui.label(format!("{} {}", l.name, pin_name(l.pin)));
+                        });
+                    }
+                    for o in &b.oleds {
+                        ui.vertical(|ui| {
+                            let h = usize::from(o.height);
+                            let (r, _) = ui.allocate_exact_size(egui::vec2(128.0 * 3.0, h as f32 * 3.0), egui::Sense::hover());
+                            ui.painter().rect_filled(r, 0.0, egui::Color32::BLACK);
+                            let on = egui::Color32::from_rgb(120, 200, 255);
+                            for y in 0..h {
+                                for x in 0..128 {
+                                    if o.pixel(x, y) {
+                                        let p = r.min + egui::vec2(x as f32 * 3.0, y as f32 * 3.0);
+                                        ui.painter().rect_filled(egui::Rect::from_min_size(p, egui::vec2(3.0, 3.0)), 0.0, on);
+                                    }
+                                }
+                            }
+                            let st = if o.status.is_empty() { String::new() } else { format!(" - NOT WIRED: {}", o.status) };
+                            ui.label(format!("OLED {} SCL {} SDA {}{st}", match o.bus { Bus::Gpio => "GPIO".to_string(), Bus::I2c(n) => format!("I2C{n}") }, pin_name(o.scl), pin_name(o.sda)));
+                        });
+                    }
+                });
+}
+
 /// The BASIC source with the line the PC is on highlighted; a click toggles a breakpoint on that line.
 #[allow(clippy::too_many_arguments)]
-fn source_pane(ui: &mut egui::Ui, lines: &LineMap, dir: &std::path::Path, cache: &mut std::collections::HashMap<PathBuf, Vec<String>>, last: &mut Option<(PathBuf, u32)>, m: &mut Machine, pc: u32, follow: bool, home: Option<String>) {
+fn source_pane(ui: &mut egui::Ui, lines: &LineMap, dir: &std::path::Path, cache: &mut std::collections::HashMap<PathBuf, Vec<String>>, last: &mut Option<(PathBuf, u32)>, breakpoints: &mut Vec<u32>, callers: &[u32], pc: u32, follow: bool, home: Option<String>) {
     let mut here = lines.lookup(pc).map(|(f, l)| (f.clone(), l));
     // In a library routine: the nearest caller on the return stack that is in the user's own file.
     if let (Some(h), Some((f, _))) = (&home, &here) {
         let is_home = |p: &PathBuf| p.file_stem().is_some_and(|s| s.to_string_lossy().eq_ignore_ascii_case(h));
         if !is_home(f) && lines.source_files().into_iter().any(|p| is_home(p)) {
-            let sp = usize::from(m.cpu.m.mem[m.cpu.m.regs.stkptr as usize] & 0x7F).min(m.cpu.stack.len() - 1);
-            if let Some(c) = (1..=sp).rev().find_map(|i| lines.lookup(m.cpu.stack[i].saturating_sub(2)).filter(|(p, _)| is_home(p)).map(|(p, l)| (p.clone(), l))) {
+            if let Some(c) = callers.iter().find_map(|a| lines.lookup(*a).filter(|(p, _)| is_home(p)).map(|(p, l)| (p.clone(), l))) {
                 here = Some(c);
             }
         }
@@ -960,7 +1035,7 @@ fn source_pane(ui: &mut egui::Ui, lines: &LineMap, dir: &std::path::Path, cache:
         cache.insert(file.clone(), found.map_or_else(|| vec![format!("(source {} not found)", file.display())], |t| t.lines().map(str::to_string).collect()));
     }
     let src = &cache[&file];
-    let bp_lines: Vec<u32> = m.breakpoints.iter().filter_map(|a| lines.lookup(*a).filter(|(f, _)| **f == file).map(|(_, l)| l)).collect();
+    let bp_lines: Vec<u32> = breakpoints.iter().filter_map(|a| lines.lookup(*a).filter(|(f, _)| **f == file).map(|(_, l)| l)).collect();
     ui.horizontal(|ui| {
         ui.monospace(format!("{}:{cur}", file.file_name().unwrap_or_default().to_string_lossy()));
         if !on_line {
@@ -990,10 +1065,10 @@ fn source_pane(ui: &mut egui::Ui, lines: &LineMap, dir: &std::path::Path, cache:
     if let Some(n) = toggle {
         match lines.first_addr(&file, n) {
             Some(a) => {
-                if let Some(p) = m.breakpoints.iter().position(|x| lines.lookup(*x).is_some_and(|(f, l)| *f == file && l == n)) {
-                    m.breakpoints.remove(p);
+                if let Some(p) = breakpoints.iter().position(|x| lines.lookup(*x).is_some_and(|(f, l)| *f == file && l == n)) {
+                    breakpoints.remove(p);
                 } else {
-                    m.breakpoints.push(a);
+                    breakpoints.push(a);
                 }
             }
             None => {} // a comment or blank line: no code there
