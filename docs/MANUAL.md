@@ -171,7 +171,7 @@ The window title shows `pic-sim <version>`. The window is divided into the **too
 
 1. Pick the part in the device box, or leave it: when the ELF names the part it was built for, that part is selected automatically and the status line says `device set to … from the ELF`. The wrong part would have the wrong registers and pins, so the ELF wins over the box. (This works only for parts the box lists, so not for the `16LF…` parts: choose those by hand.)
 2. Enter a path in the first text field, or press **Browse hex/elf…**, or drag a file onto the window. A `.hex` or `.elf` dropped on the window loads at once (ignored while the program is running). A `.toml` dropped on the window becomes the stimulus file.
-3. Optionally enter a stimulus file in the second field, or press **Stim…**. It is read when you press **Load**, so choosing a stimulus after loading needs another **Load**.
+3. Optionally enter a stimulus file in the second field, or press **Stim…**. A stimulus file is a TOML file that **you write** (section 7) to feed the program serial input, ADC values, pin levels and so on; none is supplied with your program, and you can leave the field empty to run without one. The **Stim…** dialog opens in the folder of the stimulus file already named, else in the program's folder, else in the repository's `tests/sim` folder, which holds working examples. The small **x** beside the field clears it. **Browse hex/elf…** likewise opens in the program's folder. The stimulus is read when you press **Load**, so choosing one after loading needs another **Load**.
 4. Press **Load**.
 
 The status line then reads `loaded <path> (N symbols, M variables)` followed by a note when something is missing: `no .elf beside the hex: no source view or variables`, or `ELF has no BASIC lines (build with basil -g)`. An error (for example a bad stimulus file) is shown there and nothing is loaded.
@@ -733,6 +733,7 @@ The simulator follows the data sheet. Where it differs from MDB it says so in `d
 | Toolbar | Line / Line over / Out | Source-line stepping (needs `basil -g`) |
 | Toolbar | Reset | Restart the part, replay the stimulus, keep the wiring |
 | Toolbar | Load | (Re)load the program and stimulus; clears breakpoints |
+| Toolbar | Stim… / x | Choose a stimulus file (opens in its folder, the program's, or `tests/sim`) / clear it |
 | Toolbar | Speed, Fosc MHz | Run speed and display clock |
 | Program pane | click a line | Toggle a breakpoint |
 | Program pane | follow PC, stay in my code, goto/Go | View control |
