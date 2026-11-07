@@ -709,7 +709,7 @@ checksum = "f27ae1dd37df86211c42e150270f82743308803d90a6f6e6651cd730d5e1732f"
 
 [[package]]
 name = "devdesc"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "toml",
@@ -2444,7 +2444,7 @@ dependencies = [
 
 [[package]]
 name = "picsim"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "devdesc",
  "gimli",
@@ -2454,7 +2454,7 @@ dependencies = [
 
 [[package]]
 name = "picsim-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "devdesc",
  "picsim",
@@ -2462,7 +2462,7 @@ dependencies = [
 
 [[package]]
 name = "picsim-gui"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "devdesc",
  "eframe",

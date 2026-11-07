@@ -1172,13 +1172,16 @@ fn main() -> eframe::Result {
     let mut device = None;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
-        if a == "--device" {
+        if a == "--version" || a == "-V" {
+            println!("pic-sim {}", env!("CARGO_PKG_VERSION"));
+            return Ok(());
+        } else if a == "--device" {
             device = args.next();
         } else {
             hex = Some(a);
         }
     }
-    let opts = eframe::NativeOptions { viewport: egui::ViewportBuilder::default().with_inner_size([1280.0, 800.0]).with_title("pic-sim"), ..Default::default() };
+    let opts = eframe::NativeOptions { viewport: egui::ViewportBuilder::default().with_inner_size([1280.0, 800.0]).with_title(concat!("pic-sim ", env!("CARGO_PKG_VERSION"))), ..Default::default() };
     eframe::run_native("pic-sim", opts, Box::new(|_| Ok(Box::new(App::new(hex, device)))))
 }
 

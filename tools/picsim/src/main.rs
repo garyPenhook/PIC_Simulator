@@ -28,6 +28,10 @@ fn run() -> Result<ExitCode, String> {
     while let Some(a) = args.next() {
         let mut val = |n: &str| args.next().ok_or(format!("{n} needs a value"));
         match a.as_str() {
+            "--version" | "-V" => {
+                println!("basil-sim {}", env!("CARGO_PKG_VERSION"));
+                return Ok(ExitCode::SUCCESS);
+            }
             "--device" => device = val("--device")?,
             "--devices" => root = PathBuf::from(val("--devices")?),
             "--asm" => asm = Some(PathBuf::from(val("--asm")?)),
