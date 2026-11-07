@@ -11,6 +11,7 @@
 
 use crate::config::Config;
 use crate::periph::adc::Adc;
+use crate::periph::nvm16::Nvm16;
 use crate::periph::uart::{self, Uart};
 use crate::periph::RxStream;
 use devdesc::Device;
@@ -194,6 +195,11 @@ pub struct Pic16 {
     /// lists the bit as "R-q/q", and MDB follows FVREN there, so the model does too (D-SIM-7).
     a_fvr: Option<usize>,
     fvr_always: bool,
+    /// The data EEPROM (`periph/nvm16.rs`) and which addresses are its NVMCON1 / NVMCON2 (hook sub-code).
+    nvm: Option<Nvm16>,
+    nvm_reg: Vec<Option<u8>>,
+    /// Unimplemented bits that read 1 (NVMADRH bit 7 on the PIC16F183xx, DS40001839E Register 11-4 p.137: "U-1").
+    ones: Vec<u8>,
 }
 
 fn por_bits(s: &str) -> u8 {
@@ -295,6 +301,9 @@ impl Pic16 {
             adc_reg: vec![false; MEM],
             a_fvr: None,
             fvr_always: false,
+            nvm: None,
+            nvm_reg: vec![None; MEM],
+            ones: vec![0; MEM],
         };
         for g in &d.gpr {
             for a in g.start..g.end {
@@ -472,14 +481,24 @@ impl Pic16 {
         if p.irq.is_empty() {
             return Err(format!("{}: no PIR0/PIE0 interrupt registers", dev.device.name));
         }
+        p.ee_base = (dev.memory.eeprom.size > 0).then_some(2 * dev.memory.eeprom.start);
         match p.implemented[p.a_bsr] {
             0x3F => {}
             0x1F => {
                 p.bsr5 = true;
                 p.lin_end = 0x29B0;
-                p.ee_base = (dev.memory.eeprom.size > 0).then_some(2 * dev.memory.eeprom.start);
             }
             m => return Err(format!("{}: BSR implemented mask {m:#04x}: only 5-bit (PIC16F183xx) and 6-bit BSRs are modelled", dev.device.name)),
+        }
+        p.nvm = Nvm16::find(dev, p.bsr5).filter(|n| n.addrs().iter().all(|&r| r < MEM));
+        if let Some(n) = &p.nvm {
+            let adrh = n.adrh();
+            p.ones[adrh] = por_bits(&dev.find_sfr("NVMADRH").map_or(String::new(), |s| s.por.clone())) & !p.implemented[adrh];
+            p.mem[adrh] |= p.ones[adrh];
+            for (k, r) in n.regs().into_iter().enumerate() {
+                p.core[r] = true;
+                p.nvm_reg[r] = Some(k as u8);
+            }
         }
         p.mclr = dev
             .sfr
@@ -511,6 +530,11 @@ impl Pic16 {
             }
         }
         self.cfg = Config::decode_words(&self.cfg_regs, &self.aux);
+        if let (Some(n), Some(b)) = (self.nvm.as_mut(), self.ee_base) {
+            for (i, v) in n.eeprom.iter_mut().enumerate() {
+                *v = self.aux.get(&(b + 2 * i as u32)).copied().unwrap_or(0xFF);
+            }
+        }
     }
 
     // ----- registers -------------------------------------------------------------------------------------------
@@ -570,16 +594,16 @@ impl Pic16 {
         } else if (0x2000..self.lin_end).contains(&p) {
             let n = p - 0x2000;
             Tgt::Mem(((n / 80) << 7) as usize + 0x20 + (n % 80) as usize)
-        } else if self.bsr5 && p >> 8 == 0x70 {
+        } else if self.nvm.is_some() && p >> 8 == 0x70 {
             Tgt::Eeprom(p as u8)
         } else {
             Tgt::Null
         }
     }
 
-    /// An EEPROM byte as loaded from the hex image (erased = FFh); NVM writes are not modelled.
+    /// An EEPROM byte: the hex image's, or what the program wrote (erased = FFh).
     fn ee_byte(&self, n: u8) -> u8 {
-        self.ee_base.map_or(0xFF, |b| self.aux.get(&(b + 2 * u32::from(n))).copied().unwrap_or(0xFF))
+        self.nvm.as_ref().map_or(0xFF, |x| x.eeprom[usize::from(n)])
     }
 
     /// The operand of a file-register instruction: direct through BSR, or through FSRn for INDFn.
@@ -614,6 +638,9 @@ impl Pic16 {
                 }
                 if self.adc_reg[a] {
                     self.sync_adc();
+                }
+                if self.nvm_reg[a].is_some() {
+                    self.sync_nvm();
                 }
                 if let Some((i, sub)) = self.uart_reg[a] {
                     self.sync_uarts();
@@ -677,6 +704,14 @@ impl Pic16 {
                     if let Some(x) = self.adc.as_mut() {
                         x.write_con(&mut self.mem, v, now, &mut self.notes);
                     }
+                } else if let Some(k) = self.nvm_reg[a] {
+                    self.sync_nvm();
+                    let (now, v) = (self.cycles, v & self.implemented[a]);
+                    let wrtd = self.cfg.get("WRTD") == Some(0);
+                    if let Some(n) = self.nvm.as_mut() {
+                        self.extra += n.write(k, v, now, &mut self.mem, wrtd, &mut self.notes);
+                    }
+                    self.sync_nvm();
                 } else if let Some((i, sub)) = self.uart_reg[a] {
                     self.sync_uarts();
                     let before = self.flags_of(i);
@@ -689,7 +724,7 @@ impl Pic16 {
                         // clears it wins, also for CLRF and MOVWF; Timer0's and the newer Timer2's come after it (`[A110]`)
                         self.sync_flag_timers();
                     }
-                    self.mem[a] = v & self.implemented[a];
+                    self.mem[a] = v & self.implemented[a] | self.ones[a];
                     if self.flag_reg[a] {
                         // TXIF and RCIF follow the EUSART's state and cannot be cleared by software (DS40002343F 32.1.1.4
                         // p.456): they are back at once, not as a new request
@@ -757,6 +792,7 @@ impl Pic16 {
     fn sync_timers(&mut self) {
         self.sync_uarts();
         self.sync_adc();
+        self.sync_nvm();
         self.sync_t0();
         for i in 0..self.t1.len() {
             self.sync_t1(i);
@@ -771,6 +807,7 @@ impl Pic16 {
     fn sync_flag_timers(&mut self) {
         self.sync_uarts();
         self.sync_adc();
+        self.sync_nvm();
         for i in 0..self.t1.len() {
             self.sync_t1(i);
         }
@@ -818,6 +855,20 @@ impl Pic16 {
         let Some(a) = self.adc.as_mut() else { return };
         let (flag, mut ev) = ((a.flag.addr, a.flag.mask), Vec::new());
         if a.sync(&mut self.mem, self.cycles, &mut ev) {
+            self.raise_flag(flag);
+        }
+    }
+
+    /// The data EEPROM as it is now (empty on a part without one).
+    pub fn eeprom(&self) -> &[u8] {
+        self.nvm.as_ref().map_or(&[], |n| &n.eeprom)
+    }
+
+    /// Bring the data EEPROM to the current cycle: a write that has ended clears WR and raises NVMIF.
+    fn sync_nvm(&mut self) {
+        let Some(n) = self.nvm.as_mut() else { return };
+        let flag = (n.flag.addr, n.flag.mask);
+        if n.sync(&mut self.mem, self.cycles) {
             self.raise_flag(flag);
         }
     }
@@ -1186,6 +1237,7 @@ impl Pic16 {
     /// A reset other than power-on: SFRs take their MCLR-column value (bits marked u, q, x or - are left alone), the
     /// PC is cleared and the stack is empty. Peripherals do not exist yet.
     fn do_reset(&mut self, kind: Reset) {
+        self.sync_nvm(); // a write that ended before the Reset is done, not lost
         if kind == Reset::Software
             && let Some(a) = self.a_pcon0
         {
@@ -1193,7 +1245,7 @@ impl Pic16 {
         }
         for i in 0..self.mclr.len() {
             let (a, set, clr) = self.mclr[i];
-            self.mem[a] = (self.mem[a] & !clr | set) & self.implemented[a];
+            self.mem[a] = (self.mem[a] & !clr | set) & self.implemented[a] | self.ones[a];
         }
         self.mem[self.a_stkptr] = EMPTY;
         if let Some(t) = self.t0.as_mut() {
@@ -1210,6 +1262,9 @@ impl Pic16 {
         if let Some(a) = self.a_fvr {
             // the MCLR column leaves FVRRDY (q) alone: it follows FVREN, or stays 1
             self.mem[a] = self.mem[a] & !0x40 | if self.fvr_always { 0x40 } else { (self.mem[a] >> 1) & 0x40 };
+        }
+        if let Some(n) = self.nvm.as_mut() {
+            n.reset(&mut self.mem);
         }
         if let Some(a) = self.adc.as_mut() {
             a.end = None; // a conversion in flight is lost; ADRES is a register with a reset value
@@ -1309,6 +1364,7 @@ impl Pic16 {
             } else {
                 self.cycles += 1;
                 self.park_timers(); // Fosc/4 does not run in Sleep
+                self.sync_nvm(); // the EEPROM write has its own timer `[A117]`
                 let mut ev = Vec::new();
                 for u in &mut self.uarts {
                     u.rx(&mut self.mem, self.cycles, &mut ev); // the stimulus goes on; the receiver is off

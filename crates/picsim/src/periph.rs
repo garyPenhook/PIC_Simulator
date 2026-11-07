@@ -34,6 +34,7 @@ mod cmp;
 mod cwg;
 mod flash;
 mod nvm;
+pub(crate) mod nvm16;
 mod nvmq;
 mod i2cq;
 mod mssp;
