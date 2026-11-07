@@ -244,7 +244,7 @@ impl App {
                 Some(e) => match m.load_elf(&e) {
                     Ok(()) => {
                         self.elf_dir = e.parent().map(PathBuf::from).unwrap_or_default();
-                        if m.debug.lines.source_files().is_empty() { " - ELF has no BASIC lines (build with basil -g)".to_string() } else { String::new() }
+                        if m.debug.lines.source_files().is_empty() { " - ELF has no source lines (build with basil -g or xc8-cc -g)".to_string() } else { String::new() }
                     }
                     Err(er) => format!(" - {er}"),
                 },
@@ -311,7 +311,7 @@ impl App {
                 Some(e) => match m.load_elf(&e) {
                     Ok(()) => {
                         self.elf_dir = e.parent().map(PathBuf::from).unwrap_or_default();
-                        if m.debug.lines.source_files().is_empty() { " - ELF has no BASIC lines (basil -g adds none for PIC16 parts yet)".to_string() } else { String::new() }
+                        if m.debug.lines.source_files().is_empty() { " - ELF has no source lines (build with basil -g or xc8-cc -g)".to_string() } else { String::new() }
                     }
                     Err(er) => format!(" - {er}"),
                 },
@@ -803,7 +803,7 @@ impl eframe::App for App {
                 }
             });
             if self.lines.is_empty() {
-                ui.colored_label(egui::Color32::from_rgb(255, 150, 80), "No BASIC line information in this build. Build with basil -g (VS Code: Build Debug, Ctrl+F7; F7 has no line information) and load dist/<name>.hex or .elf: then Source, Variables, Line stepping and the call stack work.");
+                ui.colored_label(egui::Color32::from_rgb(255, 150, 80), "No source line information in this build. Build with basil -g or xc8-cc -g (VS Code: Build Debug, Ctrl+F7; F7 has no line information) and load dist/<name>.hex or .elf: then Source, Variables, Line stepping and the call stack work.");
             }
             if self.src_view && !self.lines.is_empty() {
                 let home = std::path::Path::new(self.hex_path.trim()).file_stem().map(|s| s.to_string_lossy().trim_end_matches("_debug").to_ascii_lowercase());
@@ -861,7 +861,7 @@ impl eframe::App for App {
 /// those that differ from `snap` (data memory when the last Step or Run began) are marked.
 fn variables_ui(ui: &mut egui::Ui, debug: &picsim::debuginfo::DebugInfo, pc: u32, mem: &[u8], snap: Option<&Vec<u8>>) {
     if debug.vars.is_empty() {
-        ui.label("No variable information. Build with basil -g and keep the .elf beside the .hex.");
+        ui.label("No variable information. Build with basil -g or xc8-cc -g and keep the .elf beside the .hex.");
         return;
     }
     let f = debug.func_at(pc);
@@ -1058,7 +1058,7 @@ impl App {
                 }
             });
             if self.lines.is_empty() {
-                ui.colored_label(egui::Color32::from_rgb(255, 150, 80), "No BASIC line information for this program. Source, Line stepping and the call stack with lines need an ELF with BASIC lines beside the .hex (basil -g adds none for PIC16 parts yet).");
+                ui.colored_label(egui::Color32::from_rgb(255, 150, 80), "No source line information for this program. Source, Line stepping and the call stack with lines need an ELF with source lines beside the .hex (build with basil -g or xc8-cc -g).");
             }
             if self.src_view && !self.lines.is_empty() {
                 let home = std::path::Path::new(self.hex_path.trim()).file_stem().map(|s| s.to_string_lossy().trim_end_matches("_debug").to_ascii_lowercase());

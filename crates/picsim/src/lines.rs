@@ -1,5 +1,5 @@
-//! Source line table read from the `.debug_line` section of an ELF built with `basil -g`:
-//! program-memory address (bytes on a PIC18, words on a PIC16) -> (source file, line). The simulator uses it to show the BASIC line that is executing.
+//! Source line table read from the `.debug_line` section of an ELF built with `basil -g` or `xc8-cc -g`:
+//! program-memory address (bytes on a PIC18, words on a PIC16) -> (source file, line). The simulator uses it to show the BASIC or C line that is executing.
 
 use gimli::{AttributeValue, EndianSlice, LittleEndian};
 use object::{Object, ObjectSection};
@@ -23,7 +23,7 @@ impl LineMap {
     /// Parses the line programs of an ELF image. Errors are returned as text for the status line.
     pub fn from_elf(bytes: &[u8]) -> Result<Self, String> {
         let obj = object::File::parse(bytes).map_err(|e| e.to_string())?;
-        let sec = obj.section_by_name(".debug_line").ok_or("no .debug_line (build with basil -g)")?;
+        let sec = obj.section_by_name(".debug_line").ok_or("no .debug_line (build with basil -g or xc8-cc -g)")?;
         let data = sec.data().map_err(|e| e.to_string())?;
         let dl = gimli::DebugLine::new(data, LittleEndian);
         let mut map = LineMap::default();
@@ -39,26 +39,36 @@ impl LineMap {
                 if local.is_empty() {
                     local = file_list(hdr);
                 }
-                let path = local.get(row.file_index() as usize).cloned().unwrap_or_default();
-                let fi = match map.files.iter().position(|f| *f == path) {
-                    Some(i) => i,
-                    None => {
-                        map.files.push(path);
-                        map.files.len() - 1
-                    }
-                } as u32;
                 let line = row.line().map_or(0, |l| l.get() as u32);
                 let addr = row.address() as u32;
                 if row.end_sequence() {
                     map.ends.push(addr);
                 } else if line != 0 {
+                    // A file is listed only when it has code: compilers name every file they know in the header.
+                    let path = local.get(row.file_index() as usize).cloned().unwrap_or_default();
+                    let fi = match map.files.iter().position(|f| *f == path) {
+                        Some(i) => i,
+                        None => {
+                            map.files.push(path);
+                            map.files.len() - 1
+                        }
+                    } as u32;
                     map.rows.push((addr, fi, line));
                 }
             }
             off = next;
         }
-        map.rows.sort_by_key(|r| r.0);
-        map.rows.dedup_by_key(|r| r.0); // keep one row per address
+        map.rows.sort_by_key(|r| r.0); // stable: rows at one address stay in program order
+        // Several rows at one address (XC8 writes `{` and the first statement there) have no code between them: the last one is the
+        // line a debugger shows, so keep it.
+        let mut kept: Vec<(u32, u32, u32)> = Vec::new();
+        for r in map.rows.drain(..) {
+            match kept.last_mut() {
+                Some(k) if k.0 == r.0 => *k = r,
+                _ => kept.push(r),
+            }
+        }
+        map.rows = kept;
         Ok(map)
     }
 
@@ -71,8 +81,8 @@ impl LineMap {
             return None;
         }
         let file = &self.files[f as usize];
-        // Generated assembly (main.S, .inc files) is not source the user wrote.
-        file.extension().is_some_and(|e| e.eq_ignore_ascii_case("bas")).then_some((file, l))
+        // Generated assembly (main.S, XC8's t.s and startup.s, .inc files) is not source the user wrote.
+        is_source(file).then_some((file, l))
     }
 
     /// The lowest address generated for `line` of `file`: where a breakpoint on that source line goes.
@@ -81,12 +91,18 @@ impl LineMap {
         self.rows.iter().filter(|r| r.1 == fi && r.2 == line).map(|r| r.0).min()
     }
 
-    /// Source files that contain code, in the order met; the user's `.bas` files come first.
+    /// Source files that contain code (BASIC and C), sorted by path.
     pub fn source_files(&self) -> Vec<&PathBuf> {
-        let mut v: Vec<&PathBuf> = self.files.iter().filter(|f| f.extension().is_some_and(|e| e.eq_ignore_ascii_case("bas"))).collect();
+        let mut v: Vec<&PathBuf> = self.files.iter().filter(|f| is_source(f)).collect();
         v.sort();
         v
     }
+}
+
+/// A file a person wrote and can step through: BASIC (`.bas`) or C (`.c`, and `.h` for code in headers). The assembly the
+/// compilers generate (`.s`, `.S`, `.asm`) and the include files are not.
+fn is_source(file: &std::path::Path) -> bool {
+    file.extension().is_some_and(|e| ["bas", "c", "h"].iter().any(|x| e.eq_ignore_ascii_case(x)))
 }
 
 /// The size of an address in the line program at `off`. A version 2-4 header does not say, so it is read from the first

@@ -1,9 +1,10 @@
-//! Routines and typed variables from the debug unit `basil -g` appends to the ELF (see `src/dwarf.rs` in the compiler),
+//! Routines and typed variables from the debug unit `basil -g` appends to the ELF (see `src/dwarf.rs` in the compiler)
+//! or that MPLAB XC8 writes for each C file (`xc8-cc -g`),
 //! together with the line table of `lines.rs`. The simulator front ends use it to show variables by name and type,
 //! the routine the PC is in, and a call stack with source lines.
 
 use crate::lines::LineMap;
-use gimli::{AttributeValue, EndianSlice, LittleEndian, Reader};
+use gimli::{AttributeValue, EndianSlice, LittleEndian};
 use object::{Object, ObjectSection};
 
 type R<'a> = EndianSlice<'a, LittleEndian>;
@@ -64,7 +65,8 @@ impl DebugInfo {
         while let Some(h) = units.next().map_err(|e| e.to_string())? {
             let unit = dwarf.unit(h).map_err(|e| e.to_string())?;
             let mut entries = unit.entries();
-            // Only the compiler's own unit: the assembler writes variable entries for its symbols too.
+            // Only the compiler's own units: the assembler writes entries for its symbols too, and XC8 writes one for the
+            // device header, which holds every SFR as a variable.
             let mut ours = false;
             let mut cur_func: Option<usize> = None;
             let mut func_depth = 0isize;
@@ -75,15 +77,18 @@ impl DebugInfo {
                 }
                 match e.tag() {
                     gimli::DW_TAG_compile_unit => {
-                        ours = match e.attr_value(gimli::DW_AT_producer) {
-                            Some(v) => dwarf.attr_string(&unit, v).map(|s| s.to_slice().map(|b| b == b"basil".as_slice()).unwrap_or(false)).unwrap_or(false),
-                            None => false,
-                        };
+                        let text = |at: gimli::DwAt| e.attr_value(at).and_then(|v| dwarf.attr_string(&unit, v).ok()).map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+                        let producer = text(gimli::DW_AT_producer);
+                        // XC8 writes a unit per C file; only those (not the `.s` or `.h` units) hold the program's routines and variables.
+                        ours = producer == "basil" || (producer.starts_with("Microchip MPLAB XC8") && text(gimli::DW_AT_name).to_ascii_lowercase().ends_with(".c"));
                     }
                     gimli::DW_TAG_subprogram if ours => {
                         let name = attr_name(&dwarf, &unit, e).unwrap_or_default();
-                        let (Some(AttributeValue::Addr(low)), Some(AttributeValue::Addr(high))) = (e.attr_value(gimli::DW_AT_low_pc), e.attr_value(gimli::DW_AT_high_pc)) else {
-                            continue;
+                        // high_pc is an address (basil, XC8 so far) or, in DWARF 4 style, an offset from low_pc.
+                        let (low, high) = match (e.attr_value(gimli::DW_AT_low_pc), e.attr_value(gimli::DW_AT_high_pc)) {
+                            (Some(AttributeValue::Addr(l)), Some(AttributeValue::Addr(h))) => (l, h),
+                            (Some(AttributeValue::Addr(l)), Some(h)) if h.udata_value().is_some() => (l, l + h.udata_value().unwrap_or(0)),
+                            _ => continue,
                         };
                         cur_func = Some(info.funcs.len());
                         func_depth = depth;
@@ -116,6 +121,11 @@ impl DebugInfo {
         self.funcs.iter().position(|f| f.low <= pc && pc < f.high)
     }
 
+    /// True when `addr` is where a routine with code starts (not an empty-range symbol such as basil's `__halt`).
+    pub fn is_routine_entry(&self, addr: u32) -> bool {
+        self.funcs.iter().any(|f| f.low == addr && f.high > f.low)
+    }
+
     /// Globals, then the parameters and locals of routine `f` when given.
     pub fn visible(&self, f: Option<usize>) -> impl Iterator<Item = &Var> {
         self.vars.iter().filter(move |v| v.scope.is_none() || v.scope == f)
@@ -138,6 +148,17 @@ fn attr_name(dwarf: &gimli::Dwarf<R<'_>>, unit: &gimli::Unit<R<'_>>, e: &gimli::
 fn describe(dwarf: &gimli::Dwarf<R<'_>>, unit: &gimli::Unit<R<'_>>, at: gimli::UnitOffset) -> Option<Ty> {
     let e = unit.entry(at).ok()?;
     match e.tag() {
+        // `volatile`, `const` and typedef names (`uint8_t`) are the type they wrap.
+        gimli::DW_TAG_volatile_type | gimli::DW_TAG_const_type | gimli::DW_TAG_typedef => match e.attr_value(gimli::DW_AT_type) {
+            Some(AttributeValue::UnitRef(t)) => {
+                let mut ty = describe(dwarf, unit, t)?;
+                if e.tag() == gimli::DW_TAG_typedef && !ty.array {
+                    ty.name = attr_name(dwarf, unit, &e).unwrap_or(ty.name);
+                }
+                Some(ty)
+            }
+            _ => None,
+        },
         gimli::DW_TAG_base_type => {
             let size = e.attr_value(gimli::DW_AT_byte_size)?.udata_value()? as u32;
             let enc = match e.attr_value(gimli::DW_AT_encoding)? {
@@ -148,10 +169,13 @@ fn describe(dwarf: &gimli::Dwarf<R<'_>>, unit: &gimli::Unit<R<'_>>, at: gimli::U
                 2 => Kind::Bool,
                 4 => Kind::Float,
                 5 => Kind::Signed,
-                8 => Kind::Char,
+                6 | 8 => Kind::Char, // signed_char (C `char`), unsigned_char
                 _ => Kind::Unsigned,
             };
-            Some(Ty { bytes: size, elem: size, kind, array: false, name: attr_name(dwarf, unit, &e).unwrap_or_default() })
+            let name = attr_name(dwarf, unit, &e).unwrap_or_default();
+            // C `unsigned char` (`uint8_t`) is a small number or a byte array far more often than text; plain `char` stays text.
+            let kind = if name == "unsigned char" { Kind::Unsigned } else { kind };
+            Some(Ty { bytes: size, elem: size, kind, array: false, name })
         }
         gimli::DW_TAG_array_type => {
             let Some(AttributeValue::UnitRef(t)) = e.attr_value(gimli::DW_AT_type) else { return None };

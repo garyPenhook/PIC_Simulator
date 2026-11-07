@@ -25,6 +25,7 @@ fn run() -> Result<ExitCode, String> {
     let mut show_cfg = false;
     let (mut speed, mut fosc) = (0.0f64, 64.0f64);
     let mut stim = None::<PathBuf>;
+    let mut until_given = false;
     let (mut hex, mut device, mut asm, mut until, mut dump, mut max) =
         (None::<PathBuf>, String::from("18F27Q10"), None::<PathBuf>, Some(String::from("__halt")), Vec::new(), 2_000_000_000u64);
     let mut root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../devices");
@@ -38,7 +39,10 @@ fn run() -> Result<ExitCode, String> {
             "--device" => device = val("--device")?,
             "--devices" => root = PathBuf::from(val("--devices")?),
             "--asm" => asm = Some(PathBuf::from(val("--asm")?)),
-            "--until" => until = Some(val("--until")?),
+            "--until" => {
+                until = Some(val("--until")?);
+                until_given = true;
+            }
             "--dump" => dump = val("--dump")?.split(',').map(String::from).collect(),
             "--trace" => {
                 let v = val("--trace")?;
@@ -68,7 +72,7 @@ fn run() -> Result<ExitCode, String> {
         if show_cfg {
             return Err("--config is not supported for PIC16 parts yet".into());
         }
-        return run16(dev, &hex, asm, stim, until, &dump, max, trace, &bps, bp_max, &mut pace);
+        return run16(dev, &hex, asm, stim, until, until_given, &dump, max, trace, &bps, bp_max, &mut pace);
     }
     let mut m = Machine::new(dev)?;
     let given = hex.clone();
@@ -96,10 +100,12 @@ fn run() -> Result<ExitCode, String> {
             eprintln!("note: {e}");
         }
     }
+    let until = default_until(until, until_given, m.syms.contains_key("__halt"));
     let stop_at = match &until {
         Some(s) => Some(*m.syms.get(s).ok_or(format!("symbol {s} not found (no {})", asm.display()))?),
         None => None,
     };
+    m.until_routine = until_given && stop_at.is_some_and(|a| m.debug.is_routine_entry(a));
     if let Some((from, to)) = trace {
         m.run(None, from);
         while m.cpu.cycles < to {
@@ -230,6 +236,7 @@ fn run16(
     asm: Option<PathBuf>,
     stim: Option<PathBuf>,
     until: Option<String>,
+    until_given: bool,
     dump: &[String],
     max: u64,
     trace: Option<(u64, u64)>,
@@ -238,6 +245,7 @@ fn run16(
     pace: &mut Option<Pace>,
 ) -> Result<ExitCode, String> {
     let mut m = picsim::machine16::Machine16::new(dev)?;
+    let given = hex.to_path_buf();
     let hex = picsim::lines::program_hex(hex)?;
     m.load_hex(&std::fs::read_to_string(&hex).map_err(|e| format!("{}: {e}", hex.display()))?)?;
     if let Some(f) = &stim {
@@ -247,10 +255,18 @@ fn run16(
     if let Ok(t) = std::fs::read_to_string(&asm) {
         m.load_symbols_from_asm(&t);
     }
+    // Routines, variables and `__halt` from the ELF when there is one (basil -g, xc8-cc -g); the listing's symbols win.
+    if let Some(e) = picsim::debuginfo::elf_for(&given) {
+        if let Err(e) = m.load_elf(&e) {
+            eprintln!("note: {e}");
+        }
+    }
+    let until = default_until(until, until_given, m.syms.contains_key("__halt"));
     let stop_at = match &until {
         Some(s) => Some(*m.syms.get(s).ok_or(format!("symbol {s} not found (no {})", asm.display()))?),
         None => None,
     };
+    m.until_routine = until_given && stop_at.is_some_and(|a| m.debug.is_routine_entry(a));
     if let Some((from, to)) = trace {
         m.run(None, from);
         while m.cpu.cycles < to {
@@ -301,6 +317,16 @@ fn run16(
         eprintln!("note: unmodelled SFRs touched: {}", m.cpu.unmodelled.iter().cloned().collect::<Vec<_>>().join(" "));
     }
     Ok(if stop == Stop::Halt || until.is_none() { ExitCode::SUCCESS } else { ExitCode::from(1) })
+}
+
+/// The symbol to stop at. Unless `--until` named one, that is `__halt`, which a basil program has; a C program built with XC8 has none, so
+/// it runs for `--max-cycles` instead (and `--until` can name any routine, such as a function the program calls when it is done).
+fn default_until(until: Option<String>, given: bool, has_halt: bool) -> Option<String> {
+    if !given && !has_halt {
+        eprintln!("note: no __halt symbol (a C program?): running for --max-cycles; --until ROUTINE stops when a routine is entered");
+        return None;
+    }
+    until
 }
 
 /// `run(budget)` limited to the `--speed` fraction of real time: the budget is spent in slices as the clock allows. Stops as `run` does

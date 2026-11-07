@@ -37,6 +37,9 @@ pub struct Machine {
     image: Image,
     /// Stimulus file text, applied again after every reset (the peripherals are rebuilt then).
     stimulus: Option<String>,
+    /// `run` stops at its `until` address even when the PC gets there by a CALL: the address is the entry of a routine
+    /// (`basil-sim --until ROUTINE`), not basil's `__halt`, which may be the first address of a routine that follows the program.
+    pub until_routine: bool,
 }
 
 impl Machine {
@@ -45,7 +48,7 @@ impl Machine {
             return Err(format!("{}: family {} is not simulated yet", dev.device.name, dev.device.family));
         }
         let cpu = Pic18::new(&dev)?;
-        Ok(Machine { cpu, dev, syms: BTreeMap::new(), breakpoints: Vec::new(), debug: DebugInfo::default(), image: Image::default(), stimulus: None })
+        Ok(Machine { cpu, dev, syms: BTreeMap::new(), breakpoints: Vec::new(), debug: DebugInfo::default(), image: Image::default(), stimulus: None, until_routine: false })
     }
 
     pub fn load_hex(&mut self, text: &str) -> Result<(), String> {
@@ -170,7 +173,7 @@ impl Machine {
             let d = self.stack_depth();
             let called = d > depth;
             depth = d;
-            if Some(pc) == until && !called {
+            if Some(pc) == until && (!called || self.until_routine) {
                 return Stop::Halt;
             }
             if !first && self.breakpoints.contains(&pc) {

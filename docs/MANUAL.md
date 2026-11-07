@@ -35,7 +35,7 @@ The workspace contains one simulation library and two programs that use it:
 
 | Program | Kind | Use it to |
 |---|---|---|
-| `pic-sim` | Window (egui) | Load a program, run it, step it by instruction or by BASIC source line, set breakpoints, watch registers, memory and variables, wire LEDs and an OLED display to pins, time code with a stopwatch |
+| `pic-sim` | Window (egui) | Load a program, run it, step it by instruction or by BASIC or C source line, set breakpoints, watch registers, memory and variables, wire LEDs and an OLED display to pins, time code with a stopwatch |
 | `basil-sim` | Command line | Run a program for a number of cycles or until it halts, then print variables, serial/SPI/I2C traffic, pin changes, LED history and the OLED picture; drive scripted tests and benchmarks |
 
 Both load the `.hex` file that the **basil** compiler writes, and both read the same **stimulus** file (a TOML file that says what the outside world does to the pins, serial receiver, ADC and so on). Both use the same simulated parts, so a result seen in one is the result in the other.
@@ -95,7 +95,7 @@ With no argument `pic-sim` opens empty; type a path or use *Browse hex/elf…*. 
 
 # 3. Preparing a program
 
-The simulator runs what **basil** produces. Compile with:
+The simulator runs what **basil** produces, and C programs built with **MPLAB XC8** (section 3, *C programs from XC8*). To compile a BASIC program:
 
 ```
 basil blink.bas            # writes blink.hex, blink.S, blink.map
@@ -120,6 +120,27 @@ Rules for finding the files:
 **Debug builds.** Without `-g` there is only the hex (and the listing). You can still run, step instructions, set breakpoints on addresses and watch SFRs. The Source view, line stepping, the Variables tab and routine names in the call stack all need the ELF. In VS Code use *Build Debug* (Ctrl+F7); the plain build (F7) has no line information. `--keep-vars` makes basil keep stores to variables nothing reads, which scripted tests need so that a variable can be dumped at the end.
 
 **The halt address.** basil places a label `__halt` where the program ends. `basil-sim` runs *until* that address by default, and the window stops there and reports it. A program that never ends (a `While True` main loop) never reaches `__halt`; it runs until `--max-cycles` or until you press Pause.
+
+## C programs from XC8
+
+A program built with MPLAB XC8 loads and runs like any other: the simulator executes the `.hex`. Build with `-g` to get the debug information in the `.elf`:
+
+```
+xc8-cc -mcpu=18F27Q10 -mdfp=<pack>/xc8 -g -O0 prog.c -o prog.elf
+```
+
+XC8 writes `prog.hex` beside `prog.elf`. Load either one, with `pic-sim` or `basil-sim`, as for a BASIC program (the part is read from the ELF in the window; give `--device` to `basil-sim`). What you get:
+
+| Feature | With `-g -O0` | Notes |
+|---|---|---|
+| Source pane, breakpoints on a C line, Line / Line over / Out, call stack with lines | Yes | `.c` files (and `.h` files that hold code) are source. The assembly XC8 generates (`prog.s`, `startup.s`) is not shown |
+| Routines by name | Yes | `--until`, `--bp`, the call stack. Library routines from XC8's own sources appear too |
+| Variables tab, Watch by name | Globals, locals and parameters of integer, `char`, `unsigned char` and array types, including `volatile`, `const` and `typedef` names (`uint8_t`) | At `-O0` XC8 gives each variable a fixed address, which is what the simulator reads. Structures, unions, pointers and enumerations are not shown yet and are left out of the list |
+| Optimised builds (`-O1` and up) | Lines yes, variables limited | The optimiser merges and reorders lines, so stepping jumps about, and a variable that has no fixed address is left out. Debug with `-O0` |
+
+**Stopping.** A C program has no `__halt`. `basil-sim` then runs for `--max-cycles` and prints a note. Use `--until ROUTINE` to stop when a routine is entered, for example a function your program calls when it is done; unlike basil's `__halt`, a routine entered by a call does stop the run. In the window, Run goes until a breakpoint or Pause.
+
+**Configuration bits** set with `#pragma config` arrive through the hex file, as for BASIC programs. Peripherals that the simulator does not model behave as in section 9 whatever language the program is in.
 
 ---
 
@@ -174,7 +195,7 @@ The window title shows `pic-sim <version>`. The window is divided into the **too
 3. Optionally enter a stimulus file in the second field, or press **Stim…**. A stimulus file is a TOML file that **you write** (section 7) to feed the program serial input, ADC values, pin levels and so on; none is supplied with your program, and you can leave the field empty to run without one. The **Stim…** dialog opens in the folder of the stimulus file already named, else in the program's folder, else in the repository's `tests/sim` folder, which holds working examples. The small **x** beside the field clears it. **Browse hex/elf…** likewise opens in the program's folder. The stimulus is read when you press **Load**, so choosing one after loading needs another **Load**.
 4. Press **Load**.
 
-The status line then reads `loaded <path> (N symbols, M variables)` followed by a note when something is missing: `no .elf beside the hex: no source view or variables`, or `ELF has no BASIC lines (build with basil -g)`. An error (for example a bad stimulus file) is shown there and nothing is loaded.
+The status line then reads `loaded <path> (N symbols, M variables)` followed by a note when something is missing: `no .elf beside the hex: no source view or variables`, or `ELF has no source lines (build with basil -g or xc8-cc -g)`. An error (for example a bad stimulus file) is shown there and nothing is loaded.
 
 If the ELF holds variables, the **Variables** tab is selected automatically.
 
@@ -188,8 +209,8 @@ Pressing **Load** again always starts afresh: the program is reloaded, the cycle
 | **Pause** | Stop a run or cancel a step in progress. Enabled while running or stepping |
 | **Step** | Execute one instruction |
 | **Step over** | Like Step, but a call (PIC18: `CALL`, `RCALL`; PIC16: `CALL`, `CALLW`) runs until it returns to the following instruction. Everything else is one step. A long step over runs in the background, keeps the window alive, and can be cancelled with Pause |
-| **Line** | Step to the next BASIC source line, going into called routines. Needs the ELF with BASIC lines |
-| **Line over** | Step to the next BASIC line, running calls and interrupts to completion |
+| **Line** | Step to the next BASIC or C source line, going into called routines. Needs the ELF with source lines |
+| **Line over** | Step to the next source line, running calls and interrupts to completion |
 | **Out** | Run until the current routine returns |
 | **Reset** | Restart the part from its reset vector with cycle counter 0 and the stimulus replayed from the start. The wiring of LEDs and OLED stays (the OLED starts blank, as after power-up). Clears the stopwatch |
 | **Speed** | Run speed (below) |
@@ -222,15 +243,15 @@ While running, the status line shows the achieved rate, for example `running at 
 
 ## The Program pane
 
-The pane has two views, chosen with the **Source** / **Disassembly** buttons (the buttons appear only when the ELF supplies BASIC lines).
+The pane has two views, chosen with the **Source** / **Disassembly** buttons (the buttons appear only when the ELF supplies source lines).
 
-**Source view.** Shows the BASIC file with line numbers. The line the program counter is on is highlighted green, a breakpoint is a red `●`. With **follow PC** on, the view scrolls to keep the current line centred. When the program counter is in generated code that has no BASIC line (start-up code, the compiler's helper routines), the view stays on the last source line and says so. Library routines written in BASIC (`i2c.bas`, for example) show their own file. With **stay in my code** on, a library routine that your code called is shown as the line of your program that made the call, so a `DelaySeconds` appears as one line instead of a jump into the library.
+**Source view.** Shows the BASIC or C file with line numbers. The line the program counter is on is highlighted green, a breakpoint is a red `●`. With **follow PC** on, the view scrolls to keep the current line centred. When the program counter is in generated code that has no source line (start-up code, the compiler's helper routines), the view stays on the last source line and says so. Library routines written in BASIC (`i2c.bas`, for example) show their own file. With **stay in my code** on, a library routine that your code called is shown as the line of your program that made the call, so a `DelaySeconds` appears as one line instead of a jump into the library.
 
 Click a source line to toggle a breakpoint on it; the breakpoint goes on the lowest address of the line. A comment or blank line has no code and cannot take a breakpoint. The compiler's optimiser can merge lines, so some lines have no code.
 
 **Disassembly view.** Shows address, instruction word and mnemonic. The PIC18 listing is in byte addresses; the PIC16 listing is in **word** addresses (the PIC16 program counter counts words). Labels from the listing or ELF appear in blue above their instruction. The current instruction is highlighted; a breakpoint is a red `●`. Click an instruction to toggle a breakpoint at it. The text field *goto 0x…* with **Go** moves the listing to an address (PIC16: a word address, 15 bits) and turns *follow PC* off.
 
-If the build has no BASIC line information, an orange message at the top of the pane says so and tells you how to build with it.
+If the build has no source line information, an orange message at the top of the pane says so and tells you how to build with it.
 
 ## The CPU panel
 
@@ -334,7 +355,7 @@ The program runs from reset until it stops, then `basil-sim` prints a report and
 | `--device PART` | `18F27Q10` | The part, as the name of a file in `devices/` without `.toml` (`18F16Q41`, `16F17146`, `16LF18346`). The part is **not** taken from the ELF here, so give the right one |
 | `--devices DIR` | `<workspace>/devices` | Folder holding the device files |
 | `--asm FILE` | `<hex>.S` | The assembly listing to take symbols from |
-| `--until SYMBOL` | `__halt` | Stop when the program counter reaches this symbol. The symbol must exist (in the listing or ELF) or the run does not start |
+| `--until SYMBOL` | `__halt` | Stop when the program counter reaches this symbol, which must exist in the listing or ELF or the run does not start. A routine's name stops the run when the routine is **entered**, including by a call (useful for C). When no `--until` is given and the program has no `__halt` (a C program), the run is not stopped by a symbol: it lasts `--max-cycles`, with a note on standard error |
 | `--max-cycles N` | 2 000 000 000 | Stop after this many instruction cycles even if the symbol was not reached |
 | `--stim FILE` | none | Stimulus file (section 7) |
 | `--dump LIST` | none | After the run, print these symbols or SFRs; `NAME` is one byte, `NAME:N` is *N* bytes read little-endian |
@@ -352,7 +373,7 @@ An unknown option, a missing value, an unreadable file, an unknown device, a bad
 
 | Status | Meaning |
 |---|---|
-| 0 | The program reached `--until` (by default `__halt`) |
+| 0 | The program reached `--until` (by default `__halt`), or no stop symbol applied (a C program without `--until`) and the run completed |
 | 1 | The run stopped for another reason: cycle limit, breakpoint limit, Sleep |
 | 2 | An error (see above); nothing was simulated |
 
@@ -706,11 +727,11 @@ The simulator follows the data sheet. Where it differs from MDB it says so in `d
 | Symptom | Cause and remedy |
 |---|---|
 | The device box is empty | `devices/` was not found at its build-time location. Rebuild from the workspace that holds it (section 2) |
-| `symbol __halt not found (no prog.S)` | `basil-sim` found neither a listing nor an ELF with `__halt`. Build with `-g`, give `--asm`, or name another symbol with `--until` |
+| `symbol NAME not found (no prog.S)` | The symbol given with `--until` or `--bp` is in neither the listing nor the ELF. Build with `-g` (for C also `-O0`, so the routine is not inlined away), or check the spelling. A C routine is named as in the source (`add`), without XC8's leading underscore |
 | `basil-sim` runs for a long time and exits with status 1 | The program never reaches `__halt` (a main loop). Add `--max-cycles` for the time you want to simulate |
 | `unknown option`, `needs a value` | Check the option spelling; `--dump`, `--bp` and `--until` take a value |
 | `no .elf beside the hex: no source view or variables` | Build with `basil -g` and keep the `.elf` beside the `.hex` (or one folder up from a `dist/` hex) |
-| `ELF has no BASIC lines` | The ELF came from a build without `-g`, or from a part for which basil emits no line information. Disassembly view, SFRs and Watch still work |
+| `ELF has no source lines` | The ELF came from a build without `-g`, or from a part for which the compiler emits no line information. Disassembly view, SFRs and Watch still work |
 | `<part>: …` error when loading a stimulus | A section or key the part cannot honour, or a pin the part lacks (section 7). Read the message; it names the section |
 | The LED never lights | The pin is an input (TRIS set), is on the wrong port, or `active` is wrong. In the program, set `TRISx` and check `ANSELx` |
 | The OLED shows `NOT WIRED` | For a hardware bus the program's PPS set-up does not match the pins you gave: the message names the register. Check `SSPxCLKPPS`/`SSPxDATPPS` (or `I2CxSCLPPS`/`I2CxSDAPPS`) and both `RxyPPS` registers |
