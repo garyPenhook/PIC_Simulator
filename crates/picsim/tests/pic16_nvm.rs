@@ -155,3 +155,66 @@ fn power_on_reset_restores_the_image() {
     step_to_end(&mut m, 12);
     assert_eq!(m.cpu.mem[P171.2], 0x5A);
 }
+
+/// Program flash self-write (DS40002343F 15.1.2 p.156-162): row erase, write latches, row write, word read.
+#[test]
+fn f171_flash_erase_latches_row_write_and_read() {
+    let (adl, adh, datl, c1, c2) = (P171.0, P171.1, P171.2, P171.3, P171.4);
+    let dath = datl + 1;
+    let wr = bsf((c1 & 0x7F) as u16, 1);
+    let unlock = || set(P171, &[(c2, 0x55), (c2, 0xAA)]);
+    let mut segs: Vec<Vec<u16>> = Vec::new();
+    // 0: erase the row of word 0105h (FREE, WREN)
+    let mut p = set(P171, &[(adh, 0x01), (adl, 0x05), (c1, 0x14)]);
+    p.extend(unlock());
+    p.push(wr);
+    segs.push(p);
+    // 1: latch 5 = 1234h (LWLO, WREN): no operation
+    let mut p = set(P171, &[(adl, 0x05), (datl, 0x34), (dath, 0x12), (c1, 0x24)]);
+    p.extend(unlock());
+    p.push(wr);
+    segs.push(p);
+    // 2: latch 6 = 0178h with LWLO = 0: the row is written
+    let mut p = set(P171, &[(adl, 0x06), (datl, 0x78), (dath, 0x01), (c1, 0x04)]);
+    p.extend(unlock());
+    p.push(wr);
+    segs.push(p);
+    // 3: read word 0105h back
+    segs.push(set(P171, &[(datl, 0), (dath, 0), (adl, 0x05), (c1, 0x01)]));
+    // 4: write 3F00h over word 0106h (0178h): bits that need 0 -> 1 stay 0 (AND), with a note
+    let mut p = set(P171, &[(adl, 0x06), (datl, 0x00), (dath, 0x3F), (c1, 0x04)]);
+    p.extend(unlock());
+    p.push(wr);
+    segs.push(p);
+    let all: Vec<u16> = segs.iter().flatten().copied().chain([NOP]).collect();
+    let mut m = machine("16F17146", &all);
+    let w = |m: &Machine16, i: usize| u16::from(m.cpu.prog[2 * i]) | u16::from(m.cpu.prog[2 * i + 1]) << 8;
+    let run = |m: &mut Machine16, n: usize| -> u64 {
+        let c = m.cpu.cycles;
+        step_to_end(m, n);
+        m.cpu.cycles - c
+    };
+    // the image words 0100h.. hold the program only if it is short; the test code is far below word 0100h
+    assert!(all.len() < 0x100);
+    let n0 = segs[0].len();
+    run(&mut m, n0 - 1);
+    assert_eq!(run(&mut m, 1), 1 + 2_000, "erase stalls the CPU 2 ms");
+    assert!(nvmif(&m, P171));
+    assert_eq!(m.cpu.mem[c1] & 0x02, 0);
+    assert!((0x100..0x120).all(|i| w(&m, i) == 0x3FFF));
+    m.cpu.mem[P171.5] &= !P171.6;
+    assert_eq!(run(&mut m, segs[1].len()), segs[1].len() as u64, "a latch load takes no extra time");
+    assert!(!nvmif(&m, P171), "a latch load sets no NVMIF");
+    assert_eq!(w(&m, 0x105), 0x3FFF, "nothing written yet");
+    run(&mut m, segs[2].len() - 1);
+    assert_eq!(run(&mut m, 1), 1 + 2_000);
+    assert!(nvmif(&m, P171));
+    assert_eq!((w(&m, 0x105), w(&m, 0x106), w(&m, 0x107)), (0x1234, 0x0178, 0x3FFF));
+    run(&mut m, segs[3].len());
+    assert_eq!((m.cpu.mem[datl], m.cpu.mem[dath]), (0x34, 0x12), "RD reads the word");
+    // latches are blank again: writing latch 6 only leaves word 5 alone; the AND keeps cleared bits cleared
+    run(&mut m, segs[4].len() - 1);
+    run(&mut m, 1);
+    assert_eq!((w(&m, 0x105), w(&m, 0x106)), (0x1234, 0x0100));
+    assert!(m.cpu.notes.iter().any(|n| n.contains("0 to 1")));
+}

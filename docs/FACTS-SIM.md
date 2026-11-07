@@ -322,6 +322,13 @@ lacks keeps the register's unprogrammed default (0xFF). `basil-sim --config` pri
   DS80000666H 4.2, DS80000667E 1.2.2, DS80000668L 4.2; `lib/eeprom.bas` does not depend on it), voltage limits.
 * Tests: `tests/pic16_nvm.rs`; `Basic_Compiler/tests/exec_p16` and `exec_p183` `lib_eeprom` pass with `--engine sim` on 16F17146
   (33914 cycles), 16F18056, 16F18326 and 16F18346 (12902 cycles). MDB does not model the durations (D-SIM-3).
+* `[A119]` PIC16 program flash self-write (`periph/nvm16.rs`; PIC16F13145, 152xx, 171xx, 180x6, 183xx; DS40002343F 15.1.2 p.156-162, DS40001839E 11.4):
+  row = 32 words of 14 bits, erase 3FFFh; word read through RD (NVMREGS = 0); FREE erase and the 32 write latches (LWLO = 1 loads one, LWLO = 0 loads
+  one and programs the row, then the latches are 3FFFh again); the CPU stalls 2 000 cycles for an erase or a row write (2 ms typical for the erase,
+  Figure 15-3 p.160; the write time is assumed the same), then NVMIF is set; a latch load takes no time and sets no NVMIF. The array changes at the
+  start of the stall. An erase leaves the latches alone (p.159; the Important box p.162 disagrees; the library is safe either way). 0 -> 1 in a write
+  ANDs, with a note. Not modelled: flash beyond the program memory (ignored with a note), WRTn, User ID and configuration writes.
+  `lib_flashwrite` passes (`--engine sim`) on 16F17146 (29555 cycles), 16F13145, 16F15244, 16F18326, 16F18346 and, with the exec_p16 test, 16F18056; `tests/pic16_nvm.rs`.
 
 ## Program flash self-write (S5, `periph/flash.rs`, `nvm.rs`, `nvmq.rs`, `Pic18::tblwt`)
 

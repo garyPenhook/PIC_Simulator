@@ -594,7 +594,7 @@ impl Pic16 {
         } else if (0x2000..self.lin_end).contains(&p) {
             let n = p - 0x2000;
             Tgt::Mem(((n / 80) << 7) as usize + 0x20 + (n % 80) as usize)
-        } else if self.nvm.is_some() && p >> 8 == 0x70 {
+        } else if self.nvm.as_ref().is_some_and(|n| !n.eeprom.is_empty()) && p >> 8 == 0x70 {
             Tgt::Eeprom(p as u8)
         } else {
             Tgt::Null
@@ -709,7 +709,7 @@ impl Pic16 {
                     let (now, v) = (self.cycles, v & self.implemented[a]);
                     let wrtd = self.cfg.get("WRTD") == Some(0);
                     if let Some(n) = self.nvm.as_mut() {
-                        self.extra += n.write(k, v, now, &mut self.mem, wrtd, &mut self.notes);
+                        self.extra += n.write(k, v, now, &mut self.mem, &mut self.prog, wrtd, &mut self.notes);
                     }
                     self.sync_nvm();
                 } else if let Some((i, sub)) = self.uart_reg[a] {
