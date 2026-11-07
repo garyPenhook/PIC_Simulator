@@ -1,8 +1,9 @@
-//! `pic-sim [prog.hex] [--device 18F16Q41]`: run, step and inspect a program on a simulated PIC18.
+//! `pic-sim [prog.hex] [--device 18F16Q41|16F18056]`: run, step and inspect a program on a simulated PIC18 or PIC16 (enhanced mid-range).
 
 use eframe::egui;
 use picsim::lines::LineMap;
 use picsim::periph::{Board, Bus, Led, Oled, Pin, pin_name};
+use picsim::machine16::Machine16;
 use picsim::{Machine, Stop, disasm::disasm};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -20,6 +21,8 @@ struct App {
     device: String,
     hex_path: String,
     m: Option<Machine>,
+    /// The loaded program when the part is a PIC16 (`m` and `m16` are never both set).
+    m16: Option<Machine16>,
     msg: String,
     running: bool,
     speed: f32, // log10 of cycles per frame
@@ -64,7 +67,7 @@ fn list_devices(dir: &PathBuf) -> Vec<String> {
         .filter_map(|e| e.file_name().into_string().ok())
         .filter(|n| n.ends_with(".toml") && !n.ends_with(".expect.toml"))
         .map(|n| n.trim_end_matches(".toml").to_string())
-        .filter(|n| n.starts_with("18F"))
+        .filter(|n| n.starts_with("18F") || n.starts_with("16F"))
         .collect();
     v.sort();
     v
@@ -76,10 +79,11 @@ impl App {
         let devices = list_devices(&devices_dir);
         let mut a = App {
             devices_dir,
-            device: device.or_else(|| devices.first().cloned()).unwrap_or_default(),
+            device: device.or_else(|| devices.iter().find(|d| d.starts_with("18F")).or(devices.first()).cloned()).unwrap_or_default(),
             devices,
             hex_path: hex.clone().unwrap_or_default(),
             m: None,
+            m16: None,
             msg: String::new(),
             running: false,
             speed: 6.0,
@@ -121,6 +125,7 @@ impl App {
 
     fn load(&mut self) {
         self.running = false;
+        self.job = None; // a step over from the previous program must not run on the new one
         self.last_stop = None;
         // The part the ELF was built for wins over the device box (the wrong part has the wrong SFRs and pins).
         let mut dev_note = String::new();
@@ -132,6 +137,12 @@ impl App {
         {
             dev_note = format!(" - device set to {x} from the ELF (was {})", self.device);
             self.device = x.clone();
+        }
+        self.m16 = None;
+        let is16 = devdesc::Device::load(&self.devices_dir.join(format!("{}.toml", self.device))).is_ok_and(|d| d.device.family == "pic16e");
+        if is16 {
+            self.load16(dev_note);
+            return;
         }
         let res = (|| -> Result<(Machine, String), String> {
             let dev = devdesc::Device::load(&self.devices_dir.join(format!("{}.toml", self.device))).map_err(|e| e.to_string())?;
@@ -194,6 +205,56 @@ impl App {
         }
     }
 
+    /// Loads a program for a PIC16 part: the hex, the assembly listing's labels and the stimulus file. There is no ELF
+    /// debug information, Board (LEDs, OLED) or source view for these parts yet.
+    fn load16(&mut self, dev_note: String) {
+        let res = (|| -> Result<(Machine16, BTreeMap<u32, String>), String> {
+            let dev = devdesc::Device::load(&self.devices_dir.join(format!("{}.toml", self.device))).map_err(|e| e.to_string())?;
+            let mut m = Machine16::new(dev)?;
+            let p = picsim::lines::program_hex(std::path::Path::new(self.hex_path.trim()))?;
+            m.load_hex(&std::fs::read_to_string(&p).map_err(|e| format!("{}: {e}", p.display()))?)?;
+            let mut labels = BTreeMap::new();
+            if let Ok(t) = std::fs::read_to_string(p.with_extension("S")) {
+                m.load_symbols_from_asm(&t);
+                // Only the `;SYM` lines are code labels (an `equ` is a variable's data address).
+                for l in t.lines().filter_map(|l| l.strip_prefix(";SYM ")) {
+                    let mut it = l.split_whitespace();
+                    if let (Some(n), Some(a)) = (it.next(), it.next().and_then(|a| a.strip_prefix("0x")).and_then(|h| u32::from_str_radix(h, 16).ok())) {
+                        labels.entry(a).or_insert_with(|| n.to_string());
+                    }
+                }
+            }
+            if !self.stim_path.trim().is_empty() {
+                let f = PathBuf::from(self.stim_path.trim());
+                m.load_stimulus(&std::fs::read_to_string(&f).map_err(|e| format!("{}: {e}", f.display()))?).map_err(|e| format!("{}: {e}", f.display()))?;
+            }
+            Ok((m, labels))
+        })();
+        self.m = None;
+        self.sources.clear();
+        self.last_src = None;
+        self.snap = None;
+        self.lines = LineMap::default();
+        match res {
+            Ok((m, labels)) => {
+                self.msg = format!("loaded {} ({} labels){dev_note} - PIC16: no Board or source view yet", self.hex_path, labels.len());
+                self.labels = labels;
+                self.fosc_mhz = self.fosc_mhz.min(32.0);
+                self.tab = 0;
+                self.m16 = Some(m);
+            }
+            Err(e) => {
+                self.msg = format!("{e}{dev_note}");
+                self.labels.clear();
+            }
+        }
+    }
+
+    /// Instruction cycles executed so far by whichever part is loaded.
+    fn cycles(&self) -> u64 {
+        self.m.as_ref().map(|m| m.cpu.cycles).or_else(|| self.m16.as_ref().map(|m| m.cpu.cycles)).unwrap_or(0)
+    }
+
     fn snapshot(&mut self) {
         self.snap = self.m.as_ref().map(|m| m.cpu.m.mem.clone());
     }
@@ -208,6 +269,16 @@ impl App {
     }
 
     fn advance(&mut self, cycles: u64) {
+        if let Some(m) = &mut self.m16 {
+            let halt = m.syms.get("__halt").copied();
+            match m.run(halt, cycles) {
+                Stop::Cycles => {}
+                s => {
+                    self.running = false;
+                    self.last_stop = Some(s);
+                }
+            }
+        }
         if let Some(m) = &mut self.m {
             let halt = m.syms.get("__halt").copied();
             let stop = m.run(halt, cycles);
@@ -234,7 +305,26 @@ impl eframe::App for App {
         let slice = std::time::Duration::from_millis(30);
         if let Some(job) = self.job.take() {
             let mut keep = Some(job);
-            if let Some(m) = self.m.as_mut() {
+            if let Some(m) = self.m16.as_mut() {
+                // Only "step over" runs on a PIC16 (there are no source lines to step by).
+                while let Some(Job::Until(t)) = keep.as_ref() {
+                    match m.run(Some(*t), 20_000) {
+                        Stop::Cycles => {}
+                        Stop::Halt => {
+                            self.last_stop = None; // arrived
+                            keep = None;
+                        }
+                        s => {
+                            self.last_stop = Some(s);
+                            keep = None;
+                        }
+                    }
+                    if keep.is_some() && t0.elapsed() > slice {
+                        break;
+                    }
+                }
+                keep = keep.filter(|j| matches!(j, Job::Until(_)));
+            } else if let Some(m) = self.m.as_mut() {
                 while let Some(j) = keep.as_ref() {
                     // None: not finished. Some(None): arrived. Some(Some(stop)): a breakpoint or the halt came first.
                     let finished: Option<Option<Stop>> = match j {
@@ -315,11 +405,11 @@ impl eframe::App for App {
                     self.load();
                 }
                 ui.separator();
-                let loaded = self.m.is_some();
+                let loaded = self.m.is_some() || self.m16.is_some();
                 let idle = !self.running && self.job.is_none();
                 if ui.add_enabled(loaded && idle, egui::Button::new("Run")).clicked() {
                     self.snapshot();
-                    self.rate = (std::time::Instant::now(), self.m.as_ref().map_or(0, |m| m.cpu.cycles), 0.0);
+                    self.rate = (std::time::Instant::now(), self.cycles(), 0.0);
                     self.running = true;
                     self.last_stop = None;
                 }
@@ -332,9 +422,21 @@ impl eframe::App for App {
                     if let Some(m) = &mut self.m {
                         m.cpu.step();
                     }
+                    if let Some(m) = &mut self.m16 {
+                        m.cpu.step();
+                    }
                 }
                 if ui.add_enabled(loaded && idle, egui::Button::new("Step over")).clicked() {
                     self.snapshot();
+                    if let Some(m) = &mut self.m16 {
+                        // CALL and CALLW step over (one word each); everything else is one step.
+                        let w = m.cpu.fetch(m.cpu.pc);
+                        if w >> 11 == 4 || w == 0x000A {
+                            self.job = Some(Job::Until((m.cpu.pc + 1) % (m.cpu.prog.len() as u32 / 2)));
+                        } else {
+                            m.cpu.step();
+                        }
+                    }
                     if let Some(m) = &mut self.m {
                         let w = u16::from(m.cpu.prog[m.cpu.pc as usize]) | u16::from(m.cpu.prog[m.cpu.pc as usize + 1]) << 8;
                         // CALL (two words) and RCALL step over; everything else is one step
@@ -369,16 +471,22 @@ impl eframe::App for App {
                     if let Some(m) = &mut self.m {
                         m.reset();
                     }
+                    if let Some(m) = &mut self.m16
+                        && let Err(e) = m.reset()
+                    {
+                        self.msg = e;
+                    }
                 }
                 ui.add(egui::Slider::new(&mut self.speed, 0.0..=7.0).text("cycles/frame (10^x)"));
                 ui.label("Fosc MHz");
                 ui.add(egui::DragValue::new(&mut self.fosc_mhz).range(0.03..=64.0));
             });
             // Simulated cycles per second while running, against what the part does at the chosen Fosc.
-            if self.running && let Some(m) = &self.m {
+            if self.running {
+                let cycles = self.cycles();
                 let dt = self.rate.0.elapsed().as_secs_f64();
                 if dt >= 0.5 {
-                    self.rate = (std::time::Instant::now(), m.cpu.cycles, m.cpu.cycles.saturating_sub(self.rate.1) as f64 / dt);
+                    self.rate = (std::time::Instant::now(), cycles, cycles.saturating_sub(self.rate.1) as f64 / dt);
                 }
             }
             let real = f64::from(self.fosc_mhz) * 1e6 / 4.0;
@@ -389,6 +497,10 @@ impl eframe::App for App {
                 _ => self.msg.clone(),
             });
         });
+        if self.m16.is_some() {
+            self.ui16(ui);
+            return;
+        }
         let Some(m) = self.m.as_mut() else {
             // No program yet: still let the LEDs and OLED be wired; they are kept for the next Load.
             if self.pre_pins.0 != self.device {
@@ -397,7 +509,9 @@ impl eframe::App for App {
             }
             egui::Panel::right("data").default_size(360.0).show(ui, |ui| {
                 ui.heading("Board");
-                if self.pre_pins.1.is_empty() {
+                if self.device.starts_with("16F") {
+                    ui.label("LEDs and an OLED are not available for PIC16 parts yet. A stimulus file can still drive the pins.");
+                } else if self.pre_pins.1.is_empty() {
                     ui.label("Pick a device to wire LEDs and an OLED.");
                 } else if board_ui(ui, &mut self.board_cfg, &self.pre_pins.1) {
                     self.board_cfg = self.board_cfg.fresh();
@@ -576,37 +690,8 @@ impl eframe::App for App {
                     }
                 }
                 _ => {
-                    ui.horizontal(|ui| {
-                        ui.add(egui::TextEdit::singleline(&mut self.watch_in).hint_text("symbol[:bytes]"));
-                        if ui.button("Add").clicked() {
-                            let (n, l) = self.watch_in.split_once(':').map_or((self.watch_in.as_str(), 1), |(n, l)| (n, l.parse().unwrap_or(1)));
-                            self.watch.push((n.trim().to_string(), l.clamp(1, 8)));
-                            self.watch_in.clear();
-                        }
-                    });
-                    let mut del = None;
-                    for (i, (n, l)) in self.watch.iter().enumerate() {
-                        let addr = m.syms.get(n).copied().or_else(|| m.debug.vars.iter().find(|v| v.scope.is_none() && v.name == *n).map(|v| v.addr)).or_else(|| m.dev.find_sfr(n).map(|s| s.addr));
-                        ui.horizontal(|ui| {
-                            match addr {
-                                Some(a) => {
-                                    let b = m.peek(a, *l);
-                                    let v: u64 = b.iter().rev().fold(0, |x, y| x << 8 | u64::from(*y));
-                                    let signed = if *l < 8 { ((v << (64 - 8 * l)) as i64) >> (64 - 8 * l) } else { v as i64 };
-                                    ui.monospace(format!("{n}[{l}] @{a:04X} = {v} ({signed}) 0x{v:X}"));
-                                }
-                                None => {
-                                    ui.monospace(format!("{n}: unknown"));
-                                }
-                            }
-                            if ui.small_button("x").clicked() {
-                                del = Some(i);
-                            }
-                        });
-                    }
-                    if let Some(i) = del {
-                        self.watch.remove(i);
-                    }
+                    let (syms, vars, dev) = (&m.syms, &m.debug.vars, &m.dev);
+                    watch_ui(ui, &mut self.watch, &mut self.watch_in, |n| syms.get(n).copied().or_else(|| vars.iter().find(|v| v.scope.is_none() && v.name == *n).map(|v| v.addr)).or_else(|| dev.find_sfr(n).map(|s| s.addr)), |a, l| m.peek(a, l));
                 }
             }
         });
@@ -670,6 +755,171 @@ impl eframe::App for App {
                 a += 2 * n;
             }
             let _ = next_view;
+            if let Some(b) = bp_toggle {
+                if let Some(p) = m.breakpoints.iter().position(|x| *x == b) {
+                    m.breakpoints.remove(p);
+                } else {
+                    m.breakpoints.push(b);
+                }
+            }
+            ui.label("click an instruction to toggle a breakpoint");
+        });
+    }
+}
+
+/// The Watch tab: symbols (or SFR names) with a byte count, shown as unsigned, signed and hex. `addr` resolves a name,
+/// `peek` reads bytes without side effects.
+fn watch_ui(ui: &mut egui::Ui, watch: &mut Vec<(String, usize)>, input: &mut String, addr: impl Fn(&str) -> Option<u32>, peek: impl Fn(u32, usize) -> Vec<u8>) {
+    ui.horizontal(|ui| {
+        ui.add(egui::TextEdit::singleline(input).hint_text("symbol[:bytes]"));
+        if ui.button("Add").clicked() {
+            let (n, l) = input.split_once(':').map_or((input.as_str(), 1), |(n, l)| (n, l.parse().unwrap_or(1)));
+            watch.push((n.trim().to_string(), l.clamp(1, 8)));
+            input.clear();
+        }
+    });
+    let mut del = None;
+    for (i, (n, l)) in watch.iter().enumerate() {
+        ui.horizontal(|ui| {
+            match addr(n) {
+                Some(a) => {
+                    let v: u64 = peek(a, *l).iter().rev().fold(0, |x, y| x << 8 | u64::from(*y));
+                    let signed = if *l < 8 { ((v << (64 - 8 * l)) as i64) >> (64 - 8 * l) } else { v as i64 };
+                    ui.monospace(format!("{n}[{l}] @{a:04X} = {v} ({signed}) 0x{v:X}"));
+                }
+                None => {
+                    ui.monospace(format!("{n}: unknown"));
+                }
+            }
+            if ui.small_button("x").clicked() {
+                del = Some(i);
+            }
+        });
+    }
+    if let Some(i) = del {
+        watch.remove(i);
+    }
+}
+
+impl App {
+    /// The window body for a PIC16 part: core registers and return stack, Memory / SFRs / Watch, and the disassembly.
+    fn ui16(&mut self, ui: &mut egui::Ui) {
+        let Some(m) = self.m16.as_mut() else { return };
+        let pc = m.cpu.pc;
+        egui::Panel::left("regs").default_size(230.0).show(ui, |ui| {
+            ui.heading("CPU");
+            let g = |a: usize| m.cpu.mem[a];
+            // Core registers sit at the same addresses on every enhanced mid-range part: STATUS 03h, FSR0 04h/05h, FSR1 06h/07h, BSR 08h, WREG 09h, PCLATH 0Ah, INTCON 0Bh.
+            let st = g(3);
+            egui::Grid::new("regs16").num_columns(2).show(ui, |ui| {
+                let row = |ui: &mut egui::Ui, n: &str, v: String| {
+                    ui.label(n);
+                    ui.monospace(v);
+                    ui.end_row();
+                };
+                row(ui, "PC", format!("{pc:04X}"));
+                row(ui, "WREG", format!("{:02X}  ({})", g(9), g(9)));
+                row(ui, "BSR", format!("{:02X}", g(8)));
+                row(ui, "STATUS", format!("{st:02X}  {}", [("Z", picsim::pic16::Z), ("DC", picsim::pic16::DC), ("C", picsim::pic16::C)].iter().map(|(n, b)| if st & b != 0 { (*n).to_string() } else { "-".repeat(n.len()) }).collect::<Vec<_>>().join(" ")));
+                row(ui, "PCLATH", format!("{:02X}", g(10)));
+                row(ui, "INTCON", format!("{:02X}", g(11)));
+                row(ui, "FSR0", format!("{:02X}{:02X}", g(5), g(4)));
+                row(ui, "FSR1", format!("{:02X}{:02X}", g(7), g(6)));
+                row(ui, "Cycles", m.cpu.cycles.to_string());
+                row(ui, "Instr", m.cpu.icount.to_string());
+                row(ui, "Time", format!("{:.3} ms", m.cpu.cycles as f64 / (f64::from(self.fosc_mhz) * 1e6 / 4.0) * 1e3));
+            });
+            ui.separator();
+            ui.heading("Return stack");
+            let depth = m.cpu.depth() as usize;
+            for i in (0..depth.min(16)).rev() { // STKPTR keeps counting after an overflow with STVREN = 0, but only 16 entries exist
+                let ret = m.cpu.stack_entry(i);
+                // The entry is the address after the CALL (or the interrupted instruction): name the label at or before it.
+                let near = self.labels.range(..=ret.saturating_sub(1)).next_back().map_or(String::new(), |(a, n)| format!("  {n}+{}", ret.saturating_sub(1) - a));
+                ui.monospace(format!("{:>3}  {ret:04X}{near}", i + 1));
+            }
+            if !m.cpu.unmodelled.is_empty() || !m.cpu.notes.is_empty() {
+                ui.separator();
+                ui.heading("Notes");
+                for n in &m.cpu.notes {
+                    ui.label(n);
+                }
+                if !m.cpu.unmodelled.is_empty() {
+                    ui.label(format!("unmodelled SFRs touched: {}", m.cpu.unmodelled.iter().cloned().collect::<Vec<_>>().join(" ")));
+                }
+            }
+        });
+        egui::Panel::right("data").default_size(360.0).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                for (i, t) in ["Memory", "SFRs", "Watch"].iter().enumerate() {
+                    ui.selectable_value(&mut self.tab, i, *t);
+                }
+            });
+            ui.separator();
+            match self.tab {
+                0 => {
+                    // Up to the last address that has any bit; an address with none (unimplemented, or an alias of another bank's core registers) shows --.
+                    let top = m.cpu.implemented.iter().rposition(|b| *b != 0).map_or(0, |i| i + 1);
+                    egui::ScrollArea::vertical().show_rows(ui, 14.0, top.div_ceil(16), |ui, range| {
+                        for row in range {
+                            let a = row * 16;
+                            let has = |i: usize| m.cpu.implemented.get(a + i).is_some_and(|b| *b != 0);
+                            let bytes: String = (0..16).map(|i| if has(i) { format!("{:02X}", m.cpu.peek((a + i) as u32)) } else { "--".to_string() }).collect::<Vec<_>>().join(" ");
+                            let asc: String = (0..16).map(|i| { let b = m.cpu.peek((a + i) as u32); if has(i) && (32..127).contains(&b) { b as char } else { '.' } }).collect();
+                            ui.monospace(format!("{a:04X}  {bytes}  {asc}"));
+                        }
+                    });
+                }
+                1 => {
+                    ui.add(egui::TextEdit::singleline(&mut self.mem_filter).hint_text("filter"));
+                    let f = self.mem_filter.to_uppercase();
+                    let mut list: Vec<(&str, u32)> = m.dev.sfr.iter().filter(|s| f.is_empty() || s.name.to_uppercase().contains(&f)).map(|s| (s.name.as_str(), s.addr)).collect();
+                    list.sort();
+                    egui::ScrollArea::vertical().show_rows(ui, 14.0, list.len(), |ui, range| {
+                        for (n, a) in &list[range] {
+                            let v = m.cpu.peek(*a);
+                            ui.monospace(format!("{n:<14} {a:04X}  {v:02X}  {v:08b}"));
+                        }
+                    });
+                }
+                _ => {
+                    let (syms, dev) = (&m.syms, &m.dev);
+                    watch_ui(ui, &mut self.watch, &mut self.watch_in, |n| syms.get(n).copied().or_else(|| dev.find_sfr(n).map(|s| s.addr)), |a, l| m.peek(a, l));
+                }
+            }
+        });
+        egui::CentralPanel::default().show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.heading("Program");
+                ui.checkbox(&mut self.follow, "follow PC");
+                ui.add(egui::TextEdit::singleline(&mut self.goto_in).hint_text("goto 0x… (word)").desired_width(100.0));
+                if ui.button("Go").clicked()
+                    && let Some(a) = hex_u32(&self.goto_in)
+                {
+                    self.view_addr = a & 0x7FFF; // the program counter is 15 bits wide; a larger value would overflow the listing's range
+                    self.follow = false;
+                }
+            });
+            // Every instruction is one 14-bit word at a word address, so the listing can start a few words before the PC.
+            let start = if self.follow { pc.saturating_sub(4) } else { self.view_addr };
+            let lines = ((ui.available_height() / 15.0) as usize).clamp(8, 80);
+            let mut bp_toggle = None;
+            for a in start..start + lines as u32 {
+                let w = m.cpu.fetch(a);
+                if let Some(l) = self.labels.get(&a) {
+                    ui.colored_label(egui::Color32::from_rgb(120, 170, 255), format!("{l}:"));
+                }
+                let has_bp = m.breakpoints.contains(&a);
+                let mut rt = egui::RichText::new(format!("{} {a:04X}  {w:04X}  {}", if has_bp { "●" } else { " " }, m.cpu.disasm(w))).monospace();
+                if a == pc {
+                    rt = rt.background_color(egui::Color32::from_rgb(70, 90, 20)).color(egui::Color32::WHITE);
+                } else if has_bp {
+                    rt = rt.color(egui::Color32::from_rgb(255, 110, 110));
+                }
+                if ui.add(egui::Label::new(rt).sense(egui::Sense::click())).clicked() {
+                    bp_toggle = Some(a);
+                }
+            }
             if let Some(b) = bp_toggle {
                 if let Some(p) = m.breakpoints.iter().position(|x| *x == b) {
                     m.breakpoints.remove(p);

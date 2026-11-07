@@ -1366,6 +1366,11 @@ impl Pic16 {
         u32::from(self.tos_byte(1)) << 8 | u32::from(self.tos_byte(0))
     }
 
+    /// Entry `i` of the hardware return stack (0 is the oldest; `depth()` entries are in use), for the front ends.
+    pub fn stack_entry(&self, i: usize) -> u32 {
+        u32::from(self.stack[i & 15])
+    }
+
     fn set_pcon(&mut self, bits: u8) {
         if let Some(a) = self.a_pcon0 {
             self.mem[a] |= bits;
