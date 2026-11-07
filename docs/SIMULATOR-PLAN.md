@@ -96,7 +96,7 @@ yet), PIC16 single vector with automatic context save. Vector addresses from `[v
 * CLI: `basil-sim prog.hex --device 18F16Q41 --until __halt --dump T_R1,T_R2 --cycles --trace --stim s.toml --vcd out.vcd`
   (symbols from the `.sym` pic-as writes).
 * `exec-test.py --engine=sim|mdb`; `' expect:`, `' cycles:`, `' dma:` lines work unchanged.
-* GUI: `tools/picsim-gui` (`basil-sim-gui`, egui): load a hex, Run/Pause/Step/Step over/Reset, breakpoints by
+* GUI: `tools/picsim-gui` (`pic-sim`, egui): load a hex, Run/Pause/Step/Step over/Reset, breakpoints by
   clicking a disassembly line, registers, return stack, memory and SFR views, watch list, time at a given Fosc.
 * GUI file choice: Browse hex/elf… and Stim… (file dialogs), or drag a `.hex`, `.elf` or stimulus `.toml` onto the window. An `.elf`
   loads the `.hex` beside it (or in `dist/`). The Board panel (LEDs, OLED) is available before a program is loaded and its wiring is kept.
@@ -150,7 +150,7 @@ yet), PIC16 single vector with automatic context save. Vector addresses from `[v
 ## Status
 
 * S0 done (devdesc 0.2, regenerated devices).
-* S1 done for the core: `crates/picsim` (hex loader, bus, `Pic18`, disassembler), `basil-sim` CLI, `basil-sim-gui`,
+* S1 done for the core: `crates/picsim` (hex loader, bus, `Pic18`, disassembler), `basil-sim` CLI, `pic-sim`,
   `exec-test.py --engine sim|mdb|both` (DMA programs are skipped under `sim` until S5). Results and the rules
   relied on are in `FACTS-SIM.md`.
 * Open for S1's "done when": the `both` comparison of cycle counts with MDB.

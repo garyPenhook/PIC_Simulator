@@ -1,4 +1,4 @@
-//! `basil-sim-gui [prog.hex] [--device 18F16Q41]`: run, step and inspect a program on a simulated PIC18.
+//! `pic-sim [prog.hex] [--device 18F16Q41]`: run, step and inspect a program on a simulated PIC18.
 
 use eframe::egui;
 use picsim::lines::LineMap;
@@ -853,7 +853,7 @@ fn main() -> eframe::Result {
             hex = Some(a);
         }
     }
-    let opts = eframe::NativeOptions { viewport: egui::ViewportBuilder::default().with_inner_size([1280.0, 800.0]).with_title("basil-sim"), ..Default::default() };
-    eframe::run_native("basil-sim", opts, Box::new(|_| Ok(Box::new(App::new(hex, device)))))
+    let opts = eframe::NativeOptions { viewport: egui::ViewportBuilder::default().with_inner_size([1280.0, 800.0]).with_title("pic-sim"), ..Default::default() };
+    eframe::run_native("pic-sim", opts, Box::new(|_| Ok(Box::new(App::new(hex, device)))))
 }
 

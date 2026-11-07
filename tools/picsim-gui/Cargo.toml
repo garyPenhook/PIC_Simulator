@@ -5,7 +5,7 @@ edition = "2024"
 description = "Graphical front end of the PIC simulator"
 
 [[bin]]
-name = "basil-sim-gui"
+name = "pic-sim"
 path = "src/main.rs"
 
 [dependencies]
