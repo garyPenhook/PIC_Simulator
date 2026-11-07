@@ -426,7 +426,7 @@ fn reset_reloads_everything_loaded() {
 }
 
 #[test]
-fn new_devices_and_the_parts_the_core_refuses() {
+fn every_modelled_pic16_part_runs() {
     for part in ["16F17126", "16F17146", "16F18056", "16F18076", "16F13145", "16F15244"] {
         let dev = Device::load(&Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("../../devices/{part}.toml"))).unwrap();
         let mut m = Machine16::new(dev).unwrap_or_else(|e| panic!("{part}: {e}"));
@@ -442,9 +442,137 @@ fn new_devices_and_the_parts_the_core_refuses() {
         run(&mut m, 4);
         assert_eq!((m.cpu.mem[0x70], flags(&m)), (7, C | DC | Z), "{part}");
     }
-    // the PIC16F183xx has a 5-bit BSR and INTCON-style interrupt registers: refused, not run with the wrong decoding
-    let dev = Device::load(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../../devices/16F18346.toml")).unwrap();
-    assert!(Machine16::new(dev).is_err());
+    // every PIC16F183xx member: the 5-bit-BSR core (MOVLB 31 is 003Fh); the shadow registers are in bank 31
+    for part in ["18313", "18323", "18324", "18325", "18326", "18344", "18345", "18346"] {
+        for pre in ["16F", "16LF"] {
+            let part = format!("{pre}{part}");
+            let mut m = machine_on(&part, &[movlb5(31), movlw(0x11), movwf(0x65), movlw(0xFF), addlw(1), movlw(7), movwf(0x70)], &[], true);
+            run(&mut m, 7);
+            assert!(m.cpu.bsr5, "{part}");
+            assert_eq!((sfr(&m, "BSR"), sfr(&m, "WREG_SHAD"), m.cpu.mem[0x70], flags(&m)), (31, 0x11, 7, C | DC | Z), "{part}");
+        }
+    }
+}
+
+// ----- PIC16F183xx (DS40001839E): 5-bit BSR, FSR map, older Timer1/Timer2 -------------------------------------------
+
+fn movlb5(k: u16) -> u16 { 0x0020 | k } // Table 34-3 p.399, p.406
+
+/// `machine` on another part.
+fn machine_on(part: &str, prog: &[u16], isr: &[u16], stvren: bool) -> Machine16 {
+    let dev = Device::load(&Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("../../devices/{part}.toml"))).unwrap();
+    let mut m = Machine16::new(dev).unwrap_or_else(|e| panic!("{part}: {e}"));
+    let mut text = String::new();
+    let mut put = |w: u32, v: u16| {
+        for (a, b) in [(2 * w, v as u8), (2 * w + 1, (v >> 8) as u8)] {
+            text += &hexrec(&[2, 0, 0, 4, (a >> 24) as u8, (a >> 16) as u8]);
+            text += &hexrec(&[1, (a >> 8) as u8, a as u8, 0, b]);
+        }
+    };
+    for (i, &w) in prog.iter().enumerate() {
+        put(i as u32, w);
+    }
+    for (i, &w) in isr.iter().enumerate() {
+        put(4 + i as u32, w);
+    }
+    put(0x8008, if stvren { 0x3FFF } else { 0x3FFF & !(1 << 12) });
+    m.load_hex(&(text + ":00000001FF\n")).unwrap();
+    m
+}
+
+#[test]
+fn f183_movlb_is_five_bits_and_the_six_bit_encoding_is_undefined() {
+    let mut m = machine_on("16F18346", &[movlb5(5), movlb(3)], &[], true);
+    run(&mut m, 2);
+    assert_eq!(sfr(&m, "BSR"), 5); // 0143h is not MOVLB on this part
+    assert!(m.cpu.notes.iter().any(|n| n.contains("undefined opcode 0x0143")));
+    assert_eq!((m.cpu.disasm(movlb5(31)), m.cpu.disasm(movlb(3))), ("movlb   31".to_string(), "dw      0x0143".to_string()));
+    // and on a 6-bit part 0020h-003Fh are not MOVLB
+    assert_eq!(picsim::pic16::disasm(movlb5(5)), "dw      0x0025");
+}
+
+#[test]
+fn f183_fsr_map_linear_reserved_and_eeprom() {
+    // DS40001839E Fig. 4-8 p.60, 4.5.2-4.5.3 p.62: linear 2000h-29AFh = banks 0-30, 1000h-1FFFh and 29B0h.. reserved
+    // (read 0, writes ignored), EEPROM at 7000h-70FFh readable with one extra cycle.
+    let fsr1 = |v: u16| [movlw(v >> 8), movwf(0x07), movlw(v & 0xFF), movwf(0x06)];
+    let mut prog = Vec::new();
+    for (at, val) in [(0x2050u16, 0x5A), (0x29AF, 0x6B), (0x29B0, 0x7C), (0x1020, 0x8D)] {
+        prog.extend(fsr1(at));
+        prog.extend([movlw(val), movwi_k(1, 0)]);
+    }
+    let mut m = machine_on("16F18346", &prog, &[], true);
+    run(&mut m, prog.len());
+    assert_eq!((m.cpu.mem[0xA0], m.cpu.mem[30 * 128 + 0x20 + 79]), (0x5A, 0x6B));
+    // nothing behind the reserved ranges (as linear memory 29B0h would be bank 31's 0FA0h)
+    assert_eq!((m.cpu.mem[0x1020], m.cpu.mem[0xFA0]), (0, 0));
+    // EEPROM byte 5 = A5h in the hex (word F005h, byte address 1E00Ah)
+    let mut m = machine_on("16F18346", &[movlw(0x70), movwf(0x05), movlw(5), movwf(0x04), moviw_k(0, 0), moviw_k(0, 1)], &[], true);
+    m.load_hex(&(hexrec(&[2, 0, 0, 4, 0, 1]) + &hexrec(&[1, 0xE0, 0x0A, 0, 0xA5]) + ":00000001FF\n")).unwrap();
+    run(&mut m, 4);
+    let c = m.cpu.cycles;
+    m.cpu.step();
+    assert_eq!((m.cpu.mem[W], m.cpu.cycles - c), (0xA5, 2));
+    m.cpu.step();
+    assert_eq!(m.cpu.mem[W], 0xFF); // erased
+}
+
+#[test]
+fn f183_timer1_clock_in_t1con_start_delay_and_tmr1h_write_clears_the_prescaler() {
+    // TMR1L/H 19h/1Ah, T1CON 1Bh (bank 0). T1CON = 01h: TMR1CS = 00 (Fosc/4), 1:1, ON, written at cycle 2. The first
+    // clock is counted at cycle 4 (MDB, tests/probe/t1h_prescaler.S, [A110]); a TMR1L read sees its own cycle ([A2]).
+    let mut m = machine_on("16F18346", &[movlw(0x01), movwf(0x1B), NOP, NOP, movf(0x19, 0)], &[], true);
+    run(&mut m, 5);
+    assert_eq!(m.cpu.mem[W], 2);
+    // TMR1CS = 01 (Fosc): four ticks a cycle
+    let mut m = machine_on("16F18346", &[movlw(0x41), movwf(0x1B), NOP, NOP, movf(0x19, 0)], &[], true);
+    run(&mut m, 5);
+    assert_eq!(m.cpu.mem[W], 8);
+    // 1:8 prescaler, running from cycle 1 (T1CON set directly): the prescaler holds 6 ticks after the CLRF TMR1H of
+    // cycle 6, which clears it (27.3 p.286, MDB). A read at cycle 8 (2 ticks later) still sees 0, where 8 ticks
+    // without the clear would have made 1; the read at cycle 14 (8 ticks after the clear) sees 1.
+    let mut prog = vec![NOP; 5];
+    prog.extend([clrf(0x1A), NOP, movf(0x19, 0), NOP, NOP, NOP, NOP, NOP, movf(0x19, 0)]);
+    let mut m = machine_on("16F18346", &prog, &[], true);
+    poke(&mut m, "T1CON", 0x31);
+    run(&mut m, 8);
+    assert_eq!((m.cpu.cycles, m.cpu.mem[W]), (8, 0));
+    run(&mut m, 6);
+    assert_eq!((m.cpu.cycles, m.cpu.mem[W]), (14, 1));
+}
+
+#[test]
+fn f183_timer2_older_layout_period_prescaler_and_flag_timing() {
+    // TMR2/PR2/T2CON 1Dh/1Eh/1Fh, TMR2IF = PIR1 bit 1 (11h). T2CON = 04h (ON, 1:1, 1:1) written at cycle 4: the first
+    // clock is at cycle 6 ([A110]), TMR2 = 3 = PR2 at cycle 8, back to 0 with TMR2IF at cycle 9 (MDB,
+    // tests/probe/t2_f183.S).
+    let mut prog = vec![movlw(3), movwf(0x1E), movlw(0x04), movwf(0x1F)];
+    prog.extend([NOP; 12]);
+    let mut m = machine_on("16F18346", &prog, &[], true);
+    run(&mut m, 8);
+    assert_eq!((sfr(&m, "TMR2"), sfr(&m, "PIR1") & 2), (3, 0));
+    run(&mut m, 1);
+    assert_eq!((sfr(&m, "TMR2"), sfr(&m, "PIR1") & 2), (0, 2));
+    // 1:4 prescaler (CKPS = 01), 1:2 postscaler (OUTPS = 0001): T2CON = 0Dh, period (1 + 1) x 4 x 2 = 16 cycles
+    let mut prog = vec![movlw(1), movwf(0x1E), movlw(0x0D), movwf(0x1F)];
+    prog.extend([NOP; 40]);
+    let mut m = machine_on("16F18346", &prog, &[], true);
+    run(&mut m, 4 + 16);
+    assert_eq!(sfr(&m, "PIR1") & 2, 0);
+    run(&mut m, 1);
+    assert_eq!(sfr(&m, "PIR1") & 2, 2);
+    // a BCF of the flag in the cycle it is set wins (MDB, CLR = 1); one cycle later the flag was set first
+    for (at, left) in [(9usize, 0u8), (10, 0), (8, 2)] {
+        let mut prog = vec![movlw(3), movwf(0x1E), movlw(0x04), movwf(0x1F)];
+        prog.extend(vec![NOP; at - 5]);
+        prog.push(0x1000 | 1 << 7 | 0x11); // BCF PIR1,1 at cycle `at`
+        prog.extend([NOP; 4]);
+        let mut m = machine_on("16F18346", &prog, &[], true);
+        run(&mut m, at);
+        assert_eq!(m.cpu.cycles, at as u64);
+        run(&mut m, if at == 8 { 1 } else { 0 });
+        assert_eq!(sfr(&m, "PIR1") & 2, left, "BCF at cycle {at}");
+    }
 }
 
 // ----- Timer0 (DS40002343F ch.22 p.244-249) ---------------------------------------------------------------------
@@ -514,10 +642,11 @@ fn a_request_made_pending_by_software_is_taken_at_once() {
 }
 
 #[test]
-fn a_flag_cleared_and_set_again_in_one_step_is_a_fresh_request() {
-    // Woken from Sleep with GIE set, the instruction after SLEEP (BCF PIR0,TMR0IF) runs first (13.2.2 p.139) and
-    // clears the flag; Timer0 (period 1) sets it again at the end of that step. That is a fresh request ([A108]):
-    // the NOP after it runs before the entry, so the stacked PC is the one after the NOP.
+fn a_flag_cleared_in_the_cycle_a_timer_sets_it_stays_clear_and_the_next_set_is_a_fresh_request() {
+    // Woken from Sleep with GIE set, the instruction after SLEEP (BCF PIR0,TMR0IF) runs first (13.2.2 p.139). Timer0
+    // (period 1) sets the flag in that same cycle; the clear wins (MDB on the PIC16F18346's Timer2,
+    // tests/probe/t2_f183.S CLR = 1, [A110]). Timer0 sets it again at the end of the NOP: a fresh request ([A108]), so
+    // the instruction already fetched after the NOP (word 4) runs before the entry and the stacked PC is 5.
     let bcf_tmr0if = 0x1000 | 5 << 7 | 0x0C;
     let mut m = machine(&[movlb(1), SLEEP, bcf_tmr0if, NOP], &[NOP], true);
     t0(&mut m, 0x80, 0x40, 0);
@@ -526,10 +655,12 @@ fn a_flag_cleared_and_set_again_in_one_step_is_a_fresh_request() {
     poke(&mut m, "PIR0", 0x20);
     poke(&mut m, "INTCON", 0x80);
     m.cpu.step(); // wakes and runs the BCF
-    assert_eq!(m.cpu.pc, 3);
+    assert_eq!((m.cpu.pc, sfr(&m, "PIR0") & 0x20), (3, 0));
+    m.cpu.step(); // the NOP; the flag is set again at its end, no entry yet
+    assert_eq!((m.cpu.pc, m.cpu.depth(), sfr(&m, "PIR0") & 0x20), (4, 0, 0x20));
     let c = m.cpu.cycles;
-    m.cpu.step(); // the NOP already fetched, then the entry
-    assert_eq!((m.cpu.pc, m.cpu.cycles - c, m.cpu.tos()), (4, 3, 4));
+    m.cpu.step(); // word 4, then the entry
+    assert_eq!((m.cpu.pc, m.cpu.cycles - c, m.cpu.tos()), (4, 3, 5));
 }
 
 #[test]
@@ -633,6 +764,27 @@ fn timer1_rd16_buffers_tmr1h() {
     poke(&mut m, "T1CON", 0x33);
     run(&mut m, 7);
     assert_eq!((m.cpu.mem[W], sfr(&m, "TMR1H")), (0x34, 0x12));
+}
+
+#[test]
+fn timer1_starts_one_cycle_after_on_and_a_tmr1h_write_clears_the_prescaler_without_rd16() {
+    // MDB on the PIC16F17146 (tests/probe/t1h_prescaler.S NEWT1 = 1, [A110]). T1CON = 01h written at cycle 3: the first
+    // Fosc/4 clock is counted at cycle 5, so a TMR1L read at cycle 6 sees 2.
+    let mut m = machine(&[movlb(6), movlw(0x01), movwf(0x0E), NOP, NOP, movf(0x0C, 0)], &[], true);
+    poke(&mut m, "T1CLK", 1);
+    run(&mut m, 6);
+    assert_eq!(m.cpu.mem[W], 2);
+    // RD16 = 0, 1:8, running from cycle 1: CLRF TMR1H at cycle 7 clears the prescaler (DS40002343F 23.3 p.255), so
+    // the read at cycle 9 still sees 0 (9 ticks without the clear would have made 1) and the one at cycle 15 sees 1
+    let mut prog = vec![movlb(6), NOP, NOP, NOP, NOP, NOP];
+    prog.extend([clrf(0x0D), NOP, movf(0x0C, 0), NOP, NOP, NOP, NOP, NOP, movf(0x0C, 0)]);
+    let mut m = machine(&prog, &[], true);
+    poke(&mut m, "T1CLK", 1);
+    poke(&mut m, "T1CON", 0x31);
+    run(&mut m, 9);
+    assert_eq!((m.cpu.cycles, m.cpu.mem[W]), (9, 0));
+    run(&mut m, 6);
+    assert_eq!((m.cpu.cycles, m.cpu.mem[W]), (15, 1));
 }
 
 #[test]

@@ -233,7 +233,7 @@ fn run16(
         while m.cpu.cycles < to {
             let pc = m.cpu.pc;
             let c0 = m.cpu.cycles;
-            let text = picsim::pic16::disasm(m.cpu.fetch(pc));
+            let text = m.cpu.disasm(m.cpu.fetch(pc));
             m.cpu.step();
             println!("{:>8} {:04X}  {:<28} +{}  W={:02X} STATUS={:02X}", c0, pc, text, m.cpu.cycles - c0, m.cpu.mem[9], m.cpu.mem[3]);
         }

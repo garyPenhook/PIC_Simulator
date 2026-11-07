@@ -1,6 +1,8 @@
 //! PIC16 enhanced mid-range core (`pic16e`): the standard instruction set of DS40002343F Table 41-3 (pp.592-594) and
 //! the instruction descriptions on pp.595-607, executed from the 14-bit words pic-as wrote. Written for the
-//! PIC16F17126/46; the other `pic16e` parts share the core but not yet the interrupt registers (see `Pic16::new`).
+//! PIC16F17126/46; the PIC16F131xx, 152xx and 180x6 share it. The PIC16F183xx (DS40001839E) is the same core with a
+//! 5-bit BSR: 32 banks, MOVLB `00 0000 001k kkkk` (Table 34-3 p.399, p.406), a shorter linear region and the EEPROM
+//! readable through the FSRs (4.5 pp.60-62); its Timer1/3/5 and Timer2/4/6 are the older register layout (ch.27-28).
 //!
 //! Cycle counts are the data sheet's (p.591): 1; 2 for CALL, CALLW, RETURN, RETLW, RETFIE, GOTO, BRA, BRW, a taken
 //! skip and a write to PCL; +1 when an instruction reaches program flash through an INDFn register.
@@ -44,7 +46,9 @@ struct Timer1 {
     l: usize,
     h: usize,
     con: usize,
-    clk: usize,
+    /// TxCLK; `None` on the PIC16F183xx, where TMRxCS<1:0> is T1CON<7:6> (00 Fosc/4, 01 Fosc; DS40001839E Register
+    /// 27-1 p.293) and a write to TMRxH or TMRxL clears the prescaler (27.3 p.286).
+    clk: Option<usize>,
     gcon: usize,
     flag: (usize, u8),
     cnt: u16,
@@ -60,8 +64,10 @@ struct Timer2 {
     tmr: usize,
     pr: usize,
     con: usize,
-    hlt: usize,
-    clk: usize,
+    /// TxHLT and TxCLKCON; `None` on the PIC16F183xx: Fosc/4 only, T2CON = -/OUTPS<3:0>/ON/CKPS<1:0> with prescaler
+    /// 1, 4, 16, 64 (DS40001839E 28.1 p.298, Register 28-1 p.299).
+    hlt: Option<usize>,
+    clk: Option<usize>,
     flag: (usize, u8),
     cnt: u8,
     pre: u64,
@@ -76,6 +82,8 @@ enum Tgt {
     Mem(usize),
     /// A program flash word (readable through INDF: its low eight bits; writes are ignored), DS40002343F 9.6.3 p.57.
     Flash(u32),
+    /// A data EEPROM byte at FSR 7000h-70FFh on the PIC16F183xx (read only, one extra cycle; DS40001839E 4.5.3 p.62).
+    Eeprom(u8),
     /// Reads 0, writes are ignored: an INDF that points at an INDF (9.6 p.55) or the reserved FSR range.
     Null,
 }
@@ -114,6 +122,13 @@ pub struct Pic16 {
     /// Messages about things the model does not do, deduplicated.
     pub notes: BTreeSet<String>,
     words: u32,
+    /// The PIC16F183xx: BSR is 5 bits wide (32 banks, the MOVLB encoding and FSR map of DS40001839E).
+    pub bsr5: bool,
+    /// End of the linear data region (exclusive): 2FF0h (banks 0-50, DS40002343F 9.6.2) or 29B0h (banks 0-30,
+    /// DS40001839E 4.5.2 p.62).
+    lin_end: u32,
+    /// Byte address in `aux` of EEPROM byte 0 (word `memory.eeprom.start` of the hex image), for FSR reads.
+    ee_base: Option<u32>,
     vector: u32,
     sleeping: bool,
     /// The instruction after SLEEP always runs before an interrupt is taken (12.7 p.113).
@@ -151,6 +166,10 @@ pub struct Pic16 {
     t2: Vec<Timer2>,
     /// Registers of any timer: an access first brings the timers to the current cycle.
     tmr_reg: Vec<bool>,
+    /// The PIRn registers: a read or write first brings the timers to the accessing cycle, so a read sees a flag a timer
+    /// sets in that cycle, as a timer register read sees its count (`[A2]`), and a clear in that cycle wins (MDB,
+    /// `tests/probe/t2_f183.S`, `[A110]`).
+    flag_reg: Vec<bool>,
 }
 
 fn por_bits(s: &str) -> u8 {
@@ -213,6 +232,9 @@ impl Pic16 {
             cfg_regs: dev.config.clone(),
             notes: BTreeSet::new(),
             words: dev.memory.program.size,
+            bsr5: false,
+            lin_end: 0x2FF0,
+            ee_base: None,
             vector: dev.vectors.interrupt_high,
             sleeping: false,
             no_irq: false,
@@ -239,6 +261,7 @@ impl Pic16 {
             t1: Vec::new(),
             t2: Vec::new(),
             tmr_reg: vec![false; MEM],
+            flag_reg: vec![false; MEM],
         };
         for g in &d.gpr {
             for a in g.start..g.end {
@@ -302,6 +325,7 @@ impl Pic16 {
         for n in 0..8 {
             if let (Some(r), Some(e)) = (dev.find_sfr(&format!("PIR{n}")), dev.find_sfr(&format!("PIE{n}"))) {
                 p.irq.push((r.addr as usize, e.addr as usize));
+                p.flag_reg[r.addr as usize] = true;
                 p.core[r.addr as usize] = true;
                 p.core[e.addr as usize] = true;
             }
@@ -320,40 +344,50 @@ impl Pic16 {
             }
             p.t0 = Some(Timer0 { l, h, c0, c1, flag, cnt: 0, pre: 0, post: 0, last: 0 });
         }
-        for n in [1u8, 3] {
-            if let (Some(l), Some(h), Some(con), Some(clk), Some(gcon), Some(flag)) = (
+        // Timer1/3/5: the newer parts select the clock in TxCLK; the PIC16F183xx has no TxCLK (clock in TxCON).
+        for n in [1u8, 3, 5] {
+            if let (Some(l), Some(h), Some(con), Some(gcon), Some(flag)) = (
                 addr(&format!("TMR{n}L")),
                 addr(&format!("TMR{n}H")),
                 addr(&format!("T{n}CON")),
-                addr(&format!("T{n}CLK")),
                 addr(&format!("T{n}GCON")),
                 flag_of(&format!("TMR{n}IF")),
             ) {
-                for a in [l, h, con, clk, gcon] {
+                let clk = addr(&format!("T{n}CLK"));
+                for a in [l, h, con, gcon].into_iter().chain(clk) {
                     p.core[a] = true;
                     p.tmr_reg[a] = true;
                 }
                 p.t1.push(Timer1 { n, l, h, con, clk, gcon, flag, cnt: 0, pre: 0, last: 0 });
             }
         }
+        // Timer2/4/6: T2TMR/T2PR with T2HLT and T2CLKCON, or the PIC16F183xx's TMR2/PR2 with neither.
         for n in [2u8, 4, 6] {
-            if let (Some(tmr), Some(pr), Some(con), Some(hlt), Some(clk), Some(flag)) = (
-                addr(&format!("T{n}TMR")),
-                addr(&format!("T{n}PR")),
-                addr(&format!("T{n}CON")),
-                addr(&format!("T{n}HLT")),
-                addr(&format!("T{n}CLKCON")),
-                flag_of(&format!("TMR{n}IF")),
-            ) {
-                for a in [tmr, pr, con, hlt, clk] {
+            let tmr = addr(&format!("T{n}TMR")).or_else(|| addr(&format!("TMR{n}")));
+            let pr = addr(&format!("T{n}PR")).or_else(|| addr(&format!("PR{n}")));
+            let (hlt, clk) = (addr(&format!("T{n}HLT")), addr(&format!("T{n}CLKCON")));
+            if hlt.is_some() != clk.is_some() {
+                return Err(format!("{}: Timer{n} has only one of T{n}HLT and T{n}CLKCON", dev.device.name));
+            }
+            if let (Some(tmr), Some(pr), Some(con), Some(flag)) = (tmr, pr, addr(&format!("T{n}CON")), flag_of(&format!("TMR{n}IF"))) {
+                for a in [tmr, pr, con].into_iter().chain(hlt).chain(clk) {
                     p.core[a] = true;
                     p.tmr_reg[a] = true;
                 }
                 p.t2.push(Timer2 { n, tmr, pr, con, hlt, clk, flag, cnt: 0, pre: 0, post: 0, last: 0 });
             }
         }
-        if p.irq.is_empty() || p.implemented[p.a_bsr] != 0x3F {
-            return Err(format!("{}: only parts with PIR0/PIE0 and a 6-bit BSR (PIC16F131xx, 152xx, 171xx, 180x6) are modelled; the PIC16F183xx has a 5-bit BSR and INTCON-style interrupt registers", dev.device.name));
+        if p.irq.is_empty() {
+            return Err(format!("{}: no PIR0/PIE0 interrupt registers", dev.device.name));
+        }
+        match p.implemented[p.a_bsr] {
+            0x3F => {}
+            0x1F => {
+                p.bsr5 = true;
+                p.lin_end = 0x29B0;
+                p.ee_base = (dev.memory.eeprom.size > 0).then_some(2 * dev.memory.eeprom.start);
+            }
+            m => return Err(format!("{}: BSR implemented mask {m:#04x}: only 5-bit (PIC16F183xx) and 6-bit BSRs are modelled", dev.device.name)),
         }
         p.mclr = dev
             .sfr
@@ -431,20 +465,29 @@ impl Pic16 {
     }
 
     /// Where an FSR value points: banked memory, linear memory (the 80-byte GPR blocks of banks 0-50 laid end to end)
-    /// or program flash (DS40002343F 9.6 pp.55-57).
+    /// or program flash (DS40002343F 9.6 pp.55-57). On the PIC16F183xx (Fig. 4-8 p.60, 4.5.2-4.5.3 p.62): banked
+    /// 0000h-0FFFh, 1000h-1FFFh reserved, linear 2000h-29AFh (banks 0-30), EEPROM 7000h-70FFh; reserved space reads 0.
     fn target_of(&self, p: u16) -> Tgt {
         let p = u32::from(p);
+        let banked_end = if self.bsr5 { 0x1000 } else { 0x2000 };
         if p & 0x8000 != 0 {
             Tgt::Flash(p & 0x7FFF)
-        } else if p < 0x2000 {
+        } else if p < banked_end {
             let a = Pic16::phys(p);
             if a < 2 { Tgt::Null } else { Tgt::Mem(a) }
-        } else if p < 0x2FF0 {
+        } else if (0x2000..self.lin_end).contains(&p) {
             let n = p - 0x2000;
             Tgt::Mem(((n / 80) << 7) as usize + 0x20 + (n % 80) as usize)
+        } else if self.bsr5 && p >> 8 == 0x70 {
+            Tgt::Eeprom(p as u8)
         } else {
             Tgt::Null
         }
+    }
+
+    /// An EEPROM byte as loaded from the hex image (erased = FFh); NVM writes are not modelled.
+    fn ee_byte(&self, n: u8) -> u8 {
+        self.ee_base.map_or(0xFF, |b| self.aux.get(&(b + 2 * u32::from(n))).copied().unwrap_or(0xFF))
     }
 
     /// The operand of a file-register instruction: direct through BSR, or through FSRn for INDFn.
@@ -465,10 +508,17 @@ impl Pic16 {
                 self.flash_cycle = true;
                 self.flash_word(w)
             }
+            Tgt::Eeprom(n) => {
+                self.flash_cycle = true; // "one additional instruction cycle" (DS40001839E 4.5.3 p.62)
+                self.ee_byte(n)
+            }
             Tgt::Mem(a) => {
                 self.note(a);
                 if self.tmr_reg[a] {
                     return self.read_tmr(a);
+                }
+                if self.flag_reg[a] {
+                    self.sync_timers();
                 }
                 if a == 2 {
                     self.pc as u8
@@ -487,6 +537,10 @@ impl Pic16 {
         match t {
             Tgt::Null => {}
             Tgt::Flash(_) => self.flash_cycle = true, // the write is ignored but the access still takes the cycle
+            Tgt::Eeprom(_) => {
+                // ignored; only reads are said to take the extra cycle (4.5.3 p.62) `[A110]`
+                self.notes.insert("a write through an FSR to the EEPROM (7000h-70FFh) is ignored".into());
+            }
             Tgt::Mem(a) => {
                 self.note(a);
                 if a == 2 {
@@ -507,6 +561,11 @@ impl Pic16 {
                 } else if self.tmr_reg[a] {
                     self.write_tmr(a, v & self.implemented[a]);
                 } else {
+                    if self.flag_reg[a] {
+                        // a flag a timer sets in this cycle is set before the write, so a write that clears it wins, also
+                        // for CLRF and MOVWF, which do not read first here (BCF measured, `[A110]`)
+                        self.sync_timers();
+                    }
                     self.mem[a] = v & self.implemented[a];
                 }
             }
@@ -590,11 +649,12 @@ impl Pic16 {
         if let Some(t) = self.t0.as_mut() {
             t.last = now;
         }
+        // `max` keeps the one-cycle start delay of a timer switched on just before SLEEP (`[A110]`)
         for t in &mut self.t1 {
-            t.last = now;
+            t.last = t.last.max(now);
         }
         for t in &mut self.t2 {
-            t.last = now;
+            t.last = t.last.max(now);
         }
     }
 
@@ -603,8 +663,16 @@ impl Pic16 {
         let now = self.cycles;
         let t = &mut self.t1[i];
         let dt = now.saturating_sub(t.last);
-        t.last = now;
-        let (con, cs) = (self.mem[t.con], self.mem[t.clk] & 0x1F);
+        t.last = t.last.max(now); // `last` is one cycle ahead just after TMRxON is set (`[A110]`)
+        let con = self.mem[t.con];
+        // the clock as Fosc/4 ticks per cycle: Some(1) Fosc/4, Some(4) Fosc, None for a source that is not modelled
+        let (cs, ticks) = match t.clk {
+            Some(c) => {
+                let cs = self.mem[c] & 0x1F;
+                (cs, [None, Some(1), Some(4)].get(usize::from(cs)).copied().flatten())
+            }
+            None => (con >> 6, [Some(1), Some(4)].get(usize::from(con >> 6)).copied().flatten()),
+        };
         let mut raised = false;
         'run: {
             if con & 1 == 0 || dt == 0 {
@@ -614,12 +682,12 @@ impl Pic16 {
                 self.notes.insert(format!("Timer{} gate (GE = 1) is not modelled; the timer holds its count", t.n));
                 break 'run;
             }
-            if cs != 1 && cs != 2 {
+            let Some(ticks) = ticks else {
                 self.notes.insert(format!("Timer{} clock source CS={cs} is not modelled (only Fosc/4 and Fosc); it does not count", t.n));
                 break 'run;
-            }
+            };
             let sh = u32::from((con >> 4) & 3);
-            let total = t.pre + if cs == 2 { 4 * dt } else { dt };
+            let total = t.pre + ticks * dt;
             t.pre = total & ((1u64 << sh) - 1);
             let sum = u64::from(t.cnt) + (total >> sh);
             raised = sum >= 0x10000;
@@ -640,12 +708,16 @@ impl Pic16 {
         let now = self.cycles;
         let t = &mut self.t2[i];
         let dt = now.saturating_sub(t.last);
-        t.last = now;
+        t.last = t.last.max(now); // one cycle ahead just after TMR2ON is set (`[A110]`)
         let con = self.mem[t.con];
         let mut raised = false;
-        if con & 0x80 != 0 && dt > 0 {
-            let cs = self.mem[t.clk] & 15;
-            let mode = self.mem[t.hlt] & 0x1F;
+        // (on, clock source, prescaler shift, OUTPS): T2CON of the newer parts, or the PIC16F183xx's (Fosc/4 only)
+        let (on, cs, sh, outps) = match t.clk {
+            Some(c) => (con & 0x80 != 0, self.mem[c] & 15, u32::from((con >> 4) & 7), con & 15),
+            None => (con & 4 != 0, 1, 2 * u32::from(con & 3), (con >> 3) & 15),
+        };
+        if on && dt > 0 {
+            let mode = t.hlt.map_or(0, |h| self.mem[h] & 0x1F);
             if cs != 1 && cs != 2 {
                 self.notes.insert(format!("Timer{} clock source CS={cs} is not modelled (only Fosc/4 and Fosc); it does not count", t.n));
             } else {
@@ -653,11 +725,10 @@ impl Pic16 {
                     self.notes.insert(format!("Timer{} MODE={mode:#04x} needs an external reset/gate source; run as the software mode", t.n));
                 }
                 let one_shot = mode >> 3 == 1;
-                let sh = u32::from((con >> 4) & 7);
                 let total = t.pre + if cs == 2 { 4 * dt } else { dt };
                 t.pre = total & ((1u64 << sh) - 1);
                 let mut left = total >> sh;
-                let (outps, pr) = (con & 15, self.mem[t.pr]);
+                let pr = self.mem[t.pr];
                 while left > 0 {
                     // Jump straight to the next period end when no event can happen before it.
                     if t.cnt < pr && left > 1 {
@@ -727,12 +798,19 @@ impl Pic16 {
         if self.t0.as_ref().is_some_and(|t| [t.l, t.h, t.c0, t.c1].contains(&a)) {
             return self.write_t0(a, v);
         }
+        let now = self.cycles;
         for t in &mut self.t1 {
             if a == t.l {
                 t.pre = 0;
                 t.cnt = if self.mem[t.con] & 2 != 0 { u16::from(self.mem[t.h]) << 8 | u16::from(v) } else { t.cnt & 0xFF00 | u16::from(v) };
             } else if a == t.h && self.mem[t.con] & 2 == 0 {
-                t.cnt = t.cnt & 0xFF | u16::from(v) << 8; // a TMRxH write does not clear the prescaler (23.6)
+                // A write to TMRx clears the prescaler (DS40002343F 23.3 p.255, DS40001839E 27.3 p.286); with RD16 set
+                // the write goes to the buffer and only a TMRxL write does (23.6) `[A110]`
+                t.cnt = t.cnt & 0xFF | u16::from(v) << 8;
+                t.pre = 0;
+            } else if a == t.con && self.mem[a] & 1 == 0 && v & 1 != 0 {
+                // TMRxON 0 -> 1: the first clock is counted one cycle later than for a running timer (MDB, `[A110]`)
+                t.last = now + 1;
             }
             if a == t.gcon {
                 self.mem[a] = v & !4 | self.mem[a] & 4; // GVAL is read only
@@ -744,6 +822,11 @@ impl Pic16 {
                 (t.cnt, t.pre, t.post) = (v, 0, 0);
             } else if a == t.con {
                 (t.pre, t.post) = (0, 0);
+                // the PIC16F183xx's TMR2ON 0 -> 1: the first clock is one cycle later, as for Timer1 (MDB, `[A110]`);
+                // not measured on the newer Timer2
+                if t.clk.is_none() && self.mem[a] & 4 == 0 && v & 4 != 0 {
+                    t.last = now + 1;
+                }
             }
         }
         self.mem[a] = v;
@@ -793,6 +876,7 @@ impl Pic16 {
             match self.target_of(self.fsr(i)) {
                 Tgt::Mem(m) => self.mem[m],
                 Tgt::Flash(w) => self.flash_word(w),
+                Tgt::Eeprom(n) => self.ee_byte(n),
                 Tgt::Null => 0,
             }
         } else {
@@ -1049,7 +1133,10 @@ impl Pic16 {
                             self.set_w(0); // CLRW
                             self.flags(Z, Z);
                         }
-                        1 => self.mem[self.a_bsr] = (w & 0x3F) as u8 & self.implemented[self.a_bsr], // MOVLB
+                        1 if !self.bsr5 => self.mem[self.a_bsr] = (w & 0x3F) as u8 & self.implemented[self.a_bsr], // MOVLB
+                        1 => {
+                            self.notes.insert(format!("undefined opcode {w:#06x} (MOVLB of the 6-bit-BSR parts)"));
+                        }
                         _ => {
                             let t = self.file(f); // CLRF
                             self.wr(t, 0, true);
@@ -1260,6 +1347,7 @@ impl Pic16 {
                 let to = self.pc + u32::from(self.w()); // BRW: PC + 1 + W
                 self.jump(to);
             }
+            0x0020..=0x003F if self.bsr5 => self.mem[self.a_bsr] = (w & 0x1F) as u8, // MOVLB k (DS40001839E p.406)
             0x0010..=0x001F => {
                 // MOVIW (0x10-0x17) / MOVWI (0x18-0x1F) ++FSRn, --FSRn, FSRn++, FSRn--
                 let n = usize::from(w >> 2 & 1);
@@ -1309,8 +1397,20 @@ impl Pic16 {
     }
 }
 
-/// Disassembly of one word, in the syntax of Table 41-3.
+impl Pic16 {
+    /// Disassembly of one word for this part (the MOVLB encoding depends on the BSR width).
+    pub fn disasm(&self, w: u16) -> String {
+        disasm_for(w, self.bsr5)
+    }
+}
+
+/// Disassembly of one word of a 6-bit-BSR part, in the syntax of Table 41-3.
 pub fn disasm(w: u16) -> String {
+    disasm_for(w, false)
+}
+
+/// Disassembly of one word; `bsr5` selects the PIC16F183xx MOVLB encoding (DS40001839E Table 34-3 p.399).
+pub fn disasm_for(w: u16, bsr5: bool) -> String {
     let f = w & 0x7F;
     let d = if w & 0x80 != 0 { "f" } else { "w" };
     let fd = |m: &str| format!("{m:<7} {f:#04x},{d}");
@@ -1338,6 +1438,7 @@ pub fn disasm(w: u16) -> String {
                     };
                     format!("{m:<7} {s}")
                 }
+                0x0020..=0x003F if bsr5 => format!("movlb   {}", w & 0x1F),
                 0x0063 => "sleep".into(),
                 0x0064 => "clrwdt".into(),
                 0x0065..=0x0067 => format!("tris    {}", w - 0x60),
@@ -1346,7 +1447,8 @@ pub fn disasm(w: u16) -> String {
             },
             1 => match (w >> 6) & 3 {
                 0 => "clrw".into(),
-                1 => format!("movlb   {}", w & 0x3F),
+                1 if !bsr5 => format!("movlb   {}", w & 0x3F),
+                1 => format!("dw      {w:#06x}"),
                 _ => format!("clrf    {f:#04x}"),
             },
             op => fd(match op {

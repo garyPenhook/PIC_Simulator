@@ -131,7 +131,7 @@ yet), PIC16 single vector with automatic context save. Vector addresses from `[v
 |---|---|---|
 | S0 | devdesc 0.2 (reset values, access, implemented mask, module), devgen, regenerated devices | `check-devices.sh` passes; compiler output byte-identical |
 | S1 | Crate skeleton, hex + sym loader, `Pic18Core` cycle exact, latch SFRs, halt detection, CLI dump | peripheral-free `tests/exec` programs match MDB (RAM and cycles) on 18F27Q10 and 18F16Q41 |
-| S2 | `Pic16ECore` | same on 16F17146, 16F13145, 16F18346, 16F15244. **Done for 16F17146, 16F13145, 16F15244, 16F18056 and 16F18076** (core, Timer0/1/2 and interrupts, `pic16.rs`; the peripheral-free `exec_p16` programs and `isr_single` match MDB's variables and cycle counts on all five, `docs/FACTS-SIM.md`, A109); **16F18346 still open**: the PIC16F183xx family has a 5-bit BSR and INTCON-style interrupt registers (no PIR0/PIE0), so it needs its own core variant, which `basil-sim` refuses today |
+| S2 | `Pic16ECore` | same on 16F17146, 16F13145, 16F18346, 16F15244. **Done** for 16F17146, 16F13145, 16F15244, 16F18056, 16F18076 and the PIC16F183xx (16F18346, 16F18326, 16F18313; 5-bit BSR variant of the same core, `Pic16::bsr5`, with the older Timer1/3/5 and Timer2/4/6 layouts): core, Timer0/1/2 and interrupts, `pic16.rs`; the peripheral-free `exec_p16` programs, `isr_single` and the register-only `exec_p183` programs match MDB's variables and cycle counts (`docs/FACTS-SIM.md`, A110, D-SIM-5) |
 | S3 | Interrupt controllers, timers, configuration words | `' cycles:` and ISR tests pass |
 | S4 | Ports, PPS, UART, ADC, stimulus file | `serial`, `adc`, `exec_pins` pass |
 | S5 | NVM/EEPROM, SPI, I2C, Q41 I2C host, DMA | `exec_rtcc`, DMA and I2C tests pass; `picsim.py`, `dma_sim.py` retired |
