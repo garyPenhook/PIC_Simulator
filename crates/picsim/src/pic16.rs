@@ -763,7 +763,8 @@ impl Pic16 {
         } else if a == t.c0 {
             t.pre = 0;
             t.post = 0;
-            self.mem[a] = v & !0x20 | self.mem[a] & 0x20; // T0OUT is read only
+            // T0OUT is read only; it reads 0 while EN = 0 (MDB, `[A109]`; the data sheet does not say)
+            self.mem[a] = if v & 0x80 == 0 { v & !0x20 } else { v & !0x20 | self.mem[a] & 0x20 };
         } else {
             t.pre = 0;
             t.post = 0;
