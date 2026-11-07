@@ -15,6 +15,77 @@ enum Job {
     Until(u32),
 }
 
+/// A stopwatch on the simulated instruction-cycle counter: it measures simulated time, so it is exact however fast
+/// the simulation runs. Start/Stop/Lap/Clear; the counter itself is never touched.
+#[derive(Default)]
+struct Stopwatch {
+    /// Cycle count when the elapsed time was last zeroed (adjusted on Stop/Start so a stopped interval is not counted).
+    base: u64,
+    /// Cycle count at which it was stopped; `None` while counting.
+    stopped: Option<u64>,
+    counting: bool,
+    /// Elapsed cycles at each Lap press.
+    laps: Vec<u64>,
+}
+
+impl Stopwatch {
+    fn elapsed(&self, now: u64) -> u64 {
+        if !self.counting && self.stopped.is_none() {
+            return 0; // idle (never started, or cleared)
+        }
+        self.stopped.unwrap_or(now).saturating_sub(self.base)
+    }
+    fn start(&mut self, now: u64) {
+        if let Some(s) = self.stopped.take() {
+            self.base += now.saturating_sub(s); // resume: leave out the time it was stopped
+        } else {
+            self.base = now;
+        }
+        self.counting = true;
+    }
+    fn stop(&mut self, now: u64) {
+        self.stopped = Some(now);
+        self.counting = false;
+    }
+    fn clear(&mut self) {
+        *self = Stopwatch::default();
+    }
+}
+
+/// Stopwatch controls and readout under the CPU registers. `now` is the part's cycle count.
+fn stopwatch_ui(ui: &mut egui::Ui, sw: &mut Stopwatch, now: u64, fosc_mhz: f32) {
+    let us = |c: u64| c as f64 / (f64::from(fosc_mhz) / 4.0); // instruction clock is Fosc/4
+    // A reset of the CPU rewinds the cycle counter: the interval no longer means anything.
+    if now < sw.base || sw.stopped.is_some_and(|s| s > now) {
+        sw.clear();
+    }
+    ui.separator();
+    ui.heading("Stopwatch");
+    ui.horizontal(|ui| {
+        if sw.counting {
+            if ui.button("Stop").clicked() {
+                sw.stop(now);
+            }
+        } else if ui.button("Start").clicked() {
+            sw.start(now);
+        }
+        if ui.add_enabled(sw.counting, egui::Button::new("Lap")).clicked() {
+            sw.laps.push(sw.elapsed(now));
+        }
+        if ui.button("Clear").clicked() {
+            sw.clear();
+        }
+    });
+    let e = sw.elapsed(now);
+    ui.monospace(format!("{e} cycles"));
+    ui.monospace(format!("{:.3} us", us(e)));
+    let mut prev = 0;
+    for (i, &l) in sw.laps.iter().enumerate() {
+        ui.monospace(format!("Lap {}: {:.3} us  (+{:.3})", i + 1, us(l), us(l - prev)));
+        prev = l;
+    }
+}
+
 struct App {
     devices_dir: PathBuf,
     devices: Vec<String>,
@@ -60,6 +131,7 @@ struct App {
     job: Option<Job>,
     /// (time, cycles) at the last rate sample, and the measured simulated cycles per second.
     rate: (std::time::Instant, u64, f64),
+    sw: Stopwatch,
 }
 
 fn list_devices(dir: &PathBuf) -> Vec<String> {
@@ -115,6 +187,7 @@ impl App {
             snap: None,
             job: None,
             rate: (std::time::Instant::now(), 0, 0.0),
+            sw: Stopwatch::default(),
         };
         if hex.is_some() {
             a.load();
@@ -130,6 +203,7 @@ impl App {
 
     fn load(&mut self) {
         self.running = false;
+        self.sw.clear();
         self.job = None; // a step over from the previous program must not run on the new one
         self.last_stop = None;
         // The part the ELF was built for wins over the device box (the wrong part has the wrong SFRs and pins).
@@ -512,6 +586,7 @@ impl eframe::App for App {
                     self.last_stop = None;
                     self.job = None;
                     self.snap = None;
+                    self.sw.clear();
                     if let Some(m) = &mut self.m {
                         m.reset();
                     }
@@ -609,6 +684,7 @@ impl eframe::App for App {
                 row(ui, "Instr", m.cpu.icount.to_string());
                 row(ui, "Time", format!("{:.3} ms", m.cpu.cycles as f64 / (f64::from(self.fosc_mhz) * 1e6 / 4.0) * 1e3));
             });
+            stopwatch_ui(ui, &mut self.sw, m.cpu.cycles, self.fosc_mhz);
             ui.separator();
             ui.heading(if m.debug.funcs.is_empty() { "Return stack" } else { "Call stack" });
             let sp = usize::from(g(r.stkptr) & 0x7F).min(m.cpu.stack.len() - 1);
@@ -860,6 +936,7 @@ impl App {
                 row(ui, "Instr", m.cpu.icount.to_string());
                 row(ui, "Time", format!("{:.3} ms", m.cpu.cycles as f64 / (f64::from(self.fosc_mhz) * 1e6 / 4.0) * 1e3));
             });
+            stopwatch_ui(ui, &mut self.sw, m.cpu.cycles, self.fosc_mhz);
             ui.separator();
             let dbg = &m.debug;
             ui.heading(if dbg.funcs.is_empty() { "Return stack" } else { "Call stack" });
@@ -1214,3 +1291,22 @@ fn main() -> eframe::Result {
     eframe::run_native("pic-sim", opts, Box::new(|_| Ok(Box::new(App::new(hex, device)))))
 }
 
+
+#[cfg(test)]
+mod stopwatch_tests {
+    use super::Stopwatch;
+
+    #[test]
+    fn counts_from_start_and_skips_the_stopped_interval() {
+        let mut sw = Stopwatch::default();
+        sw.start(100);
+        assert_eq!(sw.elapsed(160), 60);
+        sw.stop(160);
+        assert_eq!(sw.elapsed(500), 60); // frozen while stopped
+        sw.start(500);
+        assert_eq!(sw.elapsed(540), 100); // 60 + 40; the 340 cycles stopped are left out
+        sw.clear();
+        assert_eq!(sw.elapsed(540), 0); // cleared
+        assert!(!sw.counting);
+    }
+}
