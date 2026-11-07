@@ -28,6 +28,15 @@ const MEM: usize = 0x2000;
 /// An empty stack: STKPTR resets to 1Fh (DS40002343F Fig. 9-14 p.53).
 const EMPTY: u8 = 0x1F;
 
+/// One I/O port: PORTx, LATx, TRISx and ANSELx (DS40002343F ch.16).
+struct Port16 {
+    letter: u8,
+    port: usize,
+    lat: usize,
+    tris: usize,
+    ansel: Option<usize>,
+}
+
 /// Timer0 (DS40002343F ch.22 p.244-249; same behaviour as the PIC18 model in `periph.rs`): Fosc/4 clock only.
 /// 8-bit mode compares TMR0L with the live TMR0H and goes to 0 on the next clock; 16-bit mode rolls over at FFFFh and
 /// buffers TMR0H; prescaler and postscaler are cleared by a write to TMR0L, T0CON0 or T0CON1 `[A106]`.
@@ -200,6 +209,20 @@ pub struct Pic16 {
     nvm_reg: Vec<Option<u8>>,
     /// Unimplemented bits that read 1 (NVMADRH bit 7 on the PIC16F183xx, DS40001839E Register 11-4 p.137: "U-1").
     ones: Vec<u8>,
+    /// The I/O ports and, per address, which port's PORTx (`true`) or LATx (`false`) it is.
+    ports: Vec<Port16>,
+    port_reg: Vec<Option<(u8, bool)>>,
+    /// What the outside world drives on the input pins: (from cycle, port index, pin mask, levels), stable-sorted by cycle.
+    drive: Vec<(u64, usize, u8, u8)>,
+    /// PPSLOCK, how far the 55h, AAh sequence has got (0 none, 1 after 55h, 2 after AAh), and which addresses are PPS
+    /// selection registers (xxxPPS, RxyPPS): writes to them are ignored while PPSLOCKED is set.
+    pps_lock: Option<usize>,
+    pps_seq: u8,
+    pps_reg: Vec<bool>,
+    /// RxyPPS: (register, index into `ports`, pin).
+    pps_out: Vec<(usize, usize, u8)>,
+    /// The MCLR pin (index into `ports`, mask): input only, no analog function, and it reads 1 while MCLRE = 1.
+    mclr_pin: Option<(usize, u8)>,
 }
 
 fn por_bits(s: &str) -> u8 {
@@ -304,6 +327,14 @@ impl Pic16 {
             nvm: None,
             nvm_reg: vec![None; MEM],
             ones: vec![0; MEM],
+            ports: Vec::new(),
+            port_reg: vec![None; MEM],
+            drive: Vec::new(),
+            pps_lock: None,
+            pps_seq: 0,
+            pps_reg: vec![false; MEM],
+            pps_out: Vec::new(),
+            mclr_pin: None,
         };
         for g in &d.gpr {
             for a in g.start..g.end {
@@ -500,6 +531,53 @@ impl Pic16 {
                 p.nvm_reg[r] = Some(k as u8);
             }
         }
+        // Ports: PORTx reads the pins and writes LATx; the other registers are storage.
+        for letter in b'A'..=b'H' {
+            let l = char::from(letter);
+            let (Some(port), Some(lat), Some(tris)) = (addr(&format!("PORT{l}")), addr(&format!("LAT{l}")), addr(&format!("TRIS{l}"))) else { continue };
+            let ansel = addr(&format!("ANSEL{l}"));
+            if [port, lat, tris].into_iter().chain(ansel).any(|a| a >= MEM) {
+                continue;
+            }
+            let i = p.ports.len() as u8;
+            for a in [tris].into_iter().chain(ansel) {
+                p.core[a] = true;
+            }
+            (p.core[port], p.core[lat]) = (true, true);
+            (p.port_reg[port], p.port_reg[lat]) = (Some((i, true)), Some((i, false)));
+            p.ports.push(Port16 { letter, port, lat, tris, ansel });
+        }
+        // The MCLR pin is RA3, or RE3 where the part has PORTE (PIC16F180x6). Its TRIS bit, where there is one, is read only
+        // and reads 1 (DS40002195E 16.14.3 p.133; DS40001839E Register 12-2 p.143 "U-1"): the reset value says whether it does.
+        p.mclr_pin = b"EA".iter().copied().find_map(|l| {
+            let i = p.ports.iter().position(|q| q.letter == l)?;
+            (p.implemented[p.ports[i].port] & 8 != 0).then_some((i, 8u8))
+        });
+        if let Some((i, m)) = p.mclr_pin {
+            let t = p.ports[i].tris;
+            if por_bits(&dev.find_sfr(&format!("TRIS{}", char::from(p.ports[i].letter))).map_or(String::new(), |s| s.por.clone())) & m != 0 {
+                p.ones[t] |= m;
+                p.mem[t] |= m;
+            }
+        }
+        // PPS: the selection registers are xxxPPS and RxyPPS; PPSLOCK is the lock.
+        p.pps_lock = addr("PPSLOCK").filter(|&a| a < MEM);
+        if let Some(a) = p.pps_lock {
+            p.core[a] = true;
+            for s in &dev.sfr {
+                let a = s.addr as usize;
+                if a < MEM && s.width == 8 && s.name.ends_with("PPS") {
+                    p.pps_reg[a] = true;
+                    p.core[a] = true;
+                    let b = s.name.as_bytes();
+                    if b.len() == 6 && b[0] == b'R' && (b'0'..=b'7').contains(&b[2])
+                        && let Some(i) = p.ports.iter().position(|q| q.letter == b[1])
+                    {
+                        p.pps_out.push((a, i, b[2] - b'0'));
+                    }
+                }
+            }
+        }
         p.mclr = dev
             .sfr
             .iter()
@@ -642,6 +720,11 @@ impl Pic16 {
                 if self.nvm_reg[a].is_some() {
                     self.sync_nvm();
                 }
+                if let Some((i, true)) = self.port_reg[a] {
+                    let v = self.port_levels(usize::from(i));
+                    self.mem[a] = v;
+                    return v;
+                }
                 if let Some((i, sub)) = self.uart_reg[a] {
                     self.sync_uarts();
                     if sub == uart::RCREG {
@@ -689,6 +772,15 @@ impl Pic16 {
                         let s = 8 * (a - self.a_tos);
                         self.stack[i] = (self.stack[i] & !(0xFF << s) | u16::from(v) << s) & 0x7FFF;
                     }
+                } else if let Some((i, _)) = self.port_reg[a] {
+                    // a write to PORTx is a write to LATx (DS40002343F 16.2 p.179, 16.14.1 p.184)
+                    let p = &self.ports[usize::from(i)];
+                    let v = v & self.implemented[p.lat]; // RA3 has no latch bit where it is input only
+                    (self.mem[p.lat], self.mem[p.port]) = (v, v & self.implemented[p.port]);
+                } else if self.pps_lock == Some(a) {
+                    self.write_ppslock(v);
+                } else if self.pps_reg[a] {
+                    self.write_pps(a, v);
                 } else if self.tmr_reg[a] {
                     self.write_tmr(a, v & self.implemented[a]);
                 } else if self.a_fvr == Some(a) {
@@ -739,6 +831,88 @@ impl Pic16 {
                     }
                 }
             }
+        }
+    }
+
+    // ----- ports and PPS ---------------------------------------------------------------------------------------
+
+    /// Levels of the pins of port `i` now. An output pin shows its latch, an input pin what the outside world drives (0
+    /// until a stimulus says otherwise `[A16]`) and 0 when ANSELx makes it analog (DS40002343F 16.5: the digital input is
+    /// off). A pin whose RxyPPS selects a source other than LATxy still shows its latch `[A120]`.
+    fn port_levels(&self, i: usize) -> u8 {
+        let p = &self.ports[i];
+        let mut ext = 0u8;
+        for &(at, pi, mask, val) in &self.drive {
+            if at <= self.cycles && pi == i {
+                ext = ext & !mask | val & mask;
+            }
+        }
+        // a pin without a TRISx bit and the MCLR pin are always inputs, and the MCLR pin has no analog function
+        let m = self.mclr_pin.filter(|&(k, _)| k == i).map_or(0, |(_, m)| m);
+        let tris = self.mem[p.tris] | self.implemented[p.port] & !self.implemented[p.tris] | m;
+        let ana = p.ansel.map_or(0, |a| self.mem[a]) & !m;
+        let mclr_high = if self.cfg.get("MCLRE") == Some(1) { m } else { 0 }; // reads 1 while MCLR is enabled (DS40002343F 16.13 p.182)
+        (self.mem[p.lat] & !tris | (ext | mclr_high) & tris & !ana) & self.implemented[p.port]
+    }
+
+    /// The pin level an input selection register (PORT field at bits 5:3, PIN at 2:0; the PIC16F183xx has 5 bits and the
+    /// same layout, DS40002343F Register 18-1, DS40001839E Register 13-1) selects. `None` when it names no pin of the part.
+    pub fn pps_input(&self, reg: usize) -> Option<bool> {
+        let v = self.mem[reg];
+        let i = self.ports.iter().position(|p| p.letter == b'A' + (v >> 3 & 7))?;
+        Some(self.port_levels(i) >> (v & 7) & 1 != 0)
+    }
+
+    /// A write to PPSLOCK. 55h then AAh (consecutive writes to PPSLOCK) arm the next write, whose bit 0 sets or clears
+    /// PPSLOCKED; any other write is ignored and starts over `[A121]`. With PPS1WAY set the bit cannot be cleared again
+    /// (DS40002343F 18.5.1 p.204).
+    fn write_ppslock(&mut self, v: u8) {
+        let a = self.pps_lock.unwrap();
+        self.pps_seq = match (self.pps_seq, v) {
+            (0, 0x55) => 1,
+            (1, 0xAA) => 2,
+            (2, 0x55) => 1, // not a bit write: the sequence starts over
+            (2, _) => {
+                let one_way = self.cfg.get("PPS1WAY") == Some(1);
+                if v & 1 != 0 || !(one_way && self.mem[a] & 1 != 0) {
+                    self.mem[a] = v & 1;
+                } else {
+                    self.notes.insert("PPS1WAY is set: PPSLOCKED cannot be cleared again until a Reset; the write is ignored".into());
+                }
+                0
+            }
+            (_, 0x55) => 1,
+            _ => 0,
+        };
+    }
+
+    /// A write to a PPS selection register: ignored while PPSLOCKED is set (Register 18-3: "Writes to any PPS register are
+    /// ignored"). An output source other than LATxy is not modelled on the PIC16 parts yet.
+    fn write_pps(&mut self, a: usize, v: u8) {
+        if self.pps_lock.is_some_and(|l| self.mem[l] & 1 != 0) {
+            self.notes.insert("a write to a PPS selection register while PPSLOCKED is set is ignored".into());
+            return;
+        }
+        let v = v & self.implemented[a];
+        self.mem[a] = v;
+        if v != 0 && self.pps_out.iter().any(|o| o.0 == a) {
+            self.notes.insert("a RxyPPS output source other than LATxy is not modelled on PIC16 parts; the pin shows its latch".into());
+        }
+    }
+
+    pub fn has_port(&self, letter: u8) -> bool {
+        self.ports.iter().any(|p| p.letter == letter)
+    }
+
+    /// Stimulus: the pins `mask` of port `letter` are driven to `val` from cycle `at` on.
+    pub fn pin_feed(&mut self, letter: u8, at: u64, mask: u8, val: u8) -> bool {
+        match self.ports.iter().position(|p| p.letter == letter) {
+            Some(i) => {
+                self.drive.push((at, i, mask, val));
+                self.drive.sort_by_key(|d| d.0);
+                true
+            }
+            None => false,
         }
     }
 
@@ -1157,6 +1331,8 @@ impl Pic16 {
                 Tgt::Eeprom(n) => self.ee_byte(n),
                 Tgt::Null => 0,
             }
+        } else if let Some((p, true)) = self.port_reg[i] {
+            self.port_levels(usize::from(p))
         } else {
             self.mem[i]
         }
@@ -1274,6 +1450,7 @@ impl Pic16 {
             u.fifo.clear();
             u.bits(&mut self.mem);
         }
+        self.pps_seq = 0;
         self.pc = self.reset_vector;
         self.sleeping = false;
         self.no_irq = false;

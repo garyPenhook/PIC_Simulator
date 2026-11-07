@@ -30,7 +30,7 @@ impl Machine16 {
         Ok(())
     }
 
-    /// Drive the part as a stimulus file says (see `stimulus.rs`); on a PIC16 part only `[[uart]]` is modelled.
+    /// Drive the part as a stimulus file says (see `stimulus.rs`); on a PIC16 part `[[uart]]`, `[[adc]]` and `[[pin]]`/`[[port]]` are modelled.
     pub fn load_stimulus(&mut self, text: &str) -> Result<(), String> {
         let st = crate::stimulus::Stimulus::parse(text)?;
         st.apply16(&self.dev, &mut self.cpu)?;

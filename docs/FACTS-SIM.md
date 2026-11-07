@@ -329,6 +329,31 @@ lacks keeps the register's unprogrammed default (0xFF). `basil-sim --config` pri
   start of the stall. An erase leaves the latches alone (p.159; the Important box p.162 disagrees; the library is safe either way). 0 -> 1 in a write
   ANDs, with a note. Not modelled: flash beyond the program memory (ignored with a note), WRTn, User ID and configuration writes.
   `lib_flashwrite` passes (`--engine sim`) on 16F17146 (29555 cycles), 16F13145, 16F15244, 16F18326, 16F18346 and, with the exec_p16 test, 16F18056; `tests/pic16_nvm.rs`.
+* `[A120]` PIC16 ports (`pic16.rs` `port_levels`; DS40002343F ch.16 p.179-185, DS40001839E ch.12): a read of PORTx gives the pins, a write goes to LATx
+  (16.2, 16.14.1: so BSF / INCF on PORTx read the pins and write the result to the latch). An output pin shows its latch, an input shows what `[[pin]]` /
+  `[[port]]` drive (`[A16]`: 0 when nobody does), an analog pin (ANSELx = 1) reads 0 (12.2.8 p.142). The MCLR pin (RA3; RE3 on the PIC16F180x6) is always an
+  input, has no analog function, reads 1 while MCLRE = 1 (DS40002343F 16.13 p.182, DS40002195E p.130, DS40002519D p.168, DS40001839E Register 12-1 note 2)
+  and follows the stimulus with MCLRE = 0; its TRIS bit reads 1 and is read only where it exists (DS40002195E 16.14.3 p.133, DS40001839E Register 12-2 U-1),
+  and 0 where the part has none (PIC16F131xx, PIC16F171xx), as does its LAT bit. `LVP` is not looked at for the MCLR pin. Not modelled: WPUx, ODCONx, INLVLx,
+  SLRCONx, the I2C pad registers, the CLKIN / CLKOUT / SOSC pin functions the oscillator configuration gives some pins (priority 1 of 16.12 p.182), IOC and the
+  INT pin on the PIC16 core. `tests/probe/port_rw.S` agrees with MDB on 16F17146, 16F13145, 16F18346 and 16F18056; on 16F15244 only PORTA bit 5 differs
+  (D-SIM-9).
+* `[A121]` PPS on the PIC16 core. The selection registers (xxxPPS, RxyPPS) keep their value; the input registers decode as PORT field bits 5:3 (A = 0 ...)
+  and PIN bits 2:0 in the 6-bit layout and the 5-bit layout of the PIC16F183xx alike (DS40002343F Register 18-1, DS40001839E Register 13-1:
+  10011 = RC3), `Pic16::pps_input` gives the level of the pin one selects for the peripherals that will read pins. PPSLOCK: the lock and unlock sequences are
+  55h then AAh written to PPSLOCK, then a write whose bit 0 sets or clears PPSLOCKED (DS40002343F 18.5, DS40001839E 13.4); with the bit set every write to a PPS
+  selection register is ignored (Register 18-3), a write to PPSLOCK without the sequence is ignored. The data sheets do not say what breaks a sequence; the
+  model counts consecutive writes to PPSLOCK only (55h, AAh, the bit write; 55h again restarts; anything else starts over) and does not look at other instructions
+  between them. PPS1WAY = 1 (the unprogrammed value): PPSLOCKED cannot be cleared once set, until a Reset (18.5.1 p.204, DS40001839E 13.5). PPSLOCKED is cleared by every
+  Reset (18.7 p.204; DS40001839E Register 13-3 gives 0/0). Selections stay across a non-POR Reset (the MCLR column of the description). A RxyPPS source other than
+  LATxy (code 0) is noted and the pin shows its latch: no PIC16 peripheral drives a pin yet, and the EUSART, CCP, PWM, CWG, comparator and CLC outputs of the
+  Q10 model have no PIC16 counterpart. Code 0 is LATxy in DS40002343F Table 18-2 and the reset value on every part, though DS40001839E Register 13-2 calls it reserved.
+* D-SIM-8: MDB does not model the PPS lock (`tests/probe/pps_lock.S`, 16F17146, `--engine` compare): a write to a PPS selection register works while
+  PPSLOCKED = 1; PPS1WAY is ignored (the unlock after a lock succeeds with the bit set); PPSLOCKED is set by 55h, any value, AAh, BSF and by 55h, MOVWF to another
+  register, AAh, BSF, and by AAh, 55h, AAh, BSF; and 55h, AAh, MOVWF 1, BCF, BSF leaves it clear. Only a write of 1 without any sequence is ignored, as in the model.
+  The simulator follows the data sheets (A121); a program that works in MDB only because of this fails here, as it would on the part.
+* D-SIM-9: on the PIC16F15244 with the default (unprogrammed) configuration, MDB reads PORTA bit 5 as 0 with TRISA = 0 and LATA = 0FFh (`port_rw.S`, byte 27h
+  is 1Fh in MDB, 3Fh in the model); the other four parts read 1. The cause is not known; the 17146 has the same default configuration (FEXTOSC = ECH) and reads 1, so it is not simply the oscillator pin (not modelled, A120). The model follows the data sheet: an output pin reads its latch (16.2).
 
 ## Program flash self-write (S5, `periph/flash.rs`, `nvm.rs`, `nvmq.rs`, `Pic18::tblwt`)
 

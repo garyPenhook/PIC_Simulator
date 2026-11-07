@@ -348,25 +348,30 @@ impl Stimulus {
         Ok(st)
     }
 
-    /// The same for a PIC16 core, which models the EUSART receivers and the ADC inputs only: any other section is an
+    /// The same for a PIC16 core, which models the EUSART receivers, the ADC inputs and the port pins only: any other section is an
     /// error rather than being ignored.
     pub fn apply16(self, dev: &Device, cpu: &mut crate::pic16::Pic16) -> Result<(), String> {
         let other = [
             ("spi", !self.spi.is_empty()),
             ("i2c", !self.i2c.is_empty()),
             ("analog", !self.analog.is_empty()),
-            ("pin/port", !self.pins.is_empty()),
             ("mclr", !self.mclr.is_empty()),
             ("led/oled", !self.board.is_empty()),
         ];
         if let Some((n, _)) = other.iter().find(|(_, used)| *used) {
-            return Err(format!("{}: [[{n}]] is not modelled on PIC16 parts yet; only [[uart]] and [[adc]] are", dev.device.name));
+            return Err(format!("{}: [[{n}]] is not modelled on PIC16 parts yet; only [[uart]], [[adc]] and [[pin]]/[[port]] are", dev.device.name));
         }
         if !self.adc.is_empty() && !cpu.has_adc() {
             return Err(format!("{}: no ADC model in the simulator", dev.device.name));
         }
         if let Some((port, _)) = self.uart.iter().find(|(p, _)| !cpu.has_uart(*p)) {
             return Err(format!("{}: no EUSART{port} receiver in the simulator", dev.device.name)); // nothing is queued
+        }
+        if let Some((l, ..)) = self.pins.iter().find(|p| !cpu.has_port(p.0)) {
+            return Err(format!("{}: no PORT{} in the simulator", dev.device.name, *l as char));
+        }
+        for (letter, at, mask, val) in self.pins {
+            cpu.pin_feed(letter, at, mask, val);
         }
         for (ch, at, v) in self.adc {
             cpu.adc_feed(ch, at, v);
