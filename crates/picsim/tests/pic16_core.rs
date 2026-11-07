@@ -2,7 +2,6 @@
 //! interrupt entry and exit. Programs are hand-assembled 14-bit words; the opcodes are Table 41-3 (p.592-594).
 
 use devdesc::Device;
-use picsim::hex::Image;
 use picsim::pic16::{C, DC, Z};
 use picsim::machine16::Machine16;
 use std::path::Path;
@@ -45,35 +44,7 @@ fn movwi(n: u16, mm: u16) -> u16 { 0x0018 | n << 2 | mm }
 /// A part with `prog` at word 0 and, when `vec` is given, `isr` at the interrupt vector (word 4). `stvren` sets the
 /// STVREN configuration bit (CONFIG2 bit 12, word 8008h).
 fn machine(prog: &[u16], isr: &[u16], stvren: bool) -> Machine16 {
-    let dev = Device::load(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../../devices/16F17146.toml")).unwrap();
-    let mut m = Machine16::new(dev).unwrap();
-    let mut img = Image::default();
-    let mut put = |w: u32, v: u16| {
-        img.bytes.insert(2 * w, v as u8);
-        img.bytes.insert(2 * w + 1, (v >> 8) as u8);
-    };
-    for (i, &w) in prog.iter().enumerate() {
-        put(i as u32, w);
-    }
-    for (i, &w) in isr.iter().enumerate() {
-        put(4 + i as u32, w);
-    }
-    let cfg2: u16 = if stvren { 0x3FFF } else { 0x3FFF & !(1 << 12) };
-    put(0x8008, cfg2);
-    let mut text = String::new();
-    for (&a, &b) in &img.bytes {
-        let mut rec = vec![1u8, (a >> 8) as u8, a as u8, 0, b];
-        if a >= 0x10000 {
-            // extended linear address records are needed above 64 KiB
-            let hi = (a >> 16) as u8;
-            text += &hexrec(&[2, 0, 0, 4, 0, hi]);
-            rec = vec![1, (a >> 8) as u8, a as u8, 0, b];
-        }
-        text += &hexrec(&rec);
-    }
-    text += ":00000001FF\n";
-    m.load_hex(&text).unwrap();
-    m
+    machine_on("16F17146", prog, isr, stvren)
 }
 
 fn hexrec(b: &[u8]) -> String {
@@ -870,4 +841,21 @@ fn timer2_interrupt_and_reset() {
     let mut m = machine(&prog, &[], true);
     run(&mut m, 6);
     assert_eq!((m.cpu.pc, sfr(&m, "TMR1L"), sfr(&m, "T2TMR")), (0, 5, 0));
+}
+
+#[test]
+fn f183_a_pir_write_that_clears_a_flag_rising_in_its_cycle_withdraws_the_fresh_request() {
+    // GIE, PEIE, TMR1IE and TMR2IE set. TMR2IF rises at cycle 11, the cycle of MOVWF PIR1 with W = 01h: the write
+    // clears it ([A110]) and sets TMR1IF, a request made by software, which is taken at once ([A104]): the vector 2
+    // cycles after the MOVWF, stacked PC = the word after it. (Code from word 8; the ISR is at word 4.)
+    let mut prog = vec![goto(8), NOP, NOP, NOP, NOP, NOP, NOP, NOP];
+    prog.extend([movlw(3), movwf(0x1E), movlw(0x04), movwf(0x1F), NOP, NOP, NOP, movlw(1), movwf(0x11), NOP, NOP]);
+    let mut m = machine_on("16F18346", &prog, &[NOP], true);
+    poke(&mut m, "PIE1", 0x03);
+    poke(&mut m, "INTCON", 0xC0);
+    run(&mut m, 10);
+    assert_eq!((m.cpu.cycles, m.cpu.pc, sfr(&m, "PIR1")), (11, 17, 1));
+    let c = m.cpu.cycles;
+    m.cpu.step();
+    assert_eq!((m.cpu.pc, m.cpu.cycles - c, m.cpu.tos()), (4, 2, 17));
 }

@@ -137,6 +137,9 @@ pub struct Pic16 {
     /// step began (`raise_flag`): the request arrived while the program was running (`[A108]`). A request made pending
     /// by software (a PIE, PIR or PEIE write) does not set it and is taken at once (`[A104]`).
     irq_new: bool,
+    /// The flags whose rise set `irq_new` during the current step: a software write that clears all of them again
+    /// withdraws the fresh request (`[A110]`), so a request the same write makes is taken at once (`[A104]`).
+    irq_new_by: Vec<(usize, u8)>,
     stk_fault: Option<Reset>,
     /// A reset requested by the instruction that is executing, done at its end.
     reset_req: Option<Reset>,
@@ -239,6 +242,7 @@ impl Pic16 {
             sleeping: false,
             no_irq: false,
             irq_new: false,
+            irq_new_by: Vec::new(),
             stk_fault: None,
             reset_req: None,
             extra: 0,
@@ -367,7 +371,8 @@ impl Pic16 {
             let pr = addr(&format!("T{n}PR")).or_else(|| addr(&format!("PR{n}")));
             let (hlt, clk) = (addr(&format!("T{n}HLT")), addr(&format!("T{n}CLKCON")));
             if hlt.is_some() != clk.is_some() {
-                return Err(format!("{}: Timer{n} has only one of T{n}HLT and T{n}CLKCON", dev.device.name));
+                p.notes.insert(format!("Timer{n} has only one of T{n}HLT and T{n}CLKCON in the description; it is not modelled"));
+                continue;
             }
             if let (Some(tmr), Some(pr), Some(con), Some(flag)) = (tmr, pr, addr(&format!("T{n}CON")), flag_of(&format!("TMR{n}IF"))) {
                 for a in [tmr, pr, con].into_iter().chain(hlt).chain(clk) {
@@ -567,6 +572,9 @@ impl Pic16 {
                         self.sync_timers();
                     }
                     self.mem[a] = v & self.implemented[a];
+                    if self.flag_reg[a] && self.irq_new && self.irq_new_by.iter().all(|&(r, b)| self.mem[r] & b == 0) {
+                        self.irq_new = false;
+                    }
                 }
             }
         }
@@ -640,6 +648,7 @@ impl Pic16 {
         self.mem[r] |= b;
         if !before && self.enabled_flag() {
             self.irq_new = true;
+            self.irq_new_by.push((r, b));
         }
     }
 
@@ -741,7 +750,7 @@ impl Pic16 {
                     if t.cnt == pr {
                         t.cnt = 0;
                         if one_shot {
-                            self.mem[t.con] &= 0x7F; // the match stops the timer (24.1.2)
+                            self.mem[t.con] &= if t.clk.is_some() { !0x80 } else { !0x04 }; // the match clears ON (24.1.2)
                             t.pre = 0;
                             t.post = 0;
                             raised = true;
@@ -1072,6 +1081,7 @@ impl Pic16 {
         // breakpoint at the stacked PC is not hit first. A request that was already pending (GIE just set by BSF or
         // RETFIE) or that software made pending is taken at once (`[A104]`, MDB: `tests/probe/sw_pending.S`).
         let fresh = std::mem::take(&mut self.irq_new) && self.enabled_flag();
+        self.irq_new_by.clear();
         if fresh && self.mem[self.a_intcon] & 0x80 != 0 && !self.no_irq {
             self.run_one();
             self.sync_timers();
