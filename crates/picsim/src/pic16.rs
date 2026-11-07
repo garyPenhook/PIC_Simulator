@@ -463,6 +463,8 @@ impl Pic16 {
                     p.adc_reg[r] = true;
                 }
                 p.adc = Some(a);
+            } else {
+                p.notes.insert("the ADC of this part is not modelled (a register is outside the data memory); GO never clears".into());
             }
         } else if dev.find_sfr("ADCON0").is_some() {
             p.notes.insert("the ADC of this part is not modelled; GO never clears".into());
@@ -1205,6 +1207,10 @@ impl Pic16 {
         for t in &mut self.t2 {
             (t.cnt, t.pre, t.post, t.last) = (0, 0, 0, self.cycles);
         }
+        if let Some(a) = self.a_fvr {
+            // the MCLR column leaves FVRRDY (q) alone: it follows FVREN, or stays 1
+            self.mem[a] = self.mem[a] & !0x40 | if self.fvr_always { 0x40 } else { (self.mem[a] >> 1) & 0x40 };
+        }
         if let Some(a) = self.adc.as_mut() {
             a.end = None; // a conversion in flight is lost; ADRES is a register with a reset value
         }
@@ -1626,6 +1632,7 @@ impl Pic16 {
                 self.flags(NPD | NTO, NTO);
                 self.sleeping = true;
                 self.sleep_at = self.cycles;
+                self.sync_adc(); // a conversion that ended in this cycle is done, not interrupted
                 if let Some(a) = self.adc.as_mut() {
                     a.enter_sleep(&mut self.mem, &mut self.notes);
                 }

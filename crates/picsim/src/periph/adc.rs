@@ -72,9 +72,7 @@ impl Adc {
         let name = dev.device.name.as_str();
         let bits = if q41 {
             12
-        } else if pic18 {
-            10
-        } else if name.starts_with("PIC16F131") {
+        } else if pic18 || name.starts_with("PIC16F131") {
             10
         } else if name.starts_with("PIC16F171") {
             12
@@ -151,7 +149,7 @@ impl Adc {
             // the input is the one at the start; the acquisition time is the program's business
             let tad = Self::simple_tad(mem[con1]).unwrap_or(2);
             let ch = mem[self.con] >> 2;
-            let code = i32::from(self.feed.iter().filter(|(c, when, _)| *c == ch && *when <= t).next_back().map_or(0, |f| f.2));
+            let code = i32::from(self.feed.iter().rfind(|(c, when, _)| *c == ch && *when <= t).map_or(0, |f| f.2));
             self.end = Some((t + (23 * tad).div_ceil(8), code.min(1023), false)); // 11.5 TAD of tad Fosc periods, 4 to a cycle
             return;
         }
@@ -173,7 +171,7 @@ impl Adc {
             end = t + (n * (2 * lead + 23)).div_ceil(4);
         }
         let max = (1i32 << self.bits) - 1;
-        let at = |ch: u8| i32::from(self.feed.iter().filter(|(c, when, _)| *c == ch && *when <= sample).next_back().map_or(0, |f| f.2)).min(max);
+        let at = |ch: u8| i32::from(self.feed.iter().rfind(|(c, when, _)| *c == ch && *when <= sample).map_or(0, |f| f.2)).min(max);
         let diff = self.nch.is_some() && mem[self.con] & 2 != 0;
         let code = if diff { at(mem[self.pch] & 0x3F) - at(mem[self.nch.unwrap()] & 0x3F) } else { at(if self.wide.is_some() { mem[self.pch] } else { mem[self.pch] & 0x3F }) };
         self.end = Some((end, code, diff));
