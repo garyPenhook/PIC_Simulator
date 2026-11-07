@@ -1,4 +1,4 @@
-use picsim::debuginfo::{DebugInfo, Kind, Var};
+use picsim::debuginfo::{DebugInfo, Form, Kind, Ty, Var};
 
 fn info() -> DebugInfo {
     DebugInfo::from_elf(include_bytes!("data/i2c_q10_g.elf")).unwrap()
@@ -38,7 +38,9 @@ fn globals_params_and_locals_are_scoped() {
 }
 
 fn var(kind: Kind, bytes: u32, elem: u32, array: bool) -> Var {
-    Var { name: "x".into(), addr: 2, bytes, kind, elem, array, ty: String::new(), scope: None, param: false }
+    let one = Ty { bytes: elem, elem, kind: kind.clone(), array: false, name: String::new(), form: Form::Scalar };
+    let layout = if array { Ty { bytes, elem, kind: kind.clone(), array, name: String::new(), form: Form::Array { of: Box::new(one), count: bytes / elem } } } else { one };
+    Var { name: "x".into(), addr: 2, bytes, kind, elem, array, ty: String::new(), scope: None, param: false, layout }
 }
 
 #[test]

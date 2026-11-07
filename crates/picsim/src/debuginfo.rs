@@ -34,6 +34,8 @@ pub struct Var {
     /// Index into `DebugInfo::funcs` for a parameter or local; `None` for a global.
     pub scope: Option<usize>,
     pub param: bool,
+    /// The full type: members of a structure or union, enumerators, what a pointer points to.
+    pub layout: Ty,
 }
 
 /// A routine's program-address range `[low, high)`: byte addresses on a PIC18 part, word addresses on a PIC16 (the units of the PC).
@@ -106,8 +108,8 @@ impl DebugInfo {
                         }
                         let addr = ex[1..].iter().rev().fold(0u32, |a, b| a << 8 | u32::from(*b));
                         let Some(AttributeValue::UnitRef(t)) = e.attr_value(gimli::DW_AT_type) else { continue };
-                        let Some(ty) = describe(&dwarf, &unit, t) else { continue };
-                        info.vars.push(Var { name, addr, bytes: ty.bytes, kind: ty.kind, elem: ty.elem, array: ty.array, ty: ty.name, scope: if e.tag() == gimli::DW_TAG_formal_parameter || cur_func.is_some() { cur_func } else { None }, param: e.tag() == gimli::DW_TAG_formal_parameter });
+                        let Some(ty) = describe(&dwarf, &unit, t, &mut Vec::new()) else { continue };
+                        info.vars.push(Var { name, addr, bytes: ty.bytes, kind: ty.kind.clone(), elem: ty.elem, array: ty.array, ty: ty.name.clone(), layout: ty.clone(), scope: if e.tag() == gimli::DW_TAG_formal_parameter || cur_func.is_some() { cur_func } else { None }, param: e.tag() == gimli::DW_TAG_formal_parameter });
                     }
                     _ => {}
                 }
@@ -126,18 +128,51 @@ impl DebugInfo {
         self.funcs.iter().any(|f| f.low == addr && f.high > f.low)
     }
 
+    /// The address and size of a global written as a path: `pt`, `pt.x`, `sh.tag[1]`, `pts[1].y`. `None` when any part is not found.
+    pub fn path_addr(&self, path: &str) -> Option<(u32, u32)> {
+        let end = path.find(['.', '[']).unwrap_or(path.len());
+        let v = self.vars.iter().find(|v| v.scope.is_none() && v.name == path[..end].trim())?;
+        let (off, ty) = v.layout.resolve(&path[end..])?;
+        Some((v.addr + off, ty.bytes))
+    }
+
     /// Globals, then the parameters and locals of routine `f` when given.
     pub fn visible(&self, f: Option<usize>) -> impl Iterator<Item = &Var> {
         self.vars.iter().filter(move |v| v.scope.is_none() || v.scope == f)
     }
 }
 
-struct Ty {
-    bytes: u32,
-    elem: u32,
-    kind: Kind,
-    array: bool,
-    name: String,
+/// A type as the debug info describes it.
+#[derive(Clone, Debug)]
+pub struct Ty {
+    pub bytes: u32,
+    /// Element size of an array; the whole size otherwise.
+    pub elem: u32,
+    pub kind: Kind,
+    pub array: bool,
+    pub name: String,
+    pub form: Form,
+}
+
+#[derive(Clone, Debug)]
+pub enum Form {
+    /// Integer, character, boolean or float: `kind` says which.
+    Scalar,
+    Array { of: Box<Ty>, count: u32 },
+    /// A structure, or a union (every member at offset 0).
+    Struct { union: bool, members: Vec<Member> },
+    Enum(Vec<(i64, String)>),
+    /// `to` is `None` for `void *`, a function pointer, or a type that points back into itself (`struct node *next`).
+    Pointer { to: Option<Box<Ty>> },
+}
+
+#[derive(Clone, Debug)]
+pub struct Member {
+    pub name: String,
+    pub offset: u32,
+    pub ty: Ty,
+    /// `(bit offset from the member's byte, width)` of a bit-field.
+    pub bits: Option<(u32, u32)>,
 }
 
 fn attr_name(dwarf: &gimli::Dwarf<R<'_>>, unit: &gimli::Unit<R<'_>>, e: &gimli::DebuggingInformationEntry<R<'_>>) -> Option<String> {
@@ -145,13 +180,37 @@ fn attr_name(dwarf: &gimli::Dwarf<R<'_>>, unit: &gimli::Unit<R<'_>>, e: &gimli::
     Some(dwarf.attr_string(unit, v).ok()?.to_string_lossy().into_owned())
 }
 
-fn describe(dwarf: &gimli::Dwarf<R<'_>>, unit: &gimli::Unit<R<'_>>, at: gimli::UnitOffset) -> Option<Ty> {
+fn offset_of(e: &gimli::DebuggingInformationEntry<R<'_>>) -> u32 {
+    match e.attr_value(gimli::DW_AT_data_member_location) {
+        Some(AttributeValue::Exprloc(x)) => {
+            // DW_OP_plus_uconst <uleb128>; a union member has no location at all.
+            let b = x.0.slice();
+            if b.first() == Some(&0x23) {
+                let (mut v, mut sh) = (0u32, 0);
+                for c in &b[1..] {
+                    v |= u32::from(c & 0x7f) << sh;
+                    sh += 7;
+                    if c & 0x80 == 0 {
+                        break;
+                    }
+                }
+                v
+            } else {
+                0
+            }
+        }
+        Some(v) => v.udata_value().unwrap_or(0) as u32,
+        None => 0,
+    }
+}
+
+fn describe(dwarf: &gimli::Dwarf<R<'_>>, unit: &gimli::Unit<R<'_>>, at: gimli::UnitOffset, open: &mut Vec<gimli::UnitOffset>) -> Option<Ty> {
     let e = unit.entry(at).ok()?;
     match e.tag() {
         // `volatile`, `const` and typedef names (`uint8_t`) are the type they wrap.
         gimli::DW_TAG_volatile_type | gimli::DW_TAG_const_type | gimli::DW_TAG_typedef => match e.attr_value(gimli::DW_AT_type) {
             Some(AttributeValue::UnitRef(t)) => {
-                let mut ty = describe(dwarf, unit, t)?;
+                let mut ty = describe(dwarf, unit, t, open)?;
                 if e.tag() == gimli::DW_TAG_typedef && !ty.array {
                     ty.name = attr_name(dwarf, unit, &e).unwrap_or(ty.name);
                 }
@@ -175,11 +234,11 @@ fn describe(dwarf: &gimli::Dwarf<R<'_>>, unit: &gimli::Unit<R<'_>>, at: gimli::U
             let name = attr_name(dwarf, unit, &e).unwrap_or_default();
             // C `unsigned char` (`uint8_t`) is a small number or a byte array far more often than text; plain `char` stays text.
             let kind = if name == "unsigned char" { Kind::Unsigned } else { kind };
-            Some(Ty { bytes: size, elem: size, kind, array: false, name })
+            Some(Ty { bytes: size, elem: size, kind, array: false, name, form: Form::Scalar })
         }
         gimli::DW_TAG_array_type => {
             let Some(AttributeValue::UnitRef(t)) = e.attr_value(gimli::DW_AT_type) else { return None };
-            let el = describe(dwarf, unit, t)?;
+            let el = describe(dwarf, unit, t, open)?;
             let mut tree = unit.entries_at_offset(at).ok()?;
             tree.next_dfs().ok()?; // the array itself
             // The first child is the subrange holding the last index.
@@ -187,7 +246,76 @@ fn describe(dwarf: &gimli::Dwarf<R<'_>>, unit: &gimli::Unit<R<'_>>, at: gimli::U
                 Some(c) if c.tag() == gimli::DW_TAG_subrange_type => c.attr_value(gimli::DW_AT_upper_bound)?.udata_value()? as u32 + 1,
                 _ => return None,
             };
-            Some(Ty { bytes: el.bytes * count, elem: el.bytes, kind: el.kind, array: true, name: format!("{}[{count}]", el.name) })
+            let name = format!("{}[{count}]", el.name);
+            Some(Ty { bytes: el.bytes.saturating_mul(count), elem: el.bytes, kind: el.kind.clone(), array: true, name, form: Form::Array { of: Box::new(el), count } })
+        }
+        gimli::DW_TAG_structure_type | gimli::DW_TAG_union_type => {
+            let union = e.tag() == gimli::DW_TAG_union_type;
+            let bytes = e.attr_value(gimli::DW_AT_byte_size)?.udata_value()? as u32;
+            let name = format!("{} {}", if union { "union" } else { "struct" }, attr_name(dwarf, unit, &e).unwrap_or_default()).trim_end().to_string();
+            open.push(at);
+            let mut members = Vec::new();
+            let mut tree = unit.entries_at_offset(at).ok()?;
+            tree.next_dfs().ok()?;
+            while let Ok(Some(c)) = tree.next_dfs() {
+                if c.depth() <= 0 {
+                    break; // left the structure's children
+                }
+                if c.tag() != gimli::DW_TAG_member || c.depth() != 1 {
+                    continue;
+                }
+                let Some(AttributeValue::UnitRef(t)) = c.attr_value(gimli::DW_AT_type) else { continue };
+                let Some(ty) = describe(dwarf, unit, t, open) else { continue };
+                let bits = c.attr_value(gimli::DW_AT_bit_size).and_then(|b| b.udata_value()).map(|w| {
+                    // DWARF 4: data_bit_offset from the start of the structure; older: bit_offset from the MSB of a storage unit.
+                    let off = c.attr_value(gimli::DW_AT_data_bit_offset).and_then(|v| v.udata_value());
+                    let old = c.attr_value(gimli::DW_AT_bit_offset).and_then(|v| v.udata_value());
+                    let lsb = match (off, old) {
+                        (Some(o), _) => (o as u32).saturating_sub(8 * offset_of(c)),
+                        (None, Some(o)) => (8 * ty.bytes).saturating_sub(o as u32 + w as u32),
+                        _ => 0,
+                    };
+                    (lsb, w as u32)
+                });
+                members.push(Member { name: attr_name(dwarf, unit, c).unwrap_or_default(), offset: offset_of(c), ty, bits });
+            }
+            open.pop();
+            Some(Ty { bytes, elem: bytes, kind: Kind::Unsigned, array: false, name, form: Form::Struct { union, members } })
+        }
+        gimli::DW_TAG_enumeration_type => {
+            let bytes = e.attr_value(gimli::DW_AT_byte_size)?.udata_value()? as u32;
+            let name = format!("enum {}", attr_name(dwarf, unit, &e).unwrap_or_default()).trim_end().to_string();
+            let mut names = Vec::new();
+            let mut tree = unit.entries_at_offset(at).ok()?;
+            tree.next_dfs().ok()?;
+            while let Ok(Some(c)) = tree.next_dfs() {
+                if c.depth() <= 0 {
+                    break;
+                }
+                if c.tag() == gimli::DW_TAG_enumerator {
+                    let v = match c.attr_value(gimli::DW_AT_const_value) {
+                        Some(AttributeValue::Sdata(i)) => i,
+                        Some(v) => v.udata_value().unwrap_or(0) as i64,
+                        None => continue,
+                    };
+                    names.push((v, attr_name(dwarf, unit, c).unwrap_or_default()));
+                }
+            }
+            Some(Ty { bytes, elem: bytes, kind: Kind::Unsigned, array: false, name, form: Form::Enum(names) })
+        }
+        gimli::DW_TAG_pointer_type => {
+            let bytes = e.attr_value(gimli::DW_AT_byte_size).and_then(|v| v.udata_value()).unwrap_or(2) as u32;
+            let target = match e.attr_value(gimli::DW_AT_type) {
+                Some(AttributeValue::UnitRef(t)) if !open.contains(&t) => describe(dwarf, unit, t, open),
+                Some(AttributeValue::UnitRef(t)) => {
+                    // A pointer back to a structure being described: name only, so a list node does not recurse forever.
+                    let n = unit.entry(t).ok().and_then(|x| attr_name(dwarf, unit, &x)).unwrap_or_default();
+                    return Some(Ty { bytes, elem: bytes, kind: Kind::Unsigned, array: false, name: format!("struct {n} *"), form: Form::Pointer { to: None } });
+                }
+                _ => None,
+            };
+            let name = format!("{} *", target.as_ref().map_or("void", |t| t.name.as_str()));
+            Some(Ty { bytes, elem: bytes, kind: Kind::Unsigned, array: false, name, form: Form::Pointer { to: target.map(Box::new) } })
         }
         _ => None,
     }
@@ -196,19 +324,89 @@ fn describe(dwarf: &gimli::Dwarf<R<'_>>, unit: &gimli::Unit<R<'_>>, at: gimli::U
 impl Var {
     /// The value in `mem` (data memory) as text. Multi-byte values are little-endian.
     pub fn show(&self, mem: &[u8]) -> String {
-        let at = |a: u32, n: u32| -> Option<Vec<u8>> { mem.get(a as usize..(a + n) as usize).map(<[u8]>::to_vec) };
-        let Some(raw) = at(self.addr, self.bytes) else { return "(outside RAM)".into() };
-        if self.array {
-            if self.kind == Kind::Char {
-                // A string: up to the first NUL.
-                let s: String = raw.iter().take_while(|b| **b != 0).map(|b| if (32..127).contains(b) { *b as char } else { '.' }).collect();
-                return format!("\"{s}\"");
+        self.layout.show_at(mem, self.addr, 1)
+    }
+}
+
+impl Ty {
+    /// Follow `.member` and `[index]` steps; returns the byte offset from the start of `self` and the type reached.
+    pub fn resolve(&self, mut path: &str) -> Option<(u32, &Ty)> {
+        let (mut off, mut ty) = (0, self);
+        path = path.trim();
+        while !path.is_empty() {
+            if let Some(rest) = path.strip_prefix('.') {
+                let end = rest.find(['.', '[']).unwrap_or(rest.len());
+                let Form::Struct { members, .. } = &ty.form else { return None };
+                let m = members.iter().find(|m| m.name == rest[..end].trim() && m.bits.is_none())?;
+                off += m.offset;
+                ty = &m.ty;
+                path = &rest[end..];
+            } else if let Some(rest) = path.strip_prefix('[') {
+                let (idx, rest) = rest.split_once(']')?;
+                let Form::Array { of, count } = &ty.form else { return None };
+                let i: u32 = idx.trim().parse().ok().filter(|i| i < count)?;
+                off += i * of.bytes;
+                ty = of;
+                path = rest;
+            } else {
+                return None;
             }
-            let n = (self.bytes / self.elem.max(1)) as usize;
-            let items: Vec<String> = raw.chunks(self.elem.max(1) as usize).take(16).map(|c| scalar(&self.kind, c)).collect();
-            return format!("{{{}{}}}", items.join(", "), if n > 16 { ", ..." } else { "" });
         }
-        scalar(&self.kind, &raw)
+        Some((off, ty))
+    }
+
+    /// The value of this type at data address `addr`. `deref` is how many levels of pointer to follow.
+    pub fn show_at(&self, mem: &[u8], addr: u32, deref: u32) -> String {
+        let Some(raw) = mem.get(addr as usize..(addr as usize).saturating_add(self.bytes as usize)) else { return "(outside RAM)".into() };
+        match &self.form {
+            Form::Scalar => scalar(&self.kind, raw),
+            Form::Array { of, count } => {
+                if of.kind == Kind::Char && matches!(of.form, Form::Scalar) {
+                    // A string: up to the first NUL.
+                    let s: String = raw.iter().take_while(|b| **b != 0).map(|b| if (32..127).contains(b) { *b as char } else { '.' }).collect();
+                    return format!("\"{s}\"");
+                }
+                let items: Vec<String> = (0..(*count).min(16)).map(|i| of.show_at(mem, addr + i * of.bytes, deref)).collect();
+                format!("{{{}{}}}", items.join(", "), if *count > 16 { ", ..." } else { "" })
+            }
+            Form::Struct { members, .. } => {
+                let items: Vec<String> = members.iter().map(|m| format!("{} = {}", m.name, m.show(mem, addr, deref))).collect();
+                format!("{{{}}}", items.join(", "))
+            }
+            Form::Enum(names) => {
+                let u: u64 = raw.iter().rev().fold(0, |x, y| x << 8 | u64::from(*y));
+                match names.iter().find(|(v, _)| *v as u64 == u) {
+                    Some((_, n)) => format!("{n} ({u})"),
+                    None => format!("{u}"),
+                }
+            }
+            Form::Pointer { to } => {
+                let u: u64 = raw.iter().rev().fold(0, |x, y| x << 8 | u64::from(*y));
+                if u == 0 {
+                    return "NULL".into();
+                }
+                let at = format!("0x{u:0w$X}", w = raw.len() * 2);
+                match to {
+                    Some(t) if deref > 0 && u as usize + t.bytes as usize <= mem.len() => format!("{at} -> {}", t.show_at(mem, u as u32, deref - 1)),
+                    _ => at,
+                }
+            }
+        }
+    }
+}
+
+impl Member {
+    fn show(&self, mem: &[u8], base: u32, deref: u32) -> String {
+        let at = base + self.offset;
+        match self.bits {
+            Some((lsb, width)) if (1..64).contains(&width) && lsb < 64 => {
+                let Some(raw) = mem.get(at as usize..(at as usize).saturating_add(self.ty.bytes as usize)) else { return "(outside RAM)".into() };
+                let u: u64 = raw.iter().rev().fold(0, |x, y| x << 8 | u64::from(*y));
+                let v = (u >> lsb) & ((1u64 << width) - 1);
+                if self.ty.kind == Kind::Signed && v >> (width - 1) & 1 == 1 { format!("{}", v as i64 - (1i64 << width)) } else { format!("{v}") }
+            }
+            _ => self.ty.show_at(mem, at, deref),
+        }
     }
 }
 

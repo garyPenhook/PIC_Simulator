@@ -778,8 +778,8 @@ impl eframe::App for App {
                 }
                 4 => variables_ui(ui, &m.debug, pc, &m.cpu.m.mem, self.snap.as_ref()),
                 _ => {
-                    let (syms, vars, dev) = (&m.syms, &m.debug.vars, &m.dev);
-                    watch_ui(ui, &mut self.watch, &mut self.watch_in, |n| syms.get(n).copied().or_else(|| vars.iter().find(|v| v.scope.is_none() && v.name == *n).map(|v| v.addr)).or_else(|| dev.find_sfr(n).map(|s| s.addr)), |a, l| m.peek(a, l));
+                    let (syms, vars, dev, debug) = (&m.syms, &m.debug.vars, &m.dev, &m.debug);
+                    watch_ui(ui, &mut self.watch, &mut self.watch_in, |n| syms.get(n).copied().or_else(|| vars.iter().find(|v| v.scope.is_none() && v.name == *n).map(|v| v.addr)).or_else(|| debug.path_addr(n).map(|p| p.0)).or_else(|| dev.find_sfr(n).map(|s| s.addr)), |a, l| m.peek(a, l));
                 }
             }
         });
@@ -1033,8 +1033,8 @@ impl App {
                 }
                 4 => variables_ui(ui, &m.debug, pc, &m.cpu.mem, self.snap.as_ref()),
                 _ => {
-                    let (syms, vars, dev) = (&m.syms, &m.debug.vars, &m.dev);
-                    watch_ui(ui, &mut self.watch, &mut self.watch_in, |n| syms.get(n).copied().or_else(|| vars.iter().find(|v| v.scope.is_none() && v.name == *n).map(|v| v.addr)).or_else(|| dev.find_sfr(n).map(|s| s.addr)), |a, l| m.peek(a, l));
+                    let (syms, vars, dev, debug) = (&m.syms, &m.debug.vars, &m.dev, &m.debug);
+                    watch_ui(ui, &mut self.watch, &mut self.watch_in, |n| syms.get(n).copied().or_else(|| vars.iter().find(|v| v.scope.is_none() && v.name == *n).map(|v| v.addr)).or_else(|| debug.path_addr(n).map(|p| p.0)).or_else(|| dev.find_sfr(n).map(|s| s.addr)), |a, l| m.peek(a, l));
                 }
             }
         });
