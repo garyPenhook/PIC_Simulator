@@ -13,12 +13,14 @@ pub struct Machine16 {
     pub syms: BTreeMap<String, u32>,
     pub breakpoints: Vec<u32>,
     image: Image,
+    /// Stimulus file text, applied again after every reset (the peripherals are rebuilt then).
+    stimulus: Option<String>,
 }
 
 impl Machine16 {
     pub fn new(dev: Device) -> Result<Machine16, String> {
         let cpu = Pic16::new(&dev)?;
-        Ok(Machine16 { cpu, dev, syms: BTreeMap::new(), breakpoints: Vec::new(), image: Image::default() })
+        Ok(Machine16 { cpu, dev, syms: BTreeMap::new(), breakpoints: Vec::new(), image: Image::default(), stimulus: None })
     }
 
     pub fn load_hex(&mut self, text: &str) -> Result<(), String> {
@@ -28,10 +30,21 @@ impl Machine16 {
         Ok(())
     }
 
+    /// Drive the part as a stimulus file says (see `stimulus.rs`); on a PIC16 part only `[[uart]]` is modelled.
+    pub fn load_stimulus(&mut self, text: &str) -> Result<(), String> {
+        let st = crate::stimulus::Stimulus::parse(text)?;
+        st.apply16(&self.dev, &mut self.cpu)?;
+        self.stimulus = Some(text.to_string());
+        Ok(())
+    }
+
     /// Power-on reset: the core and memory return to their reset state and the program is loaded again.
     pub fn reset(&mut self) -> Result<(), String> {
         let mut c = Pic16::new(&self.dev)?;
         c.load(&self.image);
+        if let Some(t) = &self.stimulus {
+            crate::stimulus::Stimulus::parse(t)?.apply16(&self.dev, &mut c)?; // it applied once on this device, so it applies again
+        }
         self.cpu = c;
         Ok(())
     }

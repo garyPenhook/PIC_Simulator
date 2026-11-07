@@ -50,10 +50,10 @@ fn run() -> Result<ExitCode, String> {
     let hex = hex.ok_or("usage: basil-sim prog.hex --device PART [--asm prog.S] [--until SYM] [--dump A,B:2]")?;
     let dev = devdesc::Device::load(&root.join(format!("{device}.toml"))).map_err(|e| e.to_string())?;
     if dev.device.family == "pic16e" {
-        if stim.is_some() || show_cfg {
-            return Err("--stim and --config are not supported for PIC16 parts yet (no peripherals are modelled)".into());
+        if show_cfg {
+            return Err("--config is not supported for PIC16 parts yet".into());
         }
-        return run16(dev, &hex, asm, until, &dump, max, trace, &bps, bp_max);
+        return run16(dev, &hex, asm, stim, until, &dump, max, trace, &bps, bp_max);
     }
     let mut m = Machine::new(dev)?;
     let given = hex.clone();
@@ -204,12 +204,13 @@ fn run() -> Result<ExitCode, String> {
     Ok(if stop == Stop::Halt || until.is_none() { ExitCode::SUCCESS } else { ExitCode::from(1) })
 }
 
-/// The PIC16 enhanced mid-range path: the core only, no peripherals (milestone S2 of docs/SIMULATOR-PLAN.md).
+/// The PIC16 enhanced mid-range path: the core, Timer0/1/2 and the EUSART (milestones S2 and S4 of docs/SIMULATOR-PLAN.md).
 #[allow(clippy::too_many_arguments)]
 fn run16(
     dev: devdesc::Device,
     hex: &std::path::Path,
     asm: Option<PathBuf>,
+    stim: Option<PathBuf>,
     until: Option<String>,
     dump: &[String],
     max: u64,
@@ -220,6 +221,9 @@ fn run16(
     let mut m = picsim::machine16::Machine16::new(dev)?;
     let hex = picsim::lines::program_hex(hex)?;
     m.load_hex(&std::fs::read_to_string(&hex).map_err(|e| format!("{}: {e}", hex.display()))?)?;
+    if let Some(f) = &stim {
+        m.load_stimulus(&std::fs::read_to_string(f).map_err(|e| format!("{}: {e}", f.display()))?).map_err(|e| format!("{}: {e}", f.display()))?;
+    }
     let asm = asm.unwrap_or_else(|| hex.with_extension("S"));
     if let Ok(t) = std::fs::read_to_string(&asm) {
         m.load_symbols_from_asm(&t);
@@ -261,6 +265,12 @@ fn run16(
         let b = m.peek(addr, len);
         let v: u64 = b.iter().rev().fold(0, |a, x| a << 8 | u64::from(*x));
         println!("{name} = {v}  ({})", b.iter().map(|x| format!("{x:02X}")).collect::<Vec<_>>().join(" "));
+    }
+    for n in 1..=2u8 {
+        let bytes: Vec<u8> = m.cpu.tx.iter().filter(|t| t.0 == n).map(|t| t.2).collect();
+        if !bytes.is_empty() {
+            println!("tx{n}: {}", String::from_utf8_lossy(&bytes).escape_debug());
+        }
     }
     for n in &m.cpu.notes {
         eprintln!("note: {n}");

@@ -10,6 +10,8 @@
 //! the ones a program touched. The facts the core relies on, with their pages, are in `docs/FACTS-SIM.md` (PIC16 core).
 
 use crate::config::Config;
+use crate::periph::uart::{self, Uart};
+use crate::periph::RxStream;
 use devdesc::Device;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -175,6 +177,13 @@ pub struct Pic16 {
     /// that cycle misses it and a clear leaves it set (MDB, `tests/probe/t1_poll.S`, `t2_f183.S`, `t2_poll.S`,
     /// `t0_poll.S`, `[A110]`).
     flag_reg: Vec<bool>,
+    /// EUSARTs (`periph/uart.rs`, the module of the Q10) and, per address, which register of which one it is
+    /// (index, hook sub-code 0 TXREG .. 4 RCSTA). `tx` logs the bytes they start to send: (EUSART number, cycle, byte).
+    uarts: Vec<Uart>,
+    uart_reg: Vec<Option<(u8, u8)>>,
+    pub tx: Vec<(u8, u64, u8)>,
+    /// Cycle SLEEP was executed (the EUSARTs owe the cycles of Sleep when the part wakes).
+    sleep_at: u64,
 }
 
 fn por_bits(s: &str) -> u8 {
@@ -268,6 +277,10 @@ impl Pic16 {
             t2: Vec::new(),
             tmr_reg: vec![false; MEM],
             flag_reg: vec![false; MEM],
+            uarts: Vec::new(),
+            uart_reg: vec![None; MEM],
+            tx: Vec::new(),
+            sleep_at: 0,
         };
         for g in &d.gpr {
             for a in g.start..g.end {
@@ -402,6 +415,19 @@ impl Pic16 {
                     p.tmr_reg[a] = true;
                 }
                 p.t2.push(Timer2 { n, tmr, pr, con, hlt, clk, flag, cnt: 0, pre: 0, post: 0, last: 0 });
+            }
+        }
+        for n in 1..=2u8 {
+            if let Some((u, regs)) = Uart::find(dev, n) {
+                if regs.iter().any(|&a| a >= MEM) {
+                    continue;
+                }
+                let i = p.uarts.len() as u8;
+                for (sub, a) in regs.into_iter().enumerate() {
+                    p.core[a] = true;
+                    p.uart_reg[a] = Some((i, sub as u8));
+                }
+                p.uarts.push(u);
             }
         }
         if p.irq.is_empty() {
@@ -547,6 +573,15 @@ impl Pic16 {
                 if self.flag_reg[a] {
                     self.sync_flag_timers();
                 }
+                if let Some((i, sub)) = self.uart_reg[a] {
+                    self.sync_uarts();
+                    if sub == uart::RCREG {
+                        let before = self.flags_of(i);
+                        let v = self.uarts[usize::from(i)].read_rc(&mut self.mem);
+                        self.flags_after(i, before);
+                        return v;
+                    }
+                }
                 if a == 2 {
                     self.pc as u8
                 } else if a == self.a_tos || a == self.a_tos + 1 {
@@ -587,6 +622,12 @@ impl Pic16 {
                     }
                 } else if self.tmr_reg[a] {
                     self.write_tmr(a, v & self.implemented[a]);
+                } else if let Some((i, sub)) = self.uart_reg[a] {
+                    self.sync_uarts();
+                    let before = self.flags_of(i);
+                    let (now, v) = (self.cycles, v & self.implemented[a]);
+                    self.uarts[usize::from(i)].write(sub, v, now, &mut self.mem, &mut self.tx);
+                    self.flags_after(i, before);
                 } else {
                     if self.flag_reg[a] {
                         // a flag Timer1 or the older Timer2 sets in this cycle is set before the write, so a write that
@@ -594,6 +635,15 @@ impl Pic16 {
                         self.sync_flag_timers();
                     }
                     self.mem[a] = v & self.implemented[a];
+                    if self.flag_reg[a] {
+                        // TXIF and RCIF follow the EUSART's state and cannot be cleared by software (DS40002343F 32.1.1.4
+                        // p.456): they are back at once, not as a new request
+                        for u in &self.uarts {
+                            if u.flag.addr == a || u.rcflag.addr == a {
+                                u.bits(&mut self.mem);
+                            }
+                        }
+                    }
                     if self.flag_reg[a] && self.irq_new && self.irq_new_by.iter().all(|&(r, b)| self.mem[r] & b == 0) {
                         self.irq_new = false;
                     }
@@ -650,6 +700,7 @@ impl Pic16 {
 
     /// Bring every timer to the current cycle.
     fn sync_timers(&mut self) {
+        self.sync_uarts();
         self.sync_t0();
         for i in 0..self.t1.len() {
             self.sync_t1(i);
@@ -662,6 +713,7 @@ impl Pic16 {
     /// Bring the timers whose flags land before a PIRn access in the same cycle to the current cycle: Timer1/3/5 and
     /// the older Timer2/4/6 (`flag_reg`, `[A110]`).
     fn sync_flag_timers(&mut self) {
+        self.sync_uarts();
         for i in 0..self.t1.len() {
             self.sync_t1(i);
         }
@@ -669,6 +721,53 @@ impl Pic16 {
             if self.t2[i].clk.is_none() {
                 self.sync_t2(i);
             }
+        }
+    }
+
+    /// The TXIF and RCIF bits of EUSART `i` as they are now.
+    fn flags_of(&self, i: u8) -> [bool; 2] {
+        let u = &self.uarts[usize::from(i)];
+        [self.mem[u.flag.addr] & u.flag.mask != 0, self.mem[u.rcflag.addr] & u.rcflag.mask != 0]
+    }
+
+    /// A flag of EUSART `i` that rose since `before` is raised through `raise_flag`, so that it counts as a request
+    /// that arrived while the program was running.
+    fn flags_after(&mut self, i: u8, before: [bool; 2]) {
+        let u = &self.uarts[usize::from(i)];
+        let fl = [(u.flag.addr, u.flag.mask), (u.rcflag.addr, u.rcflag.mask)];
+        for (k, &(r, b)) in fl.iter().enumerate() {
+            if !before[k] && self.mem[r] & b != 0 {
+                self.mem[r] &= !b;
+                self.raise_flag((r, b));
+            }
+        }
+    }
+
+    /// Bring the EUSARTs to the current cycle: the transmitter shifts out, the receiver takes in the characters of the
+    /// stimulus, TXIF, TRMT, RCIF and the error bits follow. A part in Sleep has no clock for them: characters that
+    /// arrive then are lost (`[A94]`).
+    fn sync_uarts(&mut self) {
+        let mut ev = Vec::new();
+        for i in 0..self.uarts.len() {
+            let before = self.flags_of(i as u8);
+            self.uarts[i].sync(&mut self.mem, self.cycles, &mut ev, &mut self.tx, &mut self.notes);
+            self.flags_after(i as u8, before);
+        }
+    }
+
+    /// The part has EUSART `num`.
+    pub fn has_uart(&self, num: u8) -> bool {
+        self.uarts.iter().any(|u| u.num == num)
+    }
+
+    /// Queue characters for the receiver of EUSART `num`; false when the part has no such EUSART.
+    pub fn rx_send(&mut self, num: u8, s: RxStream) -> bool {
+        match self.uarts.iter_mut().find(|u| u.num == num) {
+            Some(u) => {
+                u.rx_in.push_back(s);
+                true
+            }
+            None => false,
         }
     }
 
@@ -1024,6 +1123,11 @@ impl Pic16 {
         for t in &mut self.t2 {
             (t.cnt, t.pre, t.post, t.last) = (0, 0, 0, self.cycles);
         }
+        for u in &mut self.uarts {
+            (u.tsr_end, u.pending, u.rx_cur, u.asleep) = (None, None, None, false);
+            u.fifo.clear();
+            u.bits(&mut self.mem);
+        }
         self.pc = self.reset_vector;
         self.sleeping = false;
         self.no_irq = false;
@@ -1102,10 +1206,19 @@ impl Pic16 {
         if self.sleeping {
             if self.enabled_flag_any() {
                 self.sleeping = false;
+                let slept = self.cycles - self.sleep_at;
+                for u in &mut self.uarts {
+                    u.sleep(false, slept);
+                    u.bits(&mut self.mem); // RCIDL, TRMT and the rest are current at once
+                }
                 self.no_irq = true; // the instruction after SLEEP runs first
             } else {
                 self.cycles += 1;
                 self.park_timers(); // Fosc/4 does not run in Sleep
+                let mut ev = Vec::new();
+                for u in &mut self.uarts {
+                    u.rx(&mut self.mem, self.cycles, &mut ev); // the stimulus goes on; the receiver is off
+                }
                 return 1;
             }
         }
@@ -1424,6 +1537,10 @@ impl Pic16 {
                 // SLEEP: PD = 0, TO = 1
                 self.flags(NPD | NTO, NTO);
                 self.sleeping = true;
+                self.sleep_at = self.cycles;
+                for u in &mut self.uarts {
+                    u.sleep(true, 0);
+                }
                 self.notes.insert("SLEEP: the watchdog is not modelled, only an enabled interrupt flag wakes the part".into());
             }
             0x0064 => {

@@ -37,6 +37,7 @@ mod nvmq;
 mod i2cq;
 mod mssp;
 mod quart;
+pub(crate) mod uart;
 mod spi;
 pub use board::{parse_pin, pin_name, Board, Bus, Led, Oled, Pin};
 use ccp::{Ccp, Pwm};
@@ -50,6 +51,7 @@ use mssp::Mssp;
 use nvm::Nvm;
 use nvmq::NvmQ;
 use quart::QUart;
+use uart::Uart;
 use spi::Spi;
 pub use mssp::{I2cClient, I2cEv};
 pub use spi::SpiClient;
@@ -85,9 +87,9 @@ struct Ioc {
 
 /// A flag bit in a PIRx register.
 #[derive(Clone, Copy, Debug)]
-struct Flag {
-    addr: usize,
-    mask: u8,
+pub(crate) struct Flag {
+    pub(crate) addr: usize,
+    pub(crate) mask: u8,
 }
 
 impl Flag {
@@ -100,10 +102,16 @@ impl Flag {
         None
     }
     fn set(self, m: &mut DataMem) {
-        m.mem[self.addr] |= self.mask;
+        self.set_in(&mut m.mem);
     }
     fn clear(self, m: &mut DataMem) {
-        m.mem[self.addr] &= !self.mask;
+        self.clear_in(&mut m.mem);
+    }
+    fn set_in(self, mem: &mut [u8]) {
+        mem[self.addr] |= self.mask;
+    }
+    fn clear_in(self, mem: &mut [u8]) {
+        mem[self.addr] &= !self.mask;
     }
 }
 
@@ -246,7 +254,7 @@ const ADC0: u8 = 14;
 /// 25 us (FVR04, DS40002043F p.707) and the models do not know Fosc. A note is added when it is first enabled.
 const FVR0: u8 = 15;
 const UART0: u8 = 16;
-const UART_HOOKS: u8 = 5;
+const UART_HOOKS: u8 = uart::HOOKS;
 /// Q41 UART n (0-based) uses hook codes QUART0 + quart::HOOKS * n + sub-code (see `quart.rs`); at most 5 UARTs.
 const QUART0: u8 = 112;
 const QUART_END: u8 = QUART0 + 5 * quart::HOOKS;
@@ -288,38 +296,6 @@ fn wdt_dec(k: u8) -> Option<u8> {
 }
 const NVM0: u8 = 240;
 const NVMQ0: u8 = 242;
-
-/// EUSART1 transmitter of the Q10 style (TX1REG, TX1STA, BAUD1CON, SP1BRGL/H; DS40002043F ch.29 p.503-505).
-/// * TXREG moves to the shift register at once when that is idle, otherwise it is held and moves in the cycle
-///   the Stop bit ends `[A6]`; TXIF = TXEN and nothing held (29.1.1.4); TRMT = shift register idle (29.1.1.5).
-/// * Bit time in instruction cycles (Table 29-1, Fosc/4 per cycle): BRG16=1,BRGH=1 -> n+1; exactly one of them
-///   -> 4(n+1); neither -> 16(n+1). A character is start + 8 (9 with TX9) + stop bits.
-/// * `[A7]` clearing TXEN abandons the shift register and a held byte. A write to TXREG while TXEN = 0 is dropped.
-/// * `[A8]` TXIF does not dip for the instruction cycle after a write that goes straight to the shift register.
-struct Uart {
-    num: u8,
-    reg: usize,
-    sta: usize,
-    baud: usize,
-    brgl: usize,
-    brgh: usize,
-    flag: Flag,
-    tsr_end: Option<u64>,
-    pending: Option<u8>,
-    rcreg: usize,
-    rcsta: usize,
-    rcflag: Flag,
-    /// Characters the outside world sends, in order; the head is the one being sent.
-    rx_in: VecDeque<RxStream>,
-    /// Cycle the line is free again (end of the last character that started).
-    rx_free: u64,
-    /// The character being received: (cycle it reaches the FIFO, word, framing error).
-    rx_cur: Option<(u64, u16, bool)>,
-    /// The part is in Sleep: the receiver sees nothing.
-    asleep: bool,
-    /// Receive FIFO, two deep: (word with the ninth bit at bit 8, framing error).
-    fifo: VecDeque<(u16, bool)>,
-}
 
 /// Characters sent to a receiver: the first start bit falls at cycle `at`, then back to back plus `gap` idle cycles.
 /// `bit` is the sender's bit time in instruction cycles; without it the receiver's own rate is used.
@@ -765,25 +741,12 @@ impl Periph {
             p.fvr = Some(a);
         }
         for n in 1..=2u8 {
-            if let (Some(reg), Some(sta), Some(baud), Some(brgl), Some(brgh), Some(flag), Some(rcreg), Some(rcsta), Some(rcflag)) = (
-                addr(dev, &format!("TX{n}REG")),
-                addr(dev, &format!("TX{n}STA")),
-                addr(dev, &format!("BAUD{n}CON")),
-                addr(dev, &format!("SP{n}BRGL")),
-                addr(dev, &format!("SP{n}BRGH")),
-                Flag::find(dev, &format!("TX{n}IF")),
-                addr(dev, &format!("RC{n}REG")),
-                addr(dev, &format!("RC{n}STA")),
-                Flag::find(dev, &format!("RC{n}IF")),
-            ) {
+            if let Some((u, regs)) = Uart::find(dev, n) {
                 let k = UART0 + UART_HOOKS * p.uarts.len() as u8;
-                for (a, o) in [(reg, 0), (sta, 1), (baud, 2), (rcreg, 3), (rcsta, 4)] {
-                    hook(a, k + o);
+                for (o, a) in regs.into_iter().enumerate() {
+                    hook(a, k + o as u8);
                 }
-                p.uarts.push(Uart {
-                    num: n, reg, sta, baud, brgl, brgh, flag, tsr_end: None, pending: None, rcreg, rcsta, rcflag,
-                    rx_in: VecDeque::new(), rx_free: 0, rx_cur: None, asleep: false, fifo: VecDeque::new(),
-                });
+                p.uarts.push(u);
             }
         }
         for n in 1..=5u8 {
@@ -913,87 +876,6 @@ impl Periph {
                 true
             }
             None => false,
-        }
-    }
-
-    /// Instruction cycles one bit takes at the current baud settings.
-    fn uart_bit_cycles(u: &Uart, m: &DataMem) -> u64 {
-        let sta = m.mem[u.sta];
-        let brg16 = m.mem[u.baud] & 8 != 0;
-        let n = if brg16 { u64::from(m.mem[u.brgh]) << 8 | u64::from(m.mem[u.brgl]) } else { u64::from(m.mem[u.brgl]) };
-        match (brg16, sta & 4 != 0) {
-            (true, true) => n + 1,
-            (false, false) => 16 * (n + 1),
-            _ => 4 * (n + 1),
-        }
-    }
-
-    /// Instruction cycles one transmitted character takes at the current baud settings.
-    fn uart_char_cycles(u: &Uart, m: &DataMem) -> u64 {
-        Self::uart_bit_cycles(u, m) * (if m.mem[u.sta] & 0x40 != 0 { 11 } else { 10 })
-    }
-
-    /// The receiver listens: serial port and receiver enabled, asynchronous, no overrun pending.
-    fn uart_rx_on(u: &Uart, m: &DataMem) -> bool {
-        !u.asleep && m.mem[u.rcsta] & 0x92 == 0x90 && m.mem[u.sta] & 0x10 == 0
-    }
-
-    /// TXIF and TRMT follow the transmitter state.
-    fn uart_bits(u: &Uart, m: &mut DataMem) {
-        let txen = m.mem[u.sta] & 0x20 != 0;
-        if txen && u.pending.is_none() { u.flag.set(m) } else { u.flag.clear(m) }
-        if u.tsr_end.is_none() { m.mem[u.sta] |= 2 } else { m.mem[u.sta] &= !2 }
-        // RCIF: receiver enabled and an unread character in the FIFO (29.1.2.3). FERR and RX9D describe the top one.
-        let (w, fe) = u.fifo.front().copied().unwrap_or((0, false));
-        if m.mem[u.rcsta] & 0x90 == 0x90 && !u.fifo.is_empty() { u.rcflag.set(m) } else { u.rcflag.clear(m) }
-        m.mem[u.rcsta] = m.mem[u.rcsta] & !5 | u8::from(fe) << 2 | (w >> 8) as u8 & 1;
-        if u.rx_cur.is_none() { m.mem[u.baud] |= 0x40 } else { m.mem[u.baud] &= !0x40 }
-    }
-
-    /// Receiver: start the next queued character when the line is free, finish the one in flight.
-    /// `[A9]` a character is taken into the FIFO when its Stop bit has been sampled, half a bit time into the Stop bit
-    /// (29.1.2.2); a character whose Start bit falls while the receiver is off is lost, as the hardware waits for
-    /// the next falling edge. Returns the cycles at which RCIF rose.
-    fn uart_rx(u: &mut Uart, m: &mut DataMem, now: u64, ev: &mut Vec<u64>) {
-        loop {
-            if let Some((end, word, fe)) = u.rx_cur {
-                if end > now {
-                    return;
-                }
-                u.rx_cur = None;
-                let skip = m.mem[u.rcsta] & 0x48 == 0x48 && word & 0x100 == 0; // ADDEN with RX9: only address bytes
-                if skip {
-                    continue;
-                }
-                if u.fifo.len() < 2 {
-                    u.fifo.push_back((word, fe));
-                    ev.push(end);
-                } else {
-                    m.mem[u.rcsta] |= 2; // third character complete before the FIFO was read: OERR
-                }
-                continue;
-            }
-            let Some(st) = u.rx_in.front_mut() else { return };
-            let start = st.at.max(u.rx_free);
-            if start > now {
-                return;
-            }
-            let Some(word) = st.words.pop_front() else {
-                u.rx_in.pop_front();
-                continue;
-            };
-            let bit = st.bit.unwrap_or_else(|| Self::uart_bit_cycles(u, m));
-            let st = u.rx_in.front_mut().unwrap();
-            let n = if st.nine { 11 } else { 10 };
-            u.rx_free = bit.saturating_mul(n).saturating_add(start).saturating_add(st.gap);
-            st.at = u.rx_free;
-            let (bad, nine) = (st.bad_stop, st.nine);
-            if Self::uart_rx_on(u, m) {
-                // The receiver's own width decides how many bits it takes in; the sender's decides the timing.
-                let nr = if m.mem[u.rcsta] & 0x40 != 0 { 11 } else { 10 };
-                let word = if nine && nr == 11 { word & 0x1FF } else { word & 0xFF };
-                u.rx_cur = Some((start.saturating_add(bit.saturating_mul(2 * nr - 1) / 2), word, bad));
-            }
         }
     }
 
@@ -1262,7 +1144,7 @@ impl Periph {
             self.t1[i].sleep_run = self.t1_sleep_ok(m, i);
         }
         for u in &mut self.uarts {
-            (u.asleep, u.rx_cur) = (true, None);
+            u.sleep(true, 0);
         }
         for q in &mut self.quarts {
             q.sleep(true);
@@ -1280,7 +1162,7 @@ impl Periph {
         self.cmp_scan(m, now);
         self.apply_sched(m, now, &mut ev);
         for u in &mut self.uarts {
-            Self::uart_rx(u, m, now, &mut ev);
+            u.rx(&mut m.mem, now, &mut ev);
         }
         for q in &mut self.quarts {
             q.sync_asleep(m, now, &mut ev);
@@ -1325,10 +1207,7 @@ impl Periph {
             c.scan += d;
         }
         for u in &mut self.uarts {
-            u.asleep = false;
-            if let Some(e) = &mut u.tsr_end {
-                *e += d;
-            }
+            u.sleep(false, d);
         }
         for q in &mut self.quarts {
             q.sleep(false);
@@ -2193,19 +2072,7 @@ impl Periph {
             }
         }
         for u in &mut self.uarts {
-            if m.mem[u.sta] & 0x10 != 0 {
-                self.notes.insert(format!("EUSART{} synchronous mode is not modelled; nothing is sent", u.num));
-            }
-            while let Some(e) = u.tsr_end.filter(|e| *e <= now) {
-                u.tsr_end = None;
-                if let Some(b) = u.pending.take() {
-                    self.tx.push((u.num, e, b));
-                    u.tsr_end = Some(e + Self::uart_char_cycles(u, m));
-                    ev.push(e);
-                }
-            }
-            Self::uart_rx(u, m, now, &mut ev);
-            Self::uart_bits(u, m);
+            u.sync(&mut m.mem, now, &mut ev, &mut self.tx, &mut self.notes);
         }
         for q in &mut self.quarts {
             q.sync(m, now, &mut ev, &mut self.tx, &mut self.notes);
@@ -2293,12 +2160,7 @@ impl Periph {
             }
             UART0..=39 => {
                 let u = &mut self.uarts[usize::from(k - UART0) / usize::from(UART_HOOKS)];
-                // `[A10]` An empty FIFO reads the last character again (the data sheet does not say).
-                if let Some((w, _)) = u.fifo.pop_front() {
-                    m.mem[u.rcreg] = w as u8;
-                }
-                Self::uart_bits(u, m);
-                m.mem[u.rcreg]
+                u.read_rc(&mut m.mem)
             }
             _ => unreachable!("read of hook {k} has no model"),
         }
@@ -2338,7 +2200,10 @@ impl Periph {
                 self.flash_event(now);
             }
             k if wdt_dec(k).is_some() => self.wdt_write(wdt_dec(k).unwrap(), v, now, m),
-            UART0..=39 => self.uart_write(k, v, now, m),
+            UART0..=39 => {
+                let (i, sub) = (usize::from(k - UART0) / usize::from(UART_HOOKS), (k - UART0) % UART_HOOKS);
+                self.uarts[i].write(sub, v, now, &mut m.mem, &mut self.tx);
+            }
             SPI0..SPI_END => {
                 let i = usize::from(k - SPI0) / usize::from(spi::HOOKS);
                 self.spis[i].write((k - SPI0) % spi::HOOKS, v, now, m);
@@ -2527,48 +2392,6 @@ impl Periph {
             }
             _ => unreachable!("write of hook {k} has no model"),
         }
-    }
-
-    fn uart_write(&mut self, k: u8, v: u8, now: u64, m: &mut DataMem) {
-        let (i, sub) = (usize::from(k - UART0) / usize::from(UART_HOOKS), (k - UART0) % UART_HOOKS);
-        let u = &mut self.uarts[i];
-        match sub {
-            0 => {
-                m.mem[u.reg] = v;
-                if m.mem[u.sta] & 0x20 != 0 {
-                    if u.tsr_end.is_none() {
-                        self.tx.push((u.num, now, v));
-                        u.tsr_end = Some(now + Self::uart_char_cycles(u, m));
-                    } else {
-                        u.pending = Some(v);
-                    }
-                }
-            }
-            1 => {
-                m.mem[u.sta] = v & !2 | m.mem[u.sta] & 2; // TRMT is read only
-                if v & 0x20 == 0 {
-                    u.tsr_end = None;
-                    u.pending = None;
-                }
-            }
-            2 => m.mem[u.baud] = v & !0xC0 | m.mem[u.baud] & 0xC0, // ABDOVF and RCIDL are read only
-            3 => {} // RCREG is read only
-            _ => {
-                // OERR, FERR and RX9D belong to the hardware. `[A11]` Clearing CREN clears OERR and abandons the
-                // character in flight (the FIFO keeps its characters); clearing SPEN resets the receiver.
-                let mut new = v & !7 | m.mem[u.rcsta] & 7;
-                if v & 0x80 == 0 {
-                    u.fifo.clear();
-                    u.rx_cur = None;
-                    new &= !7;
-                } else if v & 0x10 == 0 {
-                    u.rx_cur = None;
-                    new &= !2;
-                }
-                m.mem[u.rcsta] = new;
-            }
-        }
-        Self::uart_bits(u, m);
     }
 
     /// Start a conversion at cycle `t`: end cycle and the code it will load.
