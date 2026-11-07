@@ -41,7 +41,6 @@
 //! * `[A50]` An SSPxBUF write with SSPEN = 0 only fills SSPxBUF.
 
 use super::{addr, Flag};
-use crate::mem::DataMem;
 use devdesc::Device;
 use std::collections::{BTreeSet, VecDeque};
 
@@ -138,8 +137,21 @@ impl Mssp {
         Some((s, regs))
     }
 
-    fn en(&self, m: &DataMem) -> bool {
-        m.mem[self.con1] & 0x20 != 0
+    /// The SSPxIF flag: register address and mask.
+    pub fn sspif(&self) -> (usize, u8) {
+        (self.sspif.addr, self.sspif.mask)
+    }
+
+    /// A reset of the part: whatever was in flight is gone (the registers take their reset values elsewhere).
+    pub fn abort(&mut self) {
+        self.steps.clear();
+        self.expect_addr = false;
+        self.sel = None;
+        self.read_idx = None;
+    }
+
+    fn en(&self, m: &[u8]) -> bool {
+        m[self.con1] & 0x20 != 0
     }
 
     /// The part slept for `d` cycles with the module's clock stopped: everything in flight is `d` cycles later.
@@ -153,16 +165,16 @@ impl Mssp {
     }
 
     /// Cycles of `k` TBRG from `t`.
-    fn tbrg(&self, m: &DataMem, t: u64, k: u64) -> u64 {
-        t + (k * (u64::from(m.mem[self.add]) + 1)).div_ceil(2)
+    fn tbrg(&self, m: &[u8], t: u64, k: u64) -> u64 {
+        t + (k * (u64::from(m[self.add]) + 1)).div_ceil(2)
     }
 
     /// Apply the steps due up to cycle `now`.
-    pub fn sync(&mut self, m: &mut DataMem, now: u64, ev: &mut Vec<u64>, spi_log: &mut Vec<(u8, u64, u8)>, i2c_log: &mut Vec<(u8, u64, I2cEv)>, notes: &mut BTreeSet<String>) {
+    pub fn sync(&mut self, m: &mut [u8], now: u64, ev: &mut Vec<u64>, spi_log: &mut Vec<(u8, u64, u8)>, i2c_log: &mut Vec<(u8, u64, I2cEv)>, notes: &mut BTreeSet<String>) {
         if !self.en(m) {
             return;
         }
-        let mode = m.mem[self.con1] & 15;
+        let mode = m[self.con1] & 15;
         if !matches!(mode, 0..=3 | 8 | 10) {
             notes.insert(format!("MSSP{} mode SSPM = {mode:04b} (slave, firmware controlled host) is not modelled", self.num));
             return;
@@ -176,31 +188,31 @@ impl Mssp {
                 Step::SpiDone(sent, start) => {
                     let got = self.spi.data.pop_front().unwrap_or(self.spi.fill);
                     spi_log.push((self.num, start, sent));
-                    m.mem[self.buf] = got;
-                    m.mem[self.stat] |= 1;
-                    self.sspif.set(m);
+                    m[self.buf] = got;
+                    m[self.stat] |= 1;
+                    self.sspif.set_in(m);
                     ev.push(t);
                 }
                 Step::StartS(restart) => {
-                    m.mem[self.stat] = m.mem[self.stat] & !0x10 | 8;
+                    m[self.stat] = m[self.stat] & !0x10 | 8;
                     self.expect_addr = true;
                     self.sel = None;
                     i2c_log.push((self.num, t, if restart { I2cEv::Restart } else { I2cEv::Start }));
                 }
                 Step::StopP => {
-                    m.mem[self.stat] = m.mem[self.stat] & !8 | 0x10;
+                    m[self.stat] = m[self.stat] & !8 | 0x10;
                     self.expect_addr = false;
                     self.sel = None;
                     i2c_log.push((self.num, t, I2cEv::Stop));
                 }
-                Step::TxBf => m.mem[self.stat] &= !1,
+                Step::TxBf => m[self.stat] &= !1,
                 Step::TxAck(b) => {
                     let ack = self.client_write(b, t, i2c_log);
-                    m.mem[self.con2] = m.mem[self.con2] & !0x40 | u8::from(!ack) << 6;
+                    m[self.con2] = m[self.con2] & !0x40 | u8::from(!ack) << 6;
                 }
                 Step::TxDone => {
-                    m.mem[self.stat] &= !4;
-                    self.sspif.set(m);
+                    m[self.stat] &= !4;
+                    self.sspif.set_in(m);
                     ev.push(t);
                 }
                 Step::RxDone => {
@@ -211,16 +223,16 @@ impl Mssp {
                         }
                         _ => 0xFF,
                     };
-                    let (bf, ov, boen) = (m.mem[self.stat] & 1 != 0, m.mem[self.con1] & 0x40 != 0, m.mem[self.con3] & 0x10 != 0);
+                    let (bf, ov, boen) = (m[self.stat] & 1 != 0, m[self.con1] & 0x40 != 0, m[self.con3] & 0x10 != 0);
                     if bf {
-                        m.mem[self.con1] |= 0x40; // SSPOV
+                        m[self.con1] |= 0x40; // SSPOV
                     }
                     if !ov || boen {
-                        m.mem[self.buf] = b;
+                        m[self.buf] = b;
                     }
-                    m.mem[self.stat] |= 1;
-                    m.mem[self.con2] &= !8;
-                    self.sspif.set(m);
+                    m[self.stat] |= 1;
+                    m[self.con2] &= !8;
+                    self.sspif.set_in(m);
                     ev.push(t);
                     self.read_idx = Some(i2c_log.len());
                     i2c_log.push((self.num, t, I2cEv::Read(b, true)));
@@ -231,13 +243,13 @@ impl Mssp {
                     {
                         i2c_log[i].2 = I2cEv::Read(b, !nack);
                     }
-                    m.mem[self.con2] &= !0x10;
-                    self.sspif.set(m);
+                    m[self.con2] &= !0x10;
+                    self.sspif.set_in(m);
                     ev.push(t);
                 }
                 Step::Finish(bit) => {
-                    m.mem[self.con2] &= !bit;
-                    self.sspif.set(m);
+                    m[self.con2] &= !bit;
+                    self.sspif.set_in(m);
                     ev.push(t);
                 }
             }
@@ -259,28 +271,28 @@ impl Mssp {
         }
     }
 
-    pub fn read_buf(&mut self, m: &mut DataMem) -> u8 {
-        m.mem[self.stat] &= !1;
-        m.mem[self.buf]
+    pub fn read_buf(&mut self, m: &mut [u8]) -> u8 {
+        m[self.stat] &= !1;
+        m[self.buf]
     }
 
-    pub fn write(&mut self, sub: u8, v: u8, now: u64, m: &mut DataMem, notes: &mut BTreeSet<String>) {
+    pub fn write(&mut self, sub: u8, v: u8, now: u64, m: &mut [u8], notes: &mut BTreeSet<String>) {
         let en = self.en(m);
         let busy = !self.steps.is_empty();
         match sub {
             BUF => {
                 if !en {
-                    m.mem[self.buf] = v; // [A50]
+                    m[self.buf] = v; // [A50]
                     return;
                 }
-                match m.mem[self.con1] & 15 {
+                match m[self.con1] & 15 {
                     0..=3 | 10 => {
                         if busy {
-                            m.mem[self.con1] |= 0x80; // WCOL
+                            m[self.con1] |= 0x80; // WCOL
                             return;
                         }
-                        m.mem[self.buf] = v;
-                        let cycles = match m.mem[self.con1] & 15 {
+                        m[self.buf] = v;
+                        let cycles = match m[self.con1] & 15 {
                             1 => 4,
                             2 => 16,
                             3 => {
@@ -288,10 +300,10 @@ impl Mssp {
                                 1
                             }
                             10 => {
-                                if m.mem[self.add] == 0 {
+                                if m[self.add] == 0 {
                                     notes.insert(format!("MSSP{} SSPxADD = 0 is not supported as SPI clock (runs as 1)", self.num));
                                 }
-                                u64::from(m.mem[self.add]) + 1
+                                u64::from(m[self.add]) + 1
                             }
                             _ => 1,
                         };
@@ -299,49 +311,49 @@ impl Mssp {
                     }
                     8 => {
                         if busy {
-                            m.mem[self.con1] |= 0x80;
+                            m[self.con1] |= 0x80;
                             return;
                         }
-                        m.mem[self.buf] = v;
-                        m.mem[self.stat] |= 5; // BF, R/W
+                        m[self.buf] = v;
+                        m[self.stat] |= 5; // BF, R/W
                         let t = |k| self.tbrg(m, now, k);
                         let steps = [(t(16), Step::TxBf), (t(17), Step::TxAck(v)), (t(18), Step::TxDone)];
                         self.steps.extend(steps);
                     }
-                    _ => m.mem[self.buf] = v,
+                    _ => m[self.buf] = v,
                 }
             }
-            STAT => m.mem[self.stat] = m.mem[self.stat] & 0x3F | v & 0xC0,
+            STAT => m[self.stat] = m[self.stat] & 0x3F | v & 0xC0,
             CON1 => {
-                let old = m.mem[self.con1];
+                let old = m[self.con1];
                 // WCOL and SSPOV are set by hardware only; software can clear them.
-                m.mem[self.con1] = v & 0x3F | old & v & 0xC0;
+                m[self.con1] = v & 0x3F | old & v & 0xC0;
                 if (old & 0x20 != 0 && v & 0x20 == 0) || (old ^ v) & 15 != 0 {
                     // SSPEN cleared or SSPM changed: abort, clear BF, S, P, R/W. [A49]
                     self.steps.clear();
-                    m.mem[self.stat] &= 0xC0;
-                    m.mem[self.con2] &= !0x1F;
+                    m[self.stat] &= 0xC0;
+                    m[self.con2] &= !0x1F;
                     self.expect_addr = false;
                     self.sel = None;
                     self.read_idx = None;
                 }
             }
             CON2 => {
-                if !(en && m.mem[self.con1] & 15 == 8) {
-                    m.mem[self.con2] = v;
+                if !(en && m[self.con1] & 15 == 8) {
+                    m[self.con2] = v;
                     return;
                 }
                 if busy {
                     // The five enable bits are locked while active.
-                    m.mem[self.con2] = v & 0xE0 | m.mem[self.con2] & 0x1F;
+                    m[self.con2] = v & 0xE0 | m[self.con2] & 0x1F;
                     return;
                 }
-                if m.mem[self.add] < 3 {
+                if m[self.add] < 3 {
                     notes.insert(format!("MSSP{} SSPxADD below 3 is not valid for the I2C baud rate generator", self.num));
                 }
                 let x = v & 0x1F;
                 let bit = x & x.wrapping_neg(); // lowest set bit [A47]
-                m.mem[self.con2] = v & 0xE0 | bit;
+                m[self.con2] = v & 0xE0 | bit;
                 let t = |k| self.tbrg(m, now, k);
                 let steps: Vec<(u64, Step)> = match bit {
                     0x01 => vec![(t(1), Step::StartS(false)), (t(2), Step::Finish(0x01))],
@@ -353,8 +365,8 @@ impl Mssp {
                 };
                 self.steps.extend(steps);
             }
-            ADD => m.mem[self.add] = v,
-            CON3 => m.mem[self.con3] = v,
+            ADD => m[self.add] = v,
+            CON3 => m[self.con3] = v,
             _ => {}
         }
     }

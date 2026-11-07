@@ -655,6 +655,34 @@ impl Board {
         held
     }
 
+    /// Marks the bus log as read up to `n` entries (a new wiring starts after what is already there).
+    pub fn set_log_pos(&mut self, n: usize) {
+        self.log_pos = n;
+    }
+
+    /// Hands the OLEDs on hardware I2C buses the bytes the hosts put on the bus since the last call (`log` only grows).
+    pub fn feed_log(&mut self, log: &[(u8, u64, I2cEv)], notes: &mut BTreeSet<String>) {
+        while self.log_pos < log.len() {
+            let (num, _, ev) = log[self.log_pos];
+            self.log_pos += 1;
+            for o in self.oleds.iter_mut().filter(|o| o.bus == Bus::I2c(num)) {
+                match ev {
+                    I2cEv::Start | I2cEv::Restart | I2cEv::Stop => o.in_session = false,
+                    I2cEv::Addr(a, true) if a >> 1 == o.address => {
+                        if a & 1 == 0 {
+                            o.session_start();
+                        } else {
+                            notes.insert(READ_NOTE.into());
+                        }
+                    }
+                    I2cEv::Addr(..) => o.in_session = false,
+                    I2cEv::Write(v, true) => o.byte(v, notes),
+                    _ => {}
+                }
+            }
+        }
+    }
+
     /// Brightness 0..1 of each LED over the time since the last call (the last known state when no time passed).
     pub fn take_window(&mut self) -> Vec<f32> {
         self.leds
@@ -785,25 +813,7 @@ impl Periph {
                 c.absent = !hw.iter().any(|&(k, n, ok)| k + 1 == usize::from(c.tag) && n == s.num && ok);
             }
         }
-        while b.log_pos < self.i2c_log.len() {
-            let (num, _, ev) = self.i2c_log[b.log_pos];
-            b.log_pos += 1;
-            for o in b.oleds.iter_mut().filter(|o| o.bus == Bus::I2c(num)) {
-                match ev {
-                    I2cEv::Start | I2cEv::Restart | I2cEv::Stop => o.in_session = false,
-                    I2cEv::Addr(a, true) if a >> 1 == o.address => {
-                        if a & 1 == 0 {
-                            o.session_start();
-                        } else {
-                            notes.insert(READ_NOTE.into());
-                        }
-                    }
-                    I2cEv::Addr(..) => o.in_session = false,
-                    I2cEv::Write(v, true) => o.byte(v, &mut notes),
-                    _ => {}
-                }
-            }
-        }
+        b.feed_log(&self.i2c_log, &mut notes);
         self.notes.extend(notes);
         self.board = b;
     }

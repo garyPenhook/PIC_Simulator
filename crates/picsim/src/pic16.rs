@@ -13,7 +13,8 @@ use crate::config::Config;
 use crate::periph::adc::Adc;
 use crate::periph::nvm16::Nvm16;
 use crate::periph::uart::{self, Uart};
-use crate::periph::{Board, Bus, Pin, PinView, RxStream};
+use crate::periph::mssp::{self, I2cEv, Mssp};
+use crate::periph::{pin_name, Board, Bus, Pin, PinView, RxStream};
 use devdesc::Device;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -193,6 +194,15 @@ pub struct Pic16 {
     uarts: Vec<Uart>,
     uart_reg: Vec<Option<(u8, u8)>>,
     pub tx: Vec<(u8, u64, u8)>,
+    /// MSSPs (`periph/mssp.rs`, the module of the Q10; I2C host mode drives the OLED on a hardware bus) and, per address,
+    /// which register of which one it is (index, sub-code `mssp::BUF` ..). `i2c_log` is what the hosts put on the bus.
+    mssps: Vec<Mssp>,
+    mssp_reg: Vec<Option<(u8, u8)>>,
+    i2c_log: Vec<(u8, u64, I2cEv)>,
+    spi_log: Vec<(u8, u64, u8)>,
+    /// Per MSSP: (number, SSPxCLKPPS, SSPxDATPPS, SCL1 and SDA1 output codes of RxyPPS); `None` codes when the family's
+    /// table is not known to the simulator.
+    i2c_pps: Vec<(u8, usize, usize, Option<(u8, u8)>)>,
     /// Cycle SLEEP was executed (the EUSARTs owe the cycles of Sleep when the part wakes).
     sleep_at: u64,
     /// The ADC (`periph/adc.rs`, the ADCC of the Q41) and which addresses are its ADCON0 or ADRES (a read of them sees
@@ -324,6 +334,11 @@ impl Pic16 {
             uarts: Vec::new(),
             uart_reg: vec![None; MEM],
             tx: Vec::new(),
+            mssps: Vec::new(),
+            mssp_reg: vec![None; MEM],
+            i2c_log: Vec::new(),
+            spi_log: Vec::new(),
+            i2c_pps: Vec::new(),
             sleep_at: 0,
             adc: None,
             adc_reg: vec![false; MEM],
@@ -490,6 +505,36 @@ impl Pic16 {
                     p.uart_reg[a] = Some((i, sub as u8));
                 }
                 p.uarts.push(u);
+            }
+        }
+        // RxyPPS output codes of SCL1 and SDA1 (Table 18-2: DS40002343F p.202 and DS40002519D p.188 for the PIC16F171xx and
+        // PIC16F131xx; the other families as recorded in lib/i2c.bas from their data sheets).
+        let name = dev.device.name.as_str();
+        let codes = if name.starts_with("PIC16F171") || name.starts_with("PIC16F131") {
+            Some((0x1B, 0x1C))
+        } else if name.starts_with("PIC16F152") {
+            Some((0x07, 0x08))
+        } else if name.starts_with("PIC16F180") {
+            Some((0x15, 0x16))
+        } else if name.starts_with("PIC16F183") {
+            Some((0x18, 0x19))
+        } else {
+            None
+        };
+        for n in 1..=2u8 {
+            if let Some((q, regs)) = Mssp::find(dev, n) {
+                if regs.iter().any(|&a| a >= MEM) {
+                    continue;
+                }
+                let i = p.mssps.len() as u8;
+                for (sub, a) in regs.into_iter().enumerate() {
+                    p.core[a] = true;
+                    p.mssp_reg[a] = Some((i, sub as u8));
+                }
+                if let (Some(c), Some(d)) = (addr(&format!("SSP{n}CLKPPS")), addr(&format!("SSP{n}DATPPS"))) {
+                    p.i2c_pps.push((n, c, d, codes));
+                }
+                p.mssps.push(q);
             }
         }
         if let Some(a) = dev.find_sfr("FVRCON").map(|s| s.addr as usize).filter(|&a| a < MEM) {
@@ -733,6 +778,12 @@ impl Pic16 {
                     self.mem[a] = v;
                     return v;
                 }
+                if let Some((i, sub)) = self.mssp_reg[a] {
+                    self.sync_mssps();
+                    if sub == mssp::BUF {
+                        return self.mssps[usize::from(i)].read_buf(&mut self.mem);
+                    }
+                }
                 if let Some((i, sub)) = self.uart_reg[a] {
                     self.sync_uarts();
                     if sub == uart::RCREG {
@@ -812,6 +863,13 @@ impl Pic16 {
                         self.extra += n.write(k, v, now, &mut self.mem, &mut self.prog, wrtd, &mut self.notes);
                     }
                     self.sync_nvm();
+                } else if let Some((i, sub)) = self.mssp_reg[a] {
+                    self.sync_mssps();
+                    let (now, v) = (self.cycles, v & self.implemented[a]);
+                    let fl = self.mssps[usize::from(i)].sspif();
+                    let before = self.mem[fl.0] & fl.1 != 0;
+                    self.mssps[usize::from(i)].write(sub, v, now, &mut self.mem, &mut self.notes);
+                    self.mssp_flag_after(fl, before);
                 } else if let Some((i, sub)) = self.uart_reg[a] {
                     self.sync_uarts();
                     let before = self.flags_of(i);
@@ -878,8 +936,8 @@ impl Pic16 {
         self.ports.iter().flat_map(|q| (0..8u8).filter(move |b| self.implemented[q.port] >> b & 1 != 0).map(move |b| (q.letter, b))).collect()
     }
 
-    /// Replace the parts on the board (their states start at power-on). The PIC16 model has no I2C host yet, so an OLED
-    /// works on `Bus::Gpio` only; one on a hardware bus stays dark and says why in its `status`.
+    /// Replace the parts on the board (their states start at power-on); an OLED on a hardware I2C bus is registered on
+    /// that MSSP as a client.
     pub fn set_board(&mut self, b: Board) {
         self.board = b.fresh();
         self.board_wiring();
@@ -887,15 +945,54 @@ impl Pic16 {
 
     /// Call after the pins or addresses in `board` were edited.
     pub fn board_wiring(&mut self) {
+        for s in &mut self.mssps {
+            s.i2c.retain(|c| c.tag == 0);
+        }
         self.pullup = vec![0; self.ports.len()];
         self.forced = vec![0; self.ports.len()];
-        for o in self.board.oleds.iter().filter(|o| o.bus == Bus::Gpio) {
-            for p in [o.scl, o.sda] {
-                if let Some(i) = self.ports.iter().position(|q| q.letter == p.0) {
-                    self.pullup[i] |= 1 << p.1;
+        for (k, o) in self.board.oleds.iter().enumerate() {
+            match o.bus {
+                Bus::I2c(n) => {
+                    let c = crate::periph::I2cClient { address: o.address, fill: 0xFF, tag: k as u8 + 1, ..Default::default() }; // a read finds SDA undriven: 0xFF
+                    if let Some(s) = self.mssps.iter_mut().find(|s| s.num == n) {
+                        s.i2c.push(c);
+                    }
+                }
+                Bus::Gpio => {
+                    for p in [o.scl, o.sda] {
+                        if let Some(i) = self.ports.iter().position(|q| q.letter == p.0) {
+                            self.pullup[i] |= 1 << p.1;
+                        }
+                    }
                 }
             }
         }
+        self.board.set_log_pos(self.i2c_log.len());
+    }
+
+    /// Is the OLED `o` on MSSP `num` wired as the code expects: the input selections name its pins and its pins' output
+    /// selections are SCL1 and SDA1? The reason when not.
+    fn hw_wiring(&self, o: &crate::periph::Oled, num: u8) -> Result<(), String> {
+        let Some(&(_, scl_in, sda_in, codes)) = self.i2c_pps.iter().find(|p| p.0 == num) else {
+            return Err(format!("the part has no I2C host {num}"));
+        };
+        let Some((scl_code, sda_code)) = codes else {
+            return Err("the simulator does not know this family's RxyPPS output codes for the MSSP".into());
+        };
+        for (name, inreg, code, pin) in [("SCL", scl_in, scl_code, o.scl), ("SDA", sda_in, sda_code, o.sda)] {
+            let v = self.mem[inreg];
+            let sel: Pin = (b'A' + (v >> 3 & 7), v & 7);
+            if sel != pin {
+                return Err(format!("SSP{num}{}PPS selects {} but the OLED {name} is on {}", if name == "SCL" { "CLK" } else { "DAT" }, pin_name(sel), pin_name(pin)));
+            }
+            let out = self.pps_out.iter().find(|&&(_, pi, bit)| self.ports[pi].letter == pin.0 && bit == pin.1);
+            match out {
+                Some(&(reg, ..)) if self.mem[reg] & 0x3F == code => {}
+                Some(&(reg, ..)) => return Err(format!("{}PPS is {:#04x}, the {name} output code is {code:#04x}", pin_name(pin), self.mem[reg] & 0x3F)),
+                None => return Err(format!("{} has no output selection (RxyPPS)", pin_name(pin))),
+            }
+        }
+        Ok(())
     }
 
     /// Update the parts after an instruction ended at the current cycle.
@@ -903,12 +1000,18 @@ impl Pic16 {
         if self.board.is_empty() {
             return;
         }
+        self.sync_mssps();
         let now = self.cycles;
         let mut b = std::mem::take(&mut self.board);
         let mut notes = BTreeSet::new();
         let held = b.poll_pins(&*self, now, &mut notes);
-        for o in b.oleds.iter_mut().filter(|o| matches!(o.bus, Bus::I2c(_))) {
-            o.status = "the PIC16 model has no I2C host yet; use a GPIO (bit-banged) OLED".into();
+        let mut hw = Vec::new();
+        for (k, o) in b.oleds.iter_mut().enumerate() {
+            if let Bus::I2c(n) = o.bus {
+                let w = self.hw_wiring(o, n);
+                o.status = w.clone().err().unwrap_or_default();
+                hw.push((k, n, w.is_ok()));
+            }
         }
         if !b.oleds.is_empty() {
             let mut forced = vec![0u8; self.ports.len()];
@@ -919,6 +1022,12 @@ impl Pic16 {
             }
             self.forced = forced;
         }
+        for s in &mut self.mssps {
+            for c in s.i2c.iter_mut().filter(|c| c.tag != 0) {
+                c.absent = !hw.iter().any(|&(k, n, ok)| k + 1 == usize::from(c.tag) && n == s.num && ok);
+            }
+        }
+        b.feed_log(&self.i2c_log, &mut notes);
         self.notes.extend(notes);
         self.board = b;
     }
@@ -1033,6 +1142,7 @@ impl Pic16 {
     /// Bring every timer to the current cycle.
     fn sync_timers(&mut self) {
         self.sync_uarts();
+        self.sync_mssps();
         self.sync_adc();
         self.sync_nvm();
         self.sync_t0();
@@ -1048,6 +1158,7 @@ impl Pic16 {
     /// the older Timer2/4/6 (`flag_reg`, `[A110]`).
     fn sync_flag_timers(&mut self) {
         self.sync_uarts();
+        self.sync_mssps();
         self.sync_adc();
         self.sync_nvm();
         for i in 0..self.t1.len() {
@@ -1091,6 +1202,26 @@ impl Pic16 {
         }
     }
 
+    /// Bring the MSSPs to the current cycle (steps of an I2C or SPI operation that are due).
+    fn sync_mssps(&mut self) {
+        let mut ev = Vec::new();
+        for i in 0..self.mssps.len() {
+            let fl = self.mssps[i].sspif();
+            let before = self.mem[fl.0] & fl.1 != 0;
+            self.mssps[i].sync(&mut self.mem, self.cycles, &mut ev, &mut self.spi_log, &mut self.i2c_log, &mut self.notes);
+            self.mssp_flag_after(fl, before);
+        }
+    }
+
+    /// SSPxIF that rose since `before` is raised through `raise_flag`, so that it counts as a request that arrived
+    /// while the program was running.
+    fn mssp_flag_after(&mut self, fl: (usize, u8), before: bool) {
+        if !before && self.mem[fl.0] & fl.1 != 0 {
+            self.mem[fl.0] &= !fl.1;
+            self.raise_flag(fl);
+        }
+    }
+
     /// Bring the ADC to the current cycle: a conversion that has ended loads ADRES, clears GO and raises ADIF (through
     /// `raise_flag`, so it is a request arriving while the program runs, `[A108]`).
     fn sync_adc(&mut self) {
@@ -1130,6 +1261,21 @@ impl Pic16 {
             }
             None => false,
         }
+    }
+
+    /// The part has MSSP `num` (its I2C host mode is modelled).
+    pub fn has_mssp(&self, num: u8) -> bool {
+        self.mssps.iter().any(|q| q.num == num)
+    }
+
+    /// A register read as the program sees it (for tests and tools): the models are brought to the current cycle first.
+    pub fn read(&mut self, a: u32) -> u8 {
+        self.rd(Tgt::Mem(a as usize))
+    }
+
+    /// A register written as the program would (for tests and tools).
+    pub fn write(&mut self, a: u32, v: u8) {
+        self.wr(Tgt::Mem(a as usize), v, false);
     }
 
     /// The part has EUSART `num`.
@@ -1523,6 +1669,7 @@ impl Pic16 {
             u.fifo.clear();
             u.bits(&mut self.mem);
         }
+        self.mssps.iter_mut().for_each(Mssp::abort);
         self.pps_seq = 0;
         self.pc = self.reset_vector;
         self.sleeping = false;
@@ -1612,6 +1759,7 @@ impl Pic16 {
                 if let Some(a) = self.adc.as_mut() {
                     a.shift(slept); // only the ADCRC clock runs in Sleep and it is not modelled: the conversion waits
                 }
+                self.mssps.iter_mut().for_each(|q| q.shift(slept)); // the module's clock stopped
                 for u in &mut self.uarts {
                     u.sleep(false, slept);
                     u.bits(&mut self.mem); // RCIDL, TRMT and the rest are current at once

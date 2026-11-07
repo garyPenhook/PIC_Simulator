@@ -54,7 +54,7 @@
 //! active = "high"     # "high" (default) or "low" (the LED is wired to Vdd through the pin)
 //! name = "LED1"       # optional
 //!
-//! [[oled]]            # an SSD1306 OLED (I2C); on a PIC16 part only bus = "gpio" (the model has no I2C host there yet)
+//! [[oled]]            # an SSD1306 OLED (I2C); on a PIC16 part the hardware bus is the MSSP in I2C host mode
 //! bus = "i2c1"        # "i2c1"/"i2c2": the part's hardware I2C host; "gpio": bit-banged on the pins below
 //! scl = "RC3"         # the PIC pins the OLED is wired to; the code must use the same ones
 //! sda = "RC4"         #   (hardware bus: SSPxCLKPPS/SSPxDATPPS and RxyPPS of both pins; see periph/board.rs)
@@ -360,8 +360,12 @@ impl Stimulus {
         if let Some((n, _)) = other.iter().find(|(_, used)| *used) {
             return Err(format!("{}: [[{n}]] is not modelled on PIC16 parts yet; only [[uart]], [[adc]], [[pin]]/[[port]], [[led]] and [[oled]] are", dev.device.name));
         }
-        if self.board.oleds.iter().any(|o| o.bus != Bus::Gpio) {
-            return Err(format!("{}: a PIC16 part has no I2C host in the simulator yet; an [[oled]] needs bus = \"gpio\" (bit-banged)", dev.device.name));
+        for o in &self.board.oleds {
+            if let Bus::I2c(n) = o.bus
+                && !cpu.has_mssp(n)
+            {
+                return Err(format!("{}: the part has no MSSP{n} in the simulator; an [[oled]] needs bus = \"gpio\" (bit-banged) or an MSSP the part has", dev.device.name));
+            }
         }
         let pins = cpu.pins();
         for p in self.board.leds.iter().map(|l| l.pin).chain(self.board.oleds.iter().flat_map(|o| [o.scl, o.sda])) {

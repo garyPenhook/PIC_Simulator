@@ -37,7 +37,7 @@ mod nvm;
 pub(crate) mod nvm16;
 mod nvmq;
 mod i2cq;
-mod mssp;
+pub(crate) mod mssp;
 mod quart;
 pub(crate) mod uart;
 mod spi;
@@ -49,7 +49,7 @@ use wdt::Wdt;
 use cmp::Cmp;
 use cwg::Cwg;
 use i2cq::I2cQ;
-use mssp::Mssp;
+pub(crate) use mssp::Mssp;
 use nvm::Nvm;
 use nvmq::NvmQ;
 use quart::QUart;
@@ -2024,7 +2024,7 @@ impl Periph {
             q.sync(m, now, &mut ev, &mut self.spi_tx, &mut self.notes);
         }
         for q in &mut self.mssps {
-            q.sync(m, now, &mut ev, &mut self.spi_tx, &mut self.i2c_log, &mut self.notes);
+            q.sync(&mut m.mem, now, &mut ev, &mut self.spi_tx, &mut self.i2c_log, &mut self.notes);
         }
         for q in &mut self.i2cqs {
             q.sync(m, now, &mut ev, &mut self.i2c_log, &mut self.notes);
@@ -2095,7 +2095,7 @@ impl Periph {
             }
             MSSP0..MSSP_END => {
                 let i = usize::from(k - MSSP0) / usize::from(mssp::HOOKS);
-                self.mssps[i].read_buf(m)
+                self.mssps[i].read_buf(&mut m.mem)
             }
             I2CQ0..I2CQ_END => {
                 let i = usize::from(k - I2CQ0) / usize::from(i2cq::HOOKS);
@@ -2153,7 +2153,7 @@ impl Periph {
             }
             MSSP0..MSSP_END => {
                 let i = usize::from(k - MSSP0) / usize::from(mssp::HOOKS);
-                self.mssps[i].write((k - MSSP0) % mssp::HOOKS, v, now, m, &mut self.notes);
+                self.mssps[i].write((k - MSSP0) % mssp::HOOKS, v, now, &mut m.mem, &mut self.notes);
             }
             I2CQ0..I2CQ_END => {
                 let i = usize::from(k - I2CQ0) / usize::from(i2cq::HOOKS);

@@ -1,5 +1,5 @@
-//! LEDs and a bit-banged SSD1306 OLED on the pins of a PIC16 part (`Pic16::set_board`, `periph/board.rs`). The PIC16 model has no
-//! I2C host yet, so an OLED on a hardware bus is refused.
+//! LEDs and an SSD1306 OLED (bit-banged, or on the MSSP's I2C host) on the pins of a PIC16 part (`Pic16::set_board`,
+//! `periph/board.rs`).
 
 use devdesc::Device;
 use picsim::machine16::Machine16;
@@ -73,9 +73,82 @@ fn a_pin_the_part_does_not_have_is_an_error() {
 }
 
 #[test]
-fn an_oled_on_a_hardware_bus_is_refused() {
-    let e = machine("16F17146", "[[oled]]\nbus = \"i2c1\"\nscl = \"RC3\"\nsda = \"RC4\"\n").err().unwrap();
-    assert!(e.contains("gpio"), "{e}");
+fn an_oled_on_an_mssp_the_part_lacks_is_refused() {
+    let e = machine("16F17146", "[[oled]]\nbus = \"i2c3\"\nscl = \"RC3\"\nsda = \"RC4\"\n").err().unwrap();
+    assert!(e.contains("MSSP3"), "{e}");
+}
+
+const HW: &str = "[[oled]]\nbus = \"i2c1\"\nscl = \"RC3\"\nsda = \"RC4\"\n";
+
+fn w(m: &mut Machine16, n: &str, v: u8) {
+    let a = addr(m, n) as u32;
+    m.cpu.write(a, v);
+}
+
+fn run_for(m: &mut Machine16, n: u64) {
+    let c = m.cpu.cycles + n;
+    while m.cpu.cycles < c {
+        m.cpu.pc = 0x100;
+        m.cpu.step();
+    }
+}
+
+/// MSSP1 as the library sets it up: I2C host, SSP1ADD = 9; the pins through PPS (RC3 = 0x13, RC4 = 0x14; SCL1 = 0x1B, SDA1 = 0x1C).
+fn hw(part: &str, scl_in: u8, sda_in: u8, sda_out: u8) -> Machine16 {
+    let mut m = machine(part, HW).unwrap();
+    w(&mut m, "SSP1ADD", 9);
+    w(&mut m, "SSP1CON1", 0x28);
+    w(&mut m, "SSP1CLKPPS", scl_in);
+    w(&mut m, "SSP1DATPPS", sda_in);
+    w(&mut m, "RC3PPS", 0x1B);
+    w(&mut m, "RC4PPS", sda_out);
+    run_for(&mut m, 5);
+    m
+}
+
+fn hw_send(m: &mut Machine16, bytes: &[u8]) {
+    w(m, "SSP1CON2", 1);
+    run_for(m, 10);
+    for &b in bytes {
+        w(m, "SSP1BUF", b);
+        run_for(m, 190);
+    }
+    w(m, "SSP1CON2", 4);
+    run_for(m, 15);
+}
+
+#[test]
+fn hardware_i2c_oled_shows_what_the_code_writes() {
+    let mut m = hw("16F17146", 0x13, 0x14, 0x1C);
+    hw_send(&mut m, &[0x78, 0x00, 0x8D, 0x14, 0xAF]);
+    hw_send(&mut m, &[0x78, 0x40, 0xFF, 0x01]);
+    let o = &m.cpu.board.oleds[0];
+    assert!(o.on, "status {:?}", o.status);
+    assert!((0..8).all(|y| o.pixel(0, y)), "column 0 page 0 all set");
+    assert!(o.pixel(1, 0) && !o.pixel(1, 1), "second byte 0x01");
+    assert_eq!(o.status, "");
+}
+
+#[test]
+fn hardware_i2c_oled_ignores_a_bus_wired_to_other_pins() {
+    let mut m = hw("16F17146", 0x13, 0x15, 0x1C); // SDA input on RC5
+    hw_send(&mut m, &[0x78, 0x00, 0xAF]);
+    let o = &m.cpu.board.oleds[0];
+    assert!(!o.on);
+    assert!(o.status.contains("SSP1DATPPS selects RC5"), "{}", o.status);
+    let mut m = hw("16F17146", 0x13, 0x14, 0x00); // SDA output left on LATC4
+    hw_send(&mut m, &[0x78, 0x00, 0xAF]);
+    assert!(!m.cpu.board.oleds[0].on);
+    assert!(m.cpu.board.oleds[0].status.contains("RC4PPS"), "{}", m.cpu.board.oleds[0].status);
+}
+
+#[test]
+fn the_mssp_flag_is_raised_by_the_bus_and_the_stop_is_logged() {
+    let mut m = hw("16F17146", 0x13, 0x14, 0x1C);
+    hw_send(&mut m, &[0x78, 0x00, 0xAF]);
+    assert!(m.cpu.board.oleds[0].on);
+    // SSP1IF is PIR5 bit 2 on this part; reading SSP1STAT brings the module up to date and S/P show the stop
+    assert_eq!(m.cpu.read(addr(&m, "SSP1STAT") as u32) & 0x18, 0x10, "P set, S clear after the stop");
 }
 
 struct Bb(Machine16, usize, usize, usize);
