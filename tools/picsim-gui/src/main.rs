@@ -504,16 +504,32 @@ impl eframe::App for App {
                     }
                 });
                 ui.add(egui::TextEdit::singleline(&mut self.hex_path).hint_text("path to .hex or .elf").desired_width(320.0));
-                ui.add(egui::TextEdit::singleline(&mut self.stim_path).hint_text("stimulus .toml (optional)").desired_width(180.0));
-                if ui.button("Browse hex/elf…").clicked()
-                    && let Some(f) = rfd::FileDialog::new().add_filter("hex or ELF", &["hex", "elf"]).pick_file()
-                {
-                    self.open_program(&f);
+                ui.add(egui::TextEdit::singleline(&mut self.stim_path).hint_text("stimulus .toml (optional)").desired_width(180.0))
+                    .on_hover_text("Optional. A stimulus file you write to feed the program serial input, ADC values, pin levels, LEDs or an OLED. Leave empty to run without one.");
+                // Start the dialogs in the program's folder, not wherever the desktop last was.
+                let dir_of = |p: &str| std::path::Path::new(p.trim()).parent().filter(|d| d.is_dir()).map(PathBuf::from);
+                let prog_dir = dir_of(&self.hex_path);
+                if ui.button("Browse hex/elf…").clicked() {
+                    let mut d = rfd::FileDialog::new().add_filter("hex or ELF", &["hex", "elf"]);
+                    if let Some(dir) = &prog_dir {
+                        d = d.set_directory(dir);
+                    }
+                    if let Some(f) = d.pick_file() {
+                        self.open_program(&f);
+                    }
                 }
-                if ui.button("Stim…").clicked()
-                    && let Some(f) = rfd::FileDialog::new().add_filter("stimulus", &["toml"]).pick_file()
-                {
-                    self.stim_path = f.display().to_string();
+                if ui.button("Stim…").on_hover_text("Choose a stimulus .toml. The dialog opens in the stimulus file's folder, else the program's folder, else the examples in tests/sim.").clicked() {
+                    let examples = self.devices_dir.join("../tests/sim");
+                    let mut d = rfd::FileDialog::new().add_filter("stimulus", &["toml"]);
+                    if let Some(dir) = dir_of(&self.stim_path).or(prog_dir).or_else(|| examples.is_dir().then_some(examples)) {
+                        d = d.set_directory(dir);
+                    }
+                    if let Some(f) = d.pick_file() {
+                        self.stim_path = f.display().to_string();
+                    }
+                }
+                if !self.stim_path.is_empty() && ui.small_button("x").on_hover_text("Run without a stimulus file").clicked() {
+                    self.stim_path.clear();
                 }
                 if ui.button("Load").clicked() {
                     self.load();
