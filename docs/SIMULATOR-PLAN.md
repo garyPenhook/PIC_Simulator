@@ -94,6 +94,7 @@ yet), PIC16 single vector with automatic context save. Vector addresses from `[v
 ### Front ends
 
 * CLI: `basil-sim prog.hex --device 18F16Q41 --until __halt --dump T_R1,T_R2 --cycles --trace --stim s.toml --vcd out.vcd`
+* Run speed: `basil-sim --speed max|R --fosc MHZ` runs at the fraction R of real time (`1`, `0.5`, `1/10`; default `max`); `pic-sim` has a Speed selector (Max, 1x real time, 1/2 ... 1/1000) that uses its Fosc box. Both use `picsim::pace::Pace` (one cycle = 4 Fosc clocks; a stall is never caught up by more than 0.25 s).
   (symbols from the `.sym` pic-as writes).
 * `exec-test.py --engine=sim|mdb`; `' expect:`, `' cycles:`, `' dma:` lines work unchanged.
 * GUI: `tools/picsim-gui` (`pic-sim`, egui): load a hex, Run/Pause/Step/Step over/Reset, breakpoints by

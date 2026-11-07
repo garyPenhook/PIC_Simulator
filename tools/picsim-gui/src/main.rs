@@ -25,7 +25,10 @@ struct App {
     m16: Option<Machine16>,
     msg: String,
     running: bool,
-    speed: f32, // log10 of cycles per frame
+    speed: f32, // log10 of cycles per frame (used at "Max" run speed)
+    /// Run speed as a fraction of real time (`picsim::pace::SPEEDS`; index 0 = no limit) and its clock.
+    speed_idx: usize,
+    pace: picsim::pace::Pace,
     fosc_mhz: f32,
     view_addr: u32,
     follow: bool,
@@ -87,6 +90,8 @@ impl App {
             msg: String::new(),
             running: false,
             speed: 6.0,
+            speed_idx: 0,
+            pace: picsim::pace::Pace::new(0.0, 64.0),
             fosc_mhz: 64.0,
             view_addr: 0,
             follow: true,
@@ -373,7 +378,20 @@ impl eframe::App for App {
             self.job = keep;
         }
         if self.running {
-            let n = 10f64.powf(f64::from(self.speed)) as u64;
+            // A changed speed or Fosc re-bases the clock (it would otherwise jump); the Run button does the same.
+            let ratio = picsim::pace::SPEEDS[self.speed_idx].1;
+            if ratio != self.pace.ratio || f64::from(self.fosc_mhz) != self.pace.fosc_mhz {
+                self.pace.ratio = ratio;
+                self.pace.fosc_mhz = f64::from(self.fosc_mhz);
+                let c = self.cycles();
+                self.pace.restart(c);
+            }
+            let n = if self.pace.is_max() {
+                10f64.powf(f64::from(self.speed)) as u64
+            } else {
+                let c = self.cycles();
+                self.pace.due(c)
+            };
             let mut left = n;
             while left > 0 && self.running {
                 let chunk = left.min(20_000);
@@ -432,6 +450,10 @@ impl eframe::App for App {
                 if ui.add_enabled(loaded && idle, egui::Button::new("Run")).clicked() {
                     self.snapshot();
                     self.rate = (std::time::Instant::now(), self.cycles(), 0.0);
+                    self.pace.ratio = picsim::pace::SPEEDS[self.speed_idx].1;
+                    self.pace.fosc_mhz = f64::from(self.fosc_mhz);
+                    let c = self.cycles();
+                    self.pace.restart(c);
                     self.running = true;
                     self.last_stop = None;
                 }
@@ -499,7 +521,14 @@ impl eframe::App for App {
                         self.msg = e;
                     }
                 }
-                ui.add(egui::Slider::new(&mut self.speed, 0.0..=7.0).text("cycles/frame (10^x)"));
+                egui::ComboBox::from_id_salt("speed").selected_text(format!("Speed: {}", picsim::pace::SPEEDS[self.speed_idx].0)).show_ui(ui, |ui| {
+                    for (i, (name, _)) in picsim::pace::SPEEDS.iter().enumerate() {
+                        ui.selectable_value(&mut self.speed_idx, i, *name);
+                    }
+                });
+                if self.speed_idx == 0 {
+                    ui.add(egui::Slider::new(&mut self.speed, 0.0..=7.0).text("cycles/frame (10^x)"));
+                }
                 ui.label("Fosc MHz");
                 ui.add(egui::DragValue::new(&mut self.fosc_mhz).range(0.03..=64.0));
             });

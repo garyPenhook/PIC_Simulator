@@ -8,6 +8,7 @@ pub mod lines;
 pub mod machine;
 pub mod machine16;
 pub mod mem;
+pub mod pace;
 pub mod periph;
 pub mod pic16;
 pub mod pic18;

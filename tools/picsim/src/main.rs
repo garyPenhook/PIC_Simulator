@@ -1,6 +1,8 @@
 //! `basil-sim prog.hex|prog.elf --device 18F16Q41 [--asm prog.S] [--until __halt] [--dump T_R1:2,T_R2] [--bp SYM,SYM] [--bp-max N] [--config] [--stim FILE]`
+//! `--speed max|R` limits the run to a fraction R of real time (`1` = real time, `0.5`, `1/10`...) at `--fosc MHZ` (default 64); the default is `max`.
 //! `--bp` prints the cycle count each time one of the symbols is reached (at most `--bp-max`, default 20).
 
+use picsim::pace::{parse_ratio, Pace};
 use picsim::periph::I2cEv;
 use picsim::{Machine, Stop};
 use std::path::PathBuf;
@@ -21,6 +23,7 @@ fn run() -> Result<ExitCode, String> {
     let mut trace: Option<(u64, u64)> = None;
     let (mut bps, mut bp_max) = (Vec::<String>::new(), 20usize);
     let mut show_cfg = false;
+    let (mut speed, mut fosc) = (0.0f64, 64.0f64);
     let mut stim = None::<PathBuf>;
     let (mut hex, mut device, mut asm, mut until, mut dump, mut max) =
         (None::<PathBuf>, String::from("18F27Q10"), None::<PathBuf>, Some(String::from("__halt")), Vec::new(), 2_000_000_000u64);
@@ -43,6 +46,13 @@ fn run() -> Result<ExitCode, String> {
                 trace = Some((a.parse().map_err(|_| "bad --trace")?, b.parse().map_err(|_| "bad --trace")?));
             }
             "--config" => show_cfg = true,
+            "--speed" => speed = parse_ratio(&val("--speed")?)?,
+            "--fosc" => {
+                fosc = val("--fosc")?.parse().map_err(|_| "bad --fosc (MHz)")?;
+                if !(fosc > 0.0 && fosc <= 64.0) {
+                    return Err("--fosc must be in 0..64 MHz".into());
+                }
+            }
             "--stim" => stim = Some(PathBuf::from(val("--stim")?)),
             "--bp" => bps = val("--bp")?.split(',').map(String::from).collect(),
             "--bp-max" => bp_max = val("--bp-max")?.parse().map_err(|_| "bad --bp-max")?,
@@ -51,13 +61,14 @@ fn run() -> Result<ExitCode, String> {
             _ => hex = Some(PathBuf::from(a)),
         }
     }
-    let hex = hex.ok_or("usage: basil-sim prog.hex --device PART [--asm prog.S] [--until SYM] [--dump A,B:2]")?;
+    let mut pace = if speed > 0.0 { Some(Pace::new(speed, fosc)) } else { None };
+    let hex = hex.ok_or("usage: basil-sim prog.hex --device PART [--asm prog.S] [--until SYM] [--dump A,B:2] [--speed max|R] [--fosc MHZ]")?;
     let dev = devdesc::Device::load(&root.join(format!("{device}.toml"))).map_err(|e| e.to_string())?;
     if dev.device.family == "pic16e" {
         if show_cfg {
             return Err("--config is not supported for PIC16 parts yet".into());
         }
-        return run16(dev, &hex, asm, stim, until, &dump, max, trace, &bps, bp_max);
+        return run16(dev, &hex, asm, stim, until, &dump, max, trace, &bps, bp_max, &mut pace);
     }
     let mut m = Machine::new(dev)?;
     let given = hex.clone();
@@ -108,7 +119,10 @@ fn run() -> Result<ExitCode, String> {
         let a = *m.syms.get(b).ok_or(format!("symbol {b} not found"))?;
         m.breakpoints.push(a);
     }
-    let mut stop = m.run(stop_at, max);
+    if let Some(p) = pace.as_mut() {
+        p.restart(m.cpu.cycles);
+    }
+    let mut stop = paced_run(&mut pace, max, &mut m, |m| m.cpu.cycles, |m, n| m.run(stop_at, n));
     let mut n = 0;
     while let Stop::Breakpoint(pc) = stop {
         n += 1;
@@ -119,7 +133,7 @@ fn run() -> Result<ExitCode, String> {
             break;
         }
         let left = max.saturating_sub(m.cpu.cycles);
-        stop = m.run(stop_at, left);
+        stop = paced_run(&mut pace, left, &mut m, |m| m.cpu.cycles, |m, n| m.run(stop_at, n));
     }
     println!("stop: {stop:?}  cycles: {}  instructions: {}", m.cpu.cycles, m.cpu.icount);
     for d in &dump {
@@ -221,6 +235,7 @@ fn run16(
     trace: Option<(u64, u64)>,
     bps: &[String],
     bp_max: usize,
+    pace: &mut Option<Pace>,
 ) -> Result<ExitCode, String> {
     let mut m = picsim::machine16::Machine16::new(dev)?;
     let hex = picsim::lines::program_hex(hex)?;
@@ -250,7 +265,10 @@ fn run16(
     for b in bps {
         m.breakpoints.push(*m.syms.get(b).ok_or(format!("symbol {b} not found"))?);
     }
-    let mut stop = m.run(stop_at, max);
+    if let Some(p) = pace.as_mut() {
+        p.restart(m.cpu.cycles);
+    }
+    let mut stop = paced_run(pace, max, &mut m, |m| m.cpu.cycles, |m, n| m.run(stop_at, n));
     let mut n = 0;
     while let Stop::Breakpoint(pc) = stop {
         n += 1;
@@ -260,7 +278,7 @@ fn run16(
             break;
         }
         let left = max.saturating_sub(m.cpu.cycles);
-        stop = m.run(stop_at, left);
+        stop = paced_run(pace, left, &mut m, |m| m.cpu.cycles, |m, n| m.run(stop_at, n));
     }
     println!("stop: {stop:?}  cycles: {}  instructions: {}", m.cpu.cycles, m.cpu.icount);
     for d in dump {
@@ -283,4 +301,31 @@ fn run16(
         eprintln!("note: unmodelled SFRs touched: {}", m.cpu.unmodelled.iter().cloned().collect::<Vec<_>>().join(" "));
     }
     Ok(if stop == Stop::Halt || until.is_none() { ExitCode::SUCCESS } else { ExitCode::from(1) })
+}
+
+/// `run(budget)` limited to the `--speed` fraction of real time: the budget is spent in slices as the clock allows. Stops as `run` does
+/// (halt, breakpoint, ...) or with `Stop::Cycles` when `budget` cycles have run.
+fn paced_run<M>(pace: &mut Option<Pace>, budget: u64, m: &mut M, cycles: impl Fn(&M) -> u64, mut run: impl FnMut(&mut M, u64) -> Stop) -> Stop {
+    let Some(p) = pace.as_mut() else {
+        return run(m, budget);
+    };
+    let start = cycles(m);
+    if p.is_max() {
+        return run(m, budget);
+    }
+    loop {
+        let left = budget.saturating_sub(cycles(m) - start);
+        if left == 0 {
+            return Stop::Cycles;
+        }
+        let due = p.due(cycles(m)).min(left).min(20_000);
+        if due == 0 {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+            continue;
+        }
+        match run(m, due) {
+            Stop::Cycles => {}
+            s => return s,
+        }
+    }
 }
