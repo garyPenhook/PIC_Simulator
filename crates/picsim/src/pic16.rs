@@ -238,6 +238,12 @@ pub struct Pic16 {
     pub board: Board,
     pullup: Vec<u8>,
     forced: Vec<u8>,
+    /// Interrupt-on-change `[A125]`: (index into `ports`, IOCxF, IOCxN, IOCxP), the IOCIF flag, and the INT pin: (INTPPS,
+    /// INTF flag, INTEDG register and mask). `ioc_at` is the cycle the pins have been looked at up to.
+    ioc: Vec<(usize, usize, usize, usize)>,
+    iocif: Option<(usize, u8)>,
+    int_pin: Option<(usize, (usize, u8), usize, u8)>,
+    ioc_at: u64,
 }
 
 fn por_bits(s: &str) -> u8 {
@@ -358,6 +364,10 @@ impl Pic16 {
             board: Board::default(),
             pullup: Vec::new(),
             forced: Vec::new(),
+            ioc: Vec::new(),
+            iocif: None,
+            int_pin: None,
+            ioc_at: 0,
         };
         for g in &d.gpr {
             for a in g.start..g.end {
@@ -612,6 +622,17 @@ impl Pic16 {
                 p.ones[t] |= m;
                 p.mem[t] |= m;
             }
+        }
+        for i in 0..p.ports.len() {
+            let l = char::from(p.ports[i].letter);
+            if let (Some(f), Some(n), Some(pp)) = (addr(&format!("IOC{l}F")), addr(&format!("IOC{l}N")), addr(&format!("IOC{l}P"))) {
+                p.ioc.push((i, f, n, pp));
+            }
+        }
+        p.iocif = flag_of("IOCIF");
+        let edg = dev.sfr.iter().find_map(|s| s.fields.iter().find(|f| f.name == "INTEDG").map(|f| (s.addr as usize, 1u8 << f.pos)));
+        if let (Some(pps), Some(flag), Some((ea, em))) = (addr("INTPPS"), flag_of("INTF"), edg) {
+            p.int_pin = Some((pps, flag, ea, em));
         }
         // PPS: the selection registers are xxxPPS and RxyPPS; PPSLOCK is the lock.
         p.pps_lock = addr("PPSLOCK").filter(|&a| a < MEM);
@@ -906,10 +927,15 @@ impl Pic16 {
     /// until a stimulus says otherwise `[A16]`) and 0 when ANSELx makes it analog (DS40002343F 16.5: the digital input is
     /// off). A pin whose RxyPPS selects a source other than LATxy still shows its latch `[A120]`.
     fn port_levels(&self, i: usize) -> u8 {
+        self.port_levels_at(i, self.cycles)
+    }
+
+    /// `port_levels` with the outside world as it was driving at cycle `t` (the registers are the current ones).
+    fn port_levels_at(&self, i: usize, t: u64) -> u8 {
         let p = &self.ports[i];
         let mut ext = 0u8;
         for &(at, pi, mask, val) in &self.drive {
-            if at <= self.cycles && pi == i {
+            if at <= t && pi == i {
                 ext = ext & !mask | val & mask;
             }
         }
@@ -1035,9 +1061,54 @@ impl Pic16 {
     /// The pin level an input selection register (PORT field at bits 5:3, PIN at 2:0; the PIC16F183xx has 5 bits and the
     /// same layout, DS40002343F Register 18-1, DS40001839E Register 13-1) selects. `None` when it names no pin of the part.
     pub fn pps_input(&self, reg: usize) -> Option<bool> {
+        self.pps_input_at(reg, self.cycles)
+    }
+
+    fn pps_input_at(&self, reg: usize, t: u64) -> Option<bool> {
         let v = self.mem[reg];
         let i = self.ports.iter().position(|p| p.letter == b'A' + (v >> 3 & 7))?;
-        Some(self.port_levels(i) >> (v & 7) & 1 != 0)
+        Some(self.port_levels_at(i, t) >> (v & 7) & 1 != 0)
+    }
+
+    /// Interrupt-on-change and the INT pin `[A125]`: the changes the stimulus made to the pins since the last look (up to
+    /// the current cycle, also while asleep) set the IOCxF bits whose edge is enabled, and INTF on the INTEDG edge of the
+    /// INTPPS pin, whatever the enable bits say; IOCIF follows the IOCxF registers (read only).
+    fn ioc_scan(&mut self) {
+        let (from, now) = (self.ioc_at, self.cycles);
+        self.ioc_at = now;
+        if self.ioc.is_empty() && self.int_pin.is_none() {
+            return;
+        }
+        let mut times: Vec<u64> = self.drive.iter().map(|d| d.0).filter(|&t| t > from && t <= now).collect();
+        times.sort_unstable();
+        times.dedup();
+        // With MCLRE = 1 or LVP = 1 the MCLR pin has no port function and no IOC (Register 17.7.1 Important)
+        let mclr_off = self.cfg.get("MCLRE") == Some(1) || self.cfg.get("LVP") == Some(1);
+        for t in times {
+            for k in 0..self.ioc.len() {
+                let (pi, f, n, pp) = self.ioc[k];
+                let off = self.mclr_pin.filter(|&(q, _)| q == pi && mclr_off).map_or(0, |(_, m)| m);
+                let (old, new) = (self.port_levels_at(pi, t - 1), self.port_levels_at(pi, t));
+                let hit = (old ^ new) & (new & self.mem[pp] | !new & self.mem[n]) & !off & self.implemented[f];
+                if hit != 0 {
+                    self.mem[f] |= hit;
+                }
+            }
+            if let Some((pps, flag, ea, em)) = self.int_pin {
+                if let (Some(old), Some(new)) = (self.pps_input_at(pps, t - 1), self.pps_input_at(pps, t)) {
+                    if old != new && new == (self.mem[ea] & em != 0) {
+                        self.raise_flag(flag);
+                    }
+                }
+            }
+        }
+        if let Some((r, b)) = self.iocif {
+            if self.ioc.iter().any(|&(_, f, ..)| self.mem[f] != 0) {
+                self.raise_flag((r, b));
+            } else {
+                self.mem[r] &= !b;
+            }
+        }
     }
 
     /// A write to PPSLOCK. 55h then AAh (consecutive writes to PPSLOCK) arm the next write, whose bit 0 sets or clears
@@ -1671,6 +1742,7 @@ impl Pic16 {
         }
         self.mssps.iter_mut().for_each(Mssp::abort);
         self.pps_seq = 0;
+        self.ioc_at = self.cycles; // the pins are not watched during a Reset
         self.pc = self.reset_vector;
         self.sleeping = false;
         self.no_irq = false;
@@ -1733,7 +1805,8 @@ impl Pic16 {
 
     /// Asleep with nothing that can wake the part (no watchdog or peripheral is modelled yet).
     pub fn sleep_dead(&self) -> bool {
-        self.sleeping && !self.enabled_flag_any()
+        // a pin the stimulus has yet to change can raise an IOC or INT flag
+        self.sleeping && !self.enabled_flag_any() && !self.drive.iter().any(|d| d.0 > self.cycles)
     }
 
     /// A PIE & PIR bit pair is set (the wake-up condition; GIE and PEIE do not matter, 12.7 p.113).
@@ -1746,6 +1819,7 @@ impl Pic16 {
     /// Execute one instruction (or take one interrupt); returns the cycles it took (also added to `self.cycles`).
     pub fn step(&mut self) -> u32 {
         let n = self.step_core();
+        self.ioc_scan();
         self.board_poll();
         n
     }

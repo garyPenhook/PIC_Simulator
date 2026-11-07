@@ -1,6 +1,6 @@
 //! Structures, unions, enumerations, pointers and bit-fields in variables built with MPLAB XC8 (`xc8-cc -g -O0`).
 //! Fixtures `data/xc8_types_q10.*` (PIC18F27Q10) and `data/xc8_types_p16.*` (PIC16F17146) are built from the same program,
-//! `data/xc8_types_TAG.c`: `xc8-cc -mcpu=PART -mdfp=DFP -g -O0 xc8_types_TAG.c -o xc8_types_TAG.elf`. Both run to the final loop.
+//! `data/xc8_types_TAG.c` (`xc8_types_p16.c` is an identical copy of `xc8_types_q10.c`): `xc8-cc -mcpu=PART -mdfp=DFP -g -O0 xc8_types_TAG.c -o xc8_types_TAG.elf`. Both run to the final loop.
 
 use devdesc::Device;
 use picsim::debuginfo::DebugInfo;

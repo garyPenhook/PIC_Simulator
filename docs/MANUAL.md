@@ -310,6 +310,7 @@ The globals of the program and the parameters and locals of the routine the prog
 * A parameter is tagged `(arg)`.
 * The heading says `in <routine>` or `in start-up code (globals only)`.
 * A value that changed since the last Step or Run began is shown in **orange**. The comparison is against a snapshot taken when you pressed Run or a step button, so after a Run to a breakpoint the orange variables are those that the run changed.
+* The changed-since-last-step marker on a pointer covers the pointer variable's own bytes. If the pointed-to value changes, the row is not highlighted.
 
 The values are live while running. Without the ELF the tab only says that variable information needs `basil -g` and the ELF beside the hex.
 
@@ -699,7 +700,7 @@ Models exist for the following; a register of anything else is plain storage tha
 | CLC1–CLC8 | yes | — | — |
 | Windowed watchdog and the non-power-on resets | yes | — | `CLRWDT` only |
 | CRC and memory scanner | yes | — | — |
-| External interrupts INT0–2, interrupt-on-change | yes | — | — |
+| External interrupts INT0–2, interrupt-on-change | yes | — | the INT pin and interrupt-on-change |
 | MCLR pin reset | yes | yes | the MCLR pin is part of the port model |
 | LEDs and SSD1306 OLED | yes | yes | yes |
 
