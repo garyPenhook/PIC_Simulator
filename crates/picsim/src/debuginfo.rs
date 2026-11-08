@@ -190,6 +190,24 @@ impl DebugInfo {
         Some((v.addr + off, ty.bytes))
     }
 
+    /// As `path_addr`, but also finds a `const` kept in program memory; the flag says the address is a program address.
+    pub fn path_ref(&self, path: &str) -> Option<(u32, u32, bool)> {
+        let end = path.find(['.', '[']).unwrap_or(path.len());
+        let v = self.vars.iter().find(|v| v.scope.is_none() && v.name == path[..end].trim())?;
+        let (off, ty) = v.layout.resolve(&path[end..])?;
+        Some((v.addr + off, ty.bytes, v.rom))
+    }
+
+    /// `len` constant bytes starting at program address `addr` (see `rom_image` for what a byte is on a PIC16); bytes past the end read 0.
+    pub fn rom_bytes(&self, prog: &[u8], addr: u32, len: usize) -> Vec<u8> {
+        (0..len as u32)
+            .map(|i| {
+                let a = (addr + i) as usize;
+                prog.get(if self.word_addressed { a * 2 } else { a }).copied().unwrap_or(0)
+            })
+            .collect()
+    }
+
     /// Globals, then the parameters and locals of routine `f` when given.
     pub fn visible(&self, f: Option<usize>) -> impl Iterator<Item = &Var> {
         self.vars.iter().filter(move |v| v.scope.is_none() || v.scope == f)
@@ -578,6 +596,7 @@ fn scalar(kind: &Kind, b: &[u8]) -> String {
         Kind::Bool => (u != 0).to_string(),
         Kind::Char => format!("'{}' ({u})", if (32..127).contains(&(u as u8)) { u as u8 as char } else { '.' }),
         Kind::Float if b.len() == 4 => format!("{} (0x{u:08X})", f32::from_bits(u as u32)),
+        Kind::Signed if bits == 64 => format!("{} (0x{u:016X})", u as i64),
         Kind::Signed if bits < 64 => format!("{} (0x{u:0w$X})", ((u << (64 - bits)) as i64) >> (64 - bits), w = b.len() * 2),
         _ => format!("{u} (0x{u:0w$X})", w = b.len() * 2),
     }

@@ -779,7 +779,7 @@ impl eframe::App for App {
                 4 => variables_ui(ui, &m.debug, pc, &m.cpu.m.mem, &m.cpu.prog, self.snap.as_ref()),
                 _ => {
                     let (syms, vars, dev, debug) = (&m.syms, &m.debug.vars, &m.dev, &m.debug);
-                    watch_ui(ui, &mut self.watch, &mut self.watch_in, |n| syms.get(n).copied().or_else(|| vars.iter().find(|v| v.scope.is_none() && !v.rom && v.name == *n).map(|v| v.addr)).or_else(|| debug.path_addr(n).map(|p| p.0)).or_else(|| dev.find_sfr(n).map(|s| s.addr)), |a, l| m.peek(a, l));
+                    watch_ui(ui, &mut self.watch, &mut self.watch_in, |n| syms.get(n).copied().map(|a| (a, false)).or_else(|| vars.iter().find(|v| v.scope.is_none() && !v.rom && v.name == *n).map(|v| (v.addr, false))).or_else(|| debug.path_ref(n).map(|p| (p.0, p.2))).or_else(|| dev.find_sfr(n).map(|s| (s.addr, false))), |a, l, rom| if rom { debug.rom_bytes(&m.cpu.prog, a, l) } else { m.peek(a, l) });
                 }
             }
         });
@@ -888,7 +888,7 @@ fn variables_ui(ui: &mut egui::Ui, debug: &picsim::debuginfo::DebugInfo, pc: u32
 
 /// The Watch tab: symbols (or SFR names) with a byte count, shown as unsigned, signed and hex. `addr` resolves a name,
 /// `peek` reads bytes without side effects.
-fn watch_ui(ui: &mut egui::Ui, watch: &mut Vec<(String, usize)>, input: &mut String, addr: impl Fn(&str) -> Option<u32>, peek: impl Fn(u32, usize) -> Vec<u8>) {
+fn watch_ui(ui: &mut egui::Ui, watch: &mut Vec<(String, usize)>, input: &mut String, addr: impl Fn(&str) -> Option<(u32, bool)>, peek: impl Fn(u32, usize, bool) -> Vec<u8>) {
     ui.horizontal(|ui| {
         ui.add(egui::TextEdit::singleline(input).hint_text("symbol[:bytes]"));
         if ui.button("Add").clicked() {
@@ -901,10 +901,10 @@ fn watch_ui(ui: &mut egui::Ui, watch: &mut Vec<(String, usize)>, input: &mut Str
     for (i, (n, l)) in watch.iter().enumerate() {
         ui.horizontal(|ui| {
             match addr(n) {
-                Some(a) => {
-                    let v: u64 = peek(a, *l).iter().rev().fold(0, |x, y| x << 8 | u64::from(*y));
+                Some((a, rom)) => {
+                    let v: u64 = peek(a, *l, rom).iter().rev().fold(0, |x, y| x << 8 | u64::from(*y));
                     let signed = if *l < 8 { ((v << (64 - 8 * l)) as i64) >> (64 - 8 * l) } else { v as i64 };
-                    ui.monospace(format!("{n}[{l}] @{a:04X} = {v} ({signed}) 0x{v:X}"));
+                    ui.monospace(format!("{n}[{l}] @{}{a:04X} = {v} ({signed}) 0x{v:X}", if rom { "prog " } else { "" }));
                 }
                 None => {
                     ui.monospace(format!("{n}: unknown"));
@@ -1035,7 +1035,7 @@ impl App {
                 4 => variables_ui(ui, &m.debug, pc, &m.cpu.mem, &m.cpu.prog, self.snap.as_ref()),
                 _ => {
                     let (syms, vars, dev, debug) = (&m.syms, &m.debug.vars, &m.dev, &m.debug);
-                    watch_ui(ui, &mut self.watch, &mut self.watch_in, |n| syms.get(n).copied().or_else(|| vars.iter().find(|v| v.scope.is_none() && !v.rom && v.name == *n).map(|v| v.addr)).or_else(|| debug.path_addr(n).map(|p| p.0)).or_else(|| dev.find_sfr(n).map(|s| s.addr)), |a, l| m.peek(a, l));
+                    watch_ui(ui, &mut self.watch, &mut self.watch_in, |n| syms.get(n).copied().map(|a| (a, false)).or_else(|| vars.iter().find(|v| v.scope.is_none() && !v.rom && v.name == *n).map(|v| (v.addr, false))).or_else(|| debug.path_ref(n).map(|p| (p.0, p.2))).or_else(|| dev.find_sfr(n).map(|s| (s.addr, false))), |a, l, rom| if rom { debug.rom_bytes(&m.cpu.prog, a, l) } else { m.peek(a, l) });
                 }
             }
         });

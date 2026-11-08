@@ -54,6 +54,13 @@ fn constants_are_read_from_program_memory_and_pointers_into_it_follow() {
         assert!(names.starts_with('{') && names.contains(" -> 97 (0x61)") && names.contains(" -> 99 (0x63)"), "{tag}: {names}");
         // A constant is not in data memory, so Watch and the symbol table must not offer a data address for it.
         assert_eq!(d.path_addr("tab[1]"), None, "{tag}");
+        // Watch reads it from program memory instead: path_ref says so, and rom_bytes returns the table.
+        let (a, n, in_rom) = d.path_ref("tab[1]").unwrap_or_else(|| panic!("{tag}: tab[1]"));
+        assert!(in_rom && n == 1, "{tag}");
+        assert_eq!(d.rom_bytes(&prog, a, 2), [8, 9], "{tag}: tab[1] and tab[2]");
+        assert_eq!(d.path_ref("tab[3]"), None, "{tag}: past the end");
+        let (a, _, in_rom) = d.path_ref("buf").unwrap();
+        assert!(!in_rom && mem[a as usize] == b'a', "{tag}: a variable in data memory");
     }
 }
 
