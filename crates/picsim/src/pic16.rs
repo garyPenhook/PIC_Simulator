@@ -271,7 +271,7 @@ pub struct Pic16 {
     wdt: Option<Wdt>,
     wdt_simple: bool,
     wdt_reg: Vec<bool>,
-    /// CCP1-CCP4 (`periph/ccp16.rs`, `[A128]`-`[A130]`), CCPTMRS(0), and per address the CCPxCON register's module.
+    /// CCP1-CCP4 (`periph/ccp16.rs`, `[A128]`), CCPTMRS(0), and per address the CCPxCON register's module.
     ccps: Vec<Ccp16>,
     ccptmrs: Option<usize>,
     ccp_con: Vec<Option<u8>>,
@@ -1631,7 +1631,7 @@ impl Pic16 {
         }
     }
 
-    // ----- CCP1-CCP4 (`periph/ccp16.rs`, `[A128]`-`[A130]`) ----------------------------------------------------
+    // ----- CCP1-CCP4 (`periph/ccp16.rs`, `[A128]`) ----------------------------------------------------
 
     /// Set the output latch of CCP `ci` and the OUT bit of its CCPxCON.
     fn ccp_set_out(&mut self, ci: usize, level: bool) {
@@ -1785,12 +1785,18 @@ impl Pic16 {
         let old = self.mem[a];
         let v = v & self.implemented[a];
         self.mem[a] = v & !0x20 | old & 0x20;
-        self.ccps[ci].edges = 0;
+        let changed = (v ^ old) & 0x8F != 0; // EN or MODE: a write of the same mode (FMT, a read-modify-write) changes nothing
+        if changed {
+            self.ccps[ci].edges = 0;
+        }
         if v & 0x80 == 0 || v & 15 == 0 {
             self.ccps[ci].clear_at = None;
             self.ccp_set_out(ci, false);
         } else if (v ^ old) & 15 != 0 {
             self.ccps[ci].clear_at = None;
+            if (v & 15 >= 12) != (old & 15 >= 12) {
+                self.ccp_set_out(ci, false); // into or out of PWM: a pulse that was running does not outlive its mode
+            }
         }
     }
 
@@ -1872,7 +1878,7 @@ impl Pic16 {
                 }
                 let one_shot = mode >> 3 == 1;
                 // CCP PWM: the period ends of a free-running timer on Fosc/4 (27.4.1 p.330)
-                if cs == 1 && mode == 0 {
+                if pwm_user && cs == 1 && mode == 0 {
                     pwm = Some((ccp16::period_sets(t.cnt, t.pre, self.mem[t.pr], sh, u64::from(t.clk.is_none()), t.last - dt, t.last), self.mem[t.pr], sh));
                 } else if pwm_user {
                     self.notes.insert(format!("Timer{} is not a free-running Fosc/4 timer: the CCP PWM that uses it does not run", t.n));

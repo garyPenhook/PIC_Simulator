@@ -8,7 +8,7 @@
 //! * Capture copies TMR1 into CCPRx on the selected edge of the CCPxPPS pin (CTS = 0000 only) and sets CCPxIF.
 //! * Compare matches on the Timer1 clock after TMR1 reached CCPRx; MODE 0001 and 1011 then restart it at 1, so the period is
 //!   CCPRx clocks (MDB, `[A61]`). 1000 sets the output, 1001 clears it, 0001 and 0010 toggle it; 1010 and 1011 only set the
-//!   flag (`[A130]`).
+//!   flag (`[A63]`, `[A128]`).
 //! * PWM sets the pin at the Timer2 period match (not when the duty is 0), takes the duty from CCPRx then, and clears the pin
 //!   when the 10-bit time base reaches it: pulse width = duty * Tosc * prescale (Equation 27-2), period = (T2PR + 1) * 4 *
 //!   Tosc * prescale (Equation 27-1). A pulse at least as long as the period leaves the pin set (27.4.6). CCPxIF is set when

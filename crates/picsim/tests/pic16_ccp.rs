@@ -1,4 +1,4 @@
-//! CCP1 on the PIC16 core (`[A128]`-`[A130]`, `periph/ccp16.rs`): PWM, compare and capture on the PIC16F17146 (DS40002343F ch.27
+//! CCP1 on the PIC16 core (`[A128]`, `periph/ccp16.rs`): PWM, compare and capture on the PIC16F17146 (DS40002343F ch.27
 //! p.326-337), PIC16F13145 (DS40002519D ch.24), PIC16F15244 (DS40002195E ch.22) and PIC16F18346 (DS40001839E ch.29). RA0 carries
 //! the CCP1 output through RA0PPS; RA2 is the capture input and is driven by `[[pin]]` entries. The timing of compare and PWM is
 //! what MDB does (`tests/probe/ccp_cmp.S`, `ccp_seq.S`, `ccp_pwm_seq.S`, read through the OUT bit of CCP1CON).
@@ -396,6 +396,38 @@ fn a_pwm_pulse_holds_while_timer2_is_off() {
             assert!(high < 20, "{part}");
         }
         assert!((6..=8).contains(&high), "{part}: the pulse goes on where it stopped: {high}");
+    }
+}
+
+#[test]
+fn leaving_pwm_ends_the_pulse_and_a_same_mode_write_keeps_the_capture_count() {
+    for part in PARTS {
+        let mut m = machine(part, "");
+        pin_ra0(&mut m, part);
+        t2_on(&mut m, part, 0x0F);
+        w(&mut m, "CCPR1L", 40);
+        w(&mut m, "CCP1CON", 0x8C);
+        while !{
+            m.cpu.step();
+            ra0(&mut m)
+        } {}
+        w(&mut m, "CCP1CON", 0x85); // capture: the pulse must not be stuck high
+        assert!(!ra0(&mut m) && r(&mut m, "CCP1CON") & 0x20 == 0, "{part}");
+        assert!(sample(&mut m, 100).iter().all(|&x| !x), "{part}");
+    }
+    let stim = pins(&[(2, 1, 100), (2, 0, 120), (2, 1, 140), (2, 0, 160), (2, 1, 180)]);
+    for part in PARTS {
+        let mut m = machine(part, &stim);
+        t1_on(&mut m, part);
+        w(&mut m, "CCP1CON", 0x86); // every 4th rising edge
+        while m.cpu.cycles < 150 {
+            m.cpu.step();
+        }
+        w(&mut m, "CCP1CON", 0x96); // FMT only: the two edges counted stay counted
+        while m.cpu.cycles < 200 {
+            m.cpu.step();
+        }
+        assert!(!ccp1if(&mut m), "{part}: three rises");
     }
 }
 
