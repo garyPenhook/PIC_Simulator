@@ -73,6 +73,8 @@ pub struct Pic18 {
     mclr: Vec<(usize, u8, u8)>,
     pcon0: Option<usize>,
     pcon1: Option<usize>,
+    /// TO and PD of STATUS (`[A129]`): read only, 1 after a power-on reset, set by CLRWDT. 0 on a part whose STATUS has neither.
+    status_ro: u8,
 }
 
 /// What the vectored interrupt controller saves on entry (DS40002214G 11.6 p.120-121).
@@ -205,7 +207,17 @@ impl Pic18 {
                 .collect(),
             pcon0: dev.find_sfr("PCON0").map(|s| s.addr as usize),
             pcon1: dev.find_sfr("PCON1").map(|s| s.addr as usize),
+            status_ro: dev
+                .find_sfr("STATUS")
+                .map_or(0, |s| {
+                    // TO/PD on the PIC18F27Q10, nTO/nPD on the PIC18F16Q41 (the legacy list has the other spelling).
+                    let is = |n: &str| ["TO", "PD", "nTO", "nPD"].iter().any(|x| n.eq_ignore_ascii_case(x));
+                    s.fields.iter().chain(&s.legacy).filter(|f| f.width == 1 && is(&f.name)).fold(0, |m, f| m | 1u8 << f.pos)
+                }),
         };
+        // The pack gives the PIC18F16Q41's STATUS as `-xxxxxxx`; the data sheet has TO = PD = 1 at POR/BOR (DS40002214G 7.7.7 p.40).
+        let st = p.m.regs.status as usize;
+        p.m.mem[st] |= p.status_ro;
         p.pc_mask = (dev.memory.program.size.next_power_of_two() - 1) & !1;
         Ok(p)
     }
@@ -365,7 +377,10 @@ impl Pic18 {
             return;
         }
         match self.m.special[i] {
-            Special::None | Special::Core => self.m.mem[i] = v & self.m.implemented[i],
+            Special::None | Special::Core => {
+                let keep = if i == self.m.regs.status as usize { self.status_ro } else { 0 };
+                self.m.mem[i] = (v & !keep | self.m.mem[i] & keep) & self.m.implemented[i];
+            }
             Special::Sync => {
                 if self.p.watching(&self.m) {
                     let now = self.cycles;
@@ -1047,6 +1062,10 @@ impl Pic18 {
                 0x00 => {}
                 0x03 => self.sleep(),
                 0x04 => {
+                    // CLRWDT: TO = PD = 1 (DS40002214G 7.7.7 p.40, DS40002043F 11.8.5 p.131); a window violation then resets with
+                    // TO and PD as the CLRWDT left them (`[A91]`).
+                    let st = self.m.regs.status as usize;
+                    self.m.mem[st] |= self.status_ro;
                     let now = self.cycles;
                     self.p.clrwdt(&self.m, now);
                 }
