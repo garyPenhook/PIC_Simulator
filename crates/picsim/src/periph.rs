@@ -73,6 +73,8 @@ pub enum ResetKind {
     StackUnderflow,
     /// The MCLR pin driven low while it is the reset input.
     Mclr,
+    /// A vectored interrupt whose table entry or service routine lies outside the program memory (Q41).
+    MemoryViolation,
 }
 
 /// Interrupt-on-change and the INT0-INT2 pins `[A101]`.

@@ -151,7 +151,7 @@ The parts the simulator can load are the files in `devices/`:
 | Family | Parts | Core | Notes |
 |---|---|---|---|
 | PIC18-Q10 | 18F27Q10 | PIC18 | The 28-pin part; the 40-pin variant is not separately described |
-| PIC18-Q41 | 18F04Q41, 18F05Q41, 18F06Q41, 18F14Q41, 18F15Q41, 18F16Q41 | PIC18 | Interrupts with `MVECEN` off (see section 9) |
+| PIC18-Q41 | 18F04Q41, 18F05Q41, 18F06Q41, 18F14Q41, 18F15Q41, 18F16Q41 | PIC18 | Interrupts with `MVECEN` on (vector table, as XC8 `__interrupt(irq(...))` builds it) or off (see section 9) |
 | PIC16F131xx | 16F13113, 13114, 13115, 13123, 13124, 13125, 13143, 13144, 13145 | PIC16 enhanced | |
 | PIC16F152xx | 16F15213, 15214, 15223, 15224, 15243, 15244 | PIC16 enhanced | |
 | PIC16F171xx | 16F17126, 16F17146 | PIC16 enhanced | |
@@ -282,7 +282,7 @@ With the ELF, the panel is headed **Call stack**: the first line (`>`) is the ro
 
 ### Notes
 
-When the simulator meets something it does not model or that is suspect, it adds a note here, for example `MVECEN = 1 (vector table) is not simulated`, an OLED command with no effect, or `unmodelled SFRs touched: …`. Treat notes as the simulator telling you where the result is not backed by a model.
+When the simulator meets something it does not model or that is suspect, it adds a note here, for example `vectored interrupt 27 has no valid vector at 000042 (erased or outside the program memory): the part was reset`, an OLED command with no effect, or `unmodelled SFRs touched: …`. Treat notes as the simulator telling you where the result is not backed by a model.
 
 ## The data tabs
 
@@ -675,7 +675,7 @@ The display is 128 columns by 64 or 32 rows. **The pins you give must be the pin
 | Instruction set | Base set plus the Q41 additions (`MOVFFL` …) | The 50-instruction set including `MOVIW`, `MOVWI`, `BRW`, `CALLW`, `ADDFSR` |
 | Program counter | Bytes, 21 bits | Words, 15 bits |
 | Stack | Hardware, 31 levels (Q10), overflow/underflow reset with `STVREN` | 16 levels; the 17th push overflows; `STKPTR` as the data sheet |
-| Interrupts | Q10: legacy, optional two priorities, vectors 0008h and 0018h. Q41: with `MVECEN` = 0, hardware context save | Single vector 0004h, automatic save of W, STATUS, BSR, FSRs and PCLATH to the shadow registers |
+| Interrupts | Q10: legacy, optional two priorities, vectors 0008h and 0018h. Q41: vector table (`MVECEN` = 1) or the two legacy vectors at `IVTBASE` (`MVECEN` = 0), hardware context save | Single vector 0004h, automatic save of W, STATUS, BSR, FSRs and PCLATH to the shadow registers |
 | Data memory | Banked with Access Bank, FSR0–2 | Banked (6-bit or 5-bit BSR), linear memory through the FSRs, flash read through an FSR |
 
 ## Peripherals
@@ -706,7 +706,7 @@ Models exist for the following; a register of anything else is plain storage tha
 
 Where this table says "—", `docs/FACTS-SIM.md` documents no model for that peripheral on that family: its registers are plain storage and the program is reported as touching unmodelled SFRs. (The watchdog, CRC, comparator, CLC, CWG, CCP and external-interrupt models are written and cited against the Q10 data sheet.) `docs/FACTS-SIM.md` is the authoritative list, section by section, with the data sheet page for each rule; peripherals are added over time.
 
-**Not modelled anywhere:** DMA, the Q41 vectored-interrupt table (`MVECEN = 1`; a note appears and the interrupt goes to the legacy vector), synchronous EUSART mode, weak pull-ups, open-drain outputs, input thresholds, the oscillator start-up and clock switching (the oscillator registers take their reset values from the configuration words, but `CSWEN` and the ready bits are not applied), brown-out, `LVP`, code and write protection. The watchdog is documented for the PIC18-Q10; on a PIC16 `CLRWDT` only sets TO and PD and the watchdog never times out.
+**Not modelled anywhere:** DMA, synchronous EUSART mode, weak pull-ups, open-drain outputs, input thresholds, the oscillator start-up and clock switching (the oscillator registers take their reset values from the configuration words, but `CSWEN` and the ready bits are not applied), brown-out, `LVP`, code and write protection. The watchdog is documented for the PIC18-Q10; on a PIC16 `CLRWDT` only sets TO and PD and the watchdog never times out.
 
 ## Configuration words
 

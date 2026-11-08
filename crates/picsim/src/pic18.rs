@@ -49,6 +49,10 @@ pub struct Pic18 {
     vic: bool,
     vec_high: u32,
     vec_low: u32,
+    /// IVTBASEL/H/U, IVTADL/H/U and INTCON1 on the Q41 (zero when absent).
+    ivtbase: [usize; 3],
+    ivtad: [usize; 3],
+    intcon1: usize,
     /// Messages about things the model does not do (undefined opcode, stray address), deduplicated.
     pub notes: BTreeSet<String>,
     wide_fsr: bool,
@@ -68,6 +72,7 @@ pub struct Pic18 {
     /// MCLR-column reset values (Table 9-3): register address, bits set, bits cleared; `u`, `q`, `x` bits are left alone.
     mclr: Vec<(usize, u8, u8)>,
     pcon0: Option<usize>,
+    pcon1: Option<usize>,
 }
 
 /// What the vectored interrupt controller saves on entry (DS40002214G 11.6 p.120-121).
@@ -167,6 +172,9 @@ impl Pic18 {
             vic: dev.find_sfr("SHADCON").is_some(),
             vec_high: dev.vectors.interrupt_high,
             vec_low: dev.vectors.interrupt_low,
+            ivtbase: ["IVTBASEL", "IVTBASEH", "IVTBASEU"].map(|n| dev.find_sfr(n).map_or(0, |s| s.addr as usize)),
+            ivtad: ["IVTADL", "IVTADH", "IVTADU"].map(|n| dev.find_sfr(n).map_or(0, |s| s.addr as usize)),
+            intcon1: dev.find_sfr("INTCON1").map_or(0, |s| s.addr as usize),
             notes: BTreeSet::new(),
             wide_fsr,
             stk_mask: (depth + 1).next_power_of_two() as u8 - 1,
@@ -196,6 +204,7 @@ impl Pic18 {
                 .filter(|&(_, set, clr)| set | clr != 0)
                 .collect(),
             pcon0: dev.find_sfr("PCON0").map(|s| s.addr as usize),
+            pcon1: dev.find_sfr("PCON1").map(|s| s.addr as usize),
         };
         p.pc_mask = (dev.memory.program.size.next_power_of_two() - 1) & !1;
         Ok(p)
@@ -826,7 +835,7 @@ impl Pic18 {
     // ----- interrupts ----------------------------------------------------------------------------------------
 
     /// Take an interrupt if one is enabled and pending after the instruction that just finished.
-    /// Rules: DS40002043F 15.1-15.3 p.193-194 (Q10), DS40002214G 11.5-11.8 p.118-124 (Q41, `MVECEN = 0`).
+    /// Rules: DS40002043F 15.1-15.3 p.193-194 (Q10), DS40002214G 11.3-11.8 p.113-124 (Q41, `MVECEN` 0 or 1, `[A126]`).
     /// `[A4]` Entry costs two cycles (return address pushed, vector fetched), like a CALL.
     fn irq_check(&mut self, ic0: u8) {
         // A flag set in the last cycle of the instruction that clears GIE is still taken `[A6]` (MDB; the Q10 code
@@ -840,7 +849,8 @@ impl Pic18 {
         }
         let ipen = c & 0x20 != 0;
         let giel = c & 0x40 != 0;
-        let (mut hi, mut lo) = (false, false);
+        // The lowest vector number pending at each priority (natural order priority `DS40002214G 11.4.2 p.116`).
+        let (mut hi, mut lo): (Option<u32>, Option<u32>) = (None, None);
         for (n, g) in self.irq.iter().enumerate() {
             if g[0] == 0 {
                 continue;
@@ -849,44 +859,70 @@ impl Pic18 {
             if f == 0 {
                 continue;
             }
-            if !ipen {
+            let ip = self.m.mem[g[2]];
+            for b in 0..8u32 {
+                if f >> b & 1 == 0 {
+                    continue;
+                }
+                let vec = 8 * n as u32 + b;
                 // Without priorities PEIE gates the peripheral groups (PIR1 and up) on the Q10, whose PIR0 sources
                 // are core interrupts `[A5]`; the Q41 has no PEIE (GIEL is reserved).
-                if self.vic || n == 0 || giel {
-                    hi = true;
+                let high = if ipen { ip >> b & 1 != 0 } else { self.vic || n == 0 || giel };
+                if !ipen && !high {
+                    continue;
                 }
-            } else {
-                let ip = self.m.mem[g[2]];
-                hi |= f & ip != 0;
-                lo |= f & !ip != 0;
+                let slot = if high { &mut hi } else { &mut lo };
+                if slot.is_none() {
+                    *slot = Some(vec);
+                }
             }
         }
-        if !hi && !lo {
+        if hi.is_none() && lo.is_none() {
             return;
         }
         let blocked_hi = self.vic && if ipen { self.in_service.contains(&true) } else { !self.in_service.is_empty() };
-        let high = if hi && !blocked_hi {
-            true
-        } else if lo && giel && !(self.vic && !self.in_service.is_empty()) {
-            false
+        let (high, vnum) = if hi.is_some() && !blocked_hi {
+            (true, hi)
+        } else if lo.is_some() && giel && !(self.vic && !self.in_service.is_empty()) {
+            (false, lo)
         } else {
             return;
         };
-        if self.vic && self.cfg.get("MVECEN") == Some(1) {
-            self.notes.insert("MVECEN = 1 (vector table) is not simulated: the interrupt went to the legacy vector".into());
-        }
+        let mvec = self.vic && self.cfg.get("MVECEN") == Some(1);
+        let target = if mvec {
+            // The vector table entry holds the ISR address >> 2 `[A126]`; an entry or an ISR outside the program
+            // memory resets the part with nMEMV clear `DS40002214G 11.3.4 p.115`.
+            let base = self.ivtbase_addr();
+            let at = base.wrapping_add(2 * vnum.unwrap_or(0)) as usize;
+            let isr = if at + 1 < self.prog.len() { (u32::from(self.prog[at]) | u32::from(self.prog[at + 1]) << 8) << 2 } else { u32::MAX };
+            if isr as usize >= self.prog.len() {
+                self.notes.insert(format!("vectored interrupt {} has no valid vector at {at:06X} (erased or outside the program memory): the part was reset", vnum.unwrap_or(0)));
+                self.stk_fault = Some(ResetKind::MemoryViolation);
+                return;
+            }
+            isr
+        } else if self.vic {
+            let base = self.ivtbase_addr();
+            if high { base } else { base + 16 }
+        } else if high {
+            self.vec_high
+        } else {
+            self.vec_low
+        };
         let ret = self.pc;
         self.push(ret);
-        self.pc = (if high { self.vec_high } else { self.vec_low }) & self.pc_mask;
+        self.pc = target & self.pc_mask;
         // MDB reaches the vector three cycles after the flag was set, whichever cycle of a multi-cycle instruction
         // that was; never less than two cycles after the instruction `[A4]`. A flag that was already pending
         // (interrupts were enabled later) counts as set one cycle before the end of the instruction.
         let end = self.cycles;
+        // With the vector table the latency is three cycles instead of two `DS40002214G 11.8 p.122` `[A126]`.
+        let lat = u64::from(mvec);
         self.cycles = match self.p.take_event() {
-            Some(e) => (e + 3).max(end + 2),
+            Some(e) => (e + 3 + lat).max(end + 2 + lat),
             // Already pending and enabled by this very instruction (BSF INTCON, GIE): MDB enters one cycle after it
             // `[A7]`; otherwise (RETFIE re-enabling, PIE written) two.
-            None => end + 2,
+            None => end + 2 + lat,
         };
         if self.vic {
             let r = &self.m.regs;
@@ -904,20 +940,51 @@ impl Pic18 {
                 pclat: [self.m.mem[r.pclath as usize], self.m.mem[r.pclatu as usize]],
             };
             self.ctx.push(ctx);
+            if mvec {
+                // The resolved vector number goes to WREG and the vector address to IVTAD `DS40002214G 11.5, 11.3.3`.
+                self.set_w(vnum.unwrap_or(0) as u8);
+                let a = self.ivtbase_addr().wrapping_add(2 * vnum.unwrap_or(0));
+                for (i, r) in self.ivtad.into_iter().enumerate() {
+                    if r != 0 {
+                        self.m.mem[r] = (a >> (8 * i)) as u8;
+                    }
+                }
+            }
         } else {
             self.shadow_save();
             let bit = if ipen && !high { 0x40 } else { 0x80 };
             self.m.mem[self.intcon] &= !bit;
         }
         self.in_service.push(high);
+        self.set_stat();
         let now = self.cycles;
         self.p.sync(&mut self.m, now);
+    }
+
+    /// IVTBASE as a program byte address.
+    fn ivtbase_addr(&self) -> u32 {
+        self.ivtbase.iter().enumerate().filter(|&(_, &r)| r != 0).fold(0, |a, (i, &r)| a | u32::from(self.m.mem[r]) << (8 * i))
+    }
+
+    /// INTCON1.STAT: 00 main code, 01 low-priority ISR, 10 high-priority ISR, 11 high over low `DS40002214G 11.5 Figure 11-1`.
+    fn set_stat(&mut self) {
+        if self.intcon1 == 0 {
+            return;
+        }
+        let stat = match self.in_service.as_slice() {
+            [] => 0,
+            [false] => 0x40,
+            [true] => 0x80,
+            _ => 0xC0,
+        };
+        self.m.mem[self.intcon1] = self.m.mem[self.intcon1] & 0x3F | stat;
     }
 
     fn retfie(&mut self, s: bool) {
         self.cycles += 1;
         self.pc = self.pop();
         let level = self.in_service.pop();
+        self.set_stat();
         if self.vic {
             // The controller tracks the level itself; GIE is not changed `DS40002214G 11.8.1 p.123`.
             if let Some(c) = self.ctx.pop()
@@ -1220,11 +1287,14 @@ impl Pic18 {
             ResetKind::WdtWindow => self.clear_pcon(0x20), // WDTWV
             ResetKind::Instruction => self.clear_pcon(0x04), // RI
             ResetKind::Mclr => self.clear_pcon(0x08), // RMCLR
+            ResetKind::MemoryViolation => self.clear_pcon1(0x02), // nMEMV
             ResetKind::StackOverflow => self.set_pcon(0x80), // STKOVF
             ResetKind::StackUnderflow => self.set_pcon(0x40), // STKUNF
         }
         self.stk_fault = None;
         self.apply_config();
+        self.in_service.clear();
+        self.set_stat();
         self.pc = self.dev.vectors.reset;
         self.state = State::Running;
         self.in_service.clear();
@@ -1245,6 +1315,12 @@ impl Pic18 {
     fn set_pcon(&mut self, bit: u8) {
         if let Some(a) = self.pcon0 {
             self.m.mem[a] |= bit;
+        }
+    }
+
+    fn clear_pcon1(&mut self, bit: u8) {
+        if let Some(a) = self.pcon1 {
+            self.m.mem[a] &= !bit;
         }
     }
 
