@@ -776,7 +776,7 @@ impl eframe::App for App {
                         self.board_cfg = m.cpu.p.board.fresh();
                     }
                 }
-                4 => variables_ui(ui, &m.debug, pc, &m.cpu.m.mem, &m.cpu.prog, self.snap.as_ref()),
+                4 => variables_ui(ui, &m.debug, pc, &(1..=usize::from(m.cpu.m.mem[m.cpu.m.regs.stkptr as usize] & 0x7F).min(m.cpu.stack.len() - 1)).rev().map(|i| m.cpu.stack[i].saturating_sub(2)).collect::<Vec<_>>(), &m.cpu.m.mem, &m.cpu.prog, self.snap.as_ref()),
                 _ => {
                     let (syms, vars, dev, debug) = (&m.syms, &m.debug.vars, &m.dev, &m.debug);
                     watch_ui(ui, &mut self.watch, &mut self.watch_in, |n| syms.get(n).copied().map(|a| (a, false)).or_else(|| vars.iter().find(|v| v.scope.is_none() && !v.rom && v.name == *n).map(|v| (v.addr, false))).or_else(|| debug.path_ref(n).map(|p| (p.0, p.2))).or_else(|| dev.find_sfr(n).map(|s| (s.addr, false))), |a, l, rom| if rom { debug.rom_bytes(&m.cpu.prog, a, l) } else { m.peek(a, l) });
@@ -858,8 +858,10 @@ impl eframe::App for App {
 }
 
 /// The Variables tab: the globals and the parameters and locals of the routine the PC is in, with their values in `mem`;
-/// those that differ from `snap` (data memory when the last Step or Run began) are marked.
-fn variables_ui(ui: &mut egui::Ui, debug: &picsim::debuginfo::DebugInfo, pc: u32, mem: &[u8], prog: &[u8], snap: Option<&Vec<u8>>) {
+/// those that differ from `snap` (data memory when the last Step or Run began) are marked. `callers` are the addresses of the
+/// pending CALL instructions, innermost first; each routine they lie in gets its own section (once, even when it recurses,
+/// because its locals have one fixed address) below the current routine's.
+fn variables_ui(ui: &mut egui::Ui, debug: &picsim::debuginfo::DebugInfo, pc: u32, callers: &[u32], mem: &[u8], prog: &[u8], snap: Option<&Vec<u8>>) {
     if debug.vars.is_empty() {
         ui.label("No variable information. Build with basil -g or xc8-cc -g and keep the .elf beside the .hex.");
         return;
@@ -870,18 +872,36 @@ fn variables_ui(ui: &mut egui::Ui, debug: &picsim::debuginfo::DebugInfo, pc: u32
         None => "in start-up code (globals only)".to_string(),
     });
     let rom = debug.rom_image(prog);
+    let mut frames: Vec<usize> = Vec::new();
+    for &c in callers {
+        if let Some(i) = debug.func_at(c).filter(|&i| Some(i) != f && !frames.contains(&i) && debug.vars.iter().any(|v| v.scope == Some(i))) {
+            frames.push(i);
+        }
+    }
     egui::ScrollArea::vertical().show(ui, |ui| {
+        let row = |ui: &mut egui::Ui, v: &picsim::debuginfo::Var| {
+            let a = v.addr as usize;
+            let changed = !v.rom && snap.is_some_and(|s| s.get(a..a + v.bytes as usize) != mem.get(a..a + v.bytes as usize));
+            let col = if changed { egui::Color32::from_rgb(255, 170, 60) } else { ui.visuals().text_color() };
+            ui.colored_label(col, format!("{}{}", v.name, if v.param { " (arg)" } else { "" }));
+            ui.weak(format!("{} @{:03X}", v.ty, v.addr));
+            ui.add(egui::Label::new(egui::RichText::new(v.show_with(mem, &rom, debug)).monospace().color(col)).wrap());
+            ui.end_row();
+        };
         egui::Grid::new("vars").num_columns(3).striped(true).show(ui, |ui| {
             for v in debug.visible(f) {
-                let a = v.addr as usize;
-                let changed = !v.rom && snap.is_some_and(|s| s.get(a..a + v.bytes as usize) != mem.get(a..a + v.bytes as usize));
-                let col = if changed { egui::Color32::from_rgb(255, 170, 60) } else { ui.visuals().text_color() };
-                ui.colored_label(col, format!("{}{}", v.name, if v.param { " (arg)" } else { "" }));
-                ui.weak(format!("{} @{:03X}", v.ty, v.addr));
-                ui.add(egui::Label::new(egui::RichText::new(v.show_with(mem, &rom, debug)).monospace().color(col)).wrap());
-                ui.end_row();
+                row(ui, v);
             }
         });
+        for (n, &i) in frames.iter().enumerate() {
+            ui.separator();
+            ui.label(format!("caller: {}", debug.funcs[i].name));
+            egui::Grid::new(format!("vars_caller{n}")).num_columns(3).striped(true).show(ui, |ui| {
+                for v in debug.vars.iter().filter(|v| v.scope == Some(i)) {
+                    row(ui, v);
+                }
+            });
+        }
     });
     ui.label("orange: changed since the last Step or Run");
 }
@@ -1032,7 +1052,7 @@ impl App {
                         self.board_cfg = m.cpu.board.fresh();
                     }
                 }
-                4 => variables_ui(ui, &m.debug, pc, &m.cpu.mem, &m.cpu.prog, self.snap.as_ref()),
+                4 => variables_ui(ui, &m.debug, pc, &(0..(m.cpu.depth() as usize).min(16)).rev().map(|i| m.cpu.stack_entry(i).saturating_sub(1)).collect::<Vec<_>>(), &m.cpu.mem, &m.cpu.prog, self.snap.as_ref()),
                 _ => {
                     let (syms, vars, dev, debug) = (&m.syms, &m.debug.vars, &m.dev, &m.debug);
                     watch_ui(ui, &mut self.watch, &mut self.watch_in, |n| syms.get(n).copied().map(|a| (a, false)).or_else(|| vars.iter().find(|v| v.scope.is_none() && !v.rom && v.name == *n).map(|v| (v.addr, false))).or_else(|| debug.path_ref(n).map(|p| (p.0, p.2))).or_else(|| dev.find_sfr(n).map(|s| (s.addr, false))), |a, l, rom| if rom { debug.rom_bytes(&m.cpu.prog, a, l) } else { m.peek(a, l) });

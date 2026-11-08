@@ -308,6 +308,7 @@ The globals of the program and the parameters and locals of the routine the prog
 
 * `Integer` is shown signed, `Char`/`String` as text, `Float` as a binary32 number, arrays element by element.
 * A parameter is tagged `(arg)`.
+* Below the current routine, each routine with a pending call on the call stack gets its own **caller: <routine>** section with its parameters and locals (once per routine, even when it recurses, because its locals have one fixed address). The values are read from memory as they are now; a caller's variable the optimiser has merged or reused may not hold what the source suggests.
 * The heading says `in <routine>` or `in start-up code (globals only)`.
 * A value that changed since the last Step or Run began is shown in **orange**. The comparison is against a snapshot taken when you pressed Run or a step button, so after a Run to a breakpoint the orange variables are those that the run changed.
 * The changed-since-last-step marker on a pointer covers the pointer variable's own bytes. If the pointed-to value changes, the row is not highlighted.
