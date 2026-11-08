@@ -27,6 +27,16 @@ fn machine(part: &str, prog: &[u16]) -> Machine16 {
             text += &hexrec(&[1, (a >> 8) as u8, a as u8, 0, b]);
         }
     }
+    // the watchdog is off (WDTE = 0): unprogrammed it is on and would wake a sleeping part after 2 s
+    for r in m.dev.config.clone() {
+        if let Some(f) = r.fields.iter().find(|f| f.name == "WDTE") {
+            let v = r.default & !(((1u32 << f.width) - 1) << f.pos);
+            for (a, b) in [(2 * r.addr, v as u8), (2 * r.addr + 1, (v >> 8) as u8)] {
+                text += &hexrec(&[2, 0, 0, 4, (a >> 24) as u8, (a >> 16) as u8]);
+                text += &hexrec(&[1, (a >> 8) as u8, a as u8, 0, b]);
+            }
+        }
+    }
     m.load_hex(&(text + ":00000001FF\n")).unwrap();
     m.load_stimulus(UP_DOWN).unwrap();
     w(&mut m, "ANSELA", 0); // digital inputs

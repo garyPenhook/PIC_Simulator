@@ -687,7 +687,7 @@ Models exist for the following; a register of anything else is plain storage tha
 |---|---|---|---|
 | Ports, `PORTx/LATx/TRISx/ANSELx`, PPS and `PPSLOCK` | yes | yes | yes |
 | Interrupts, `SLEEP` and wake-up | yes | yes | yes |
-| Timer0, Timer1, Timer2 (Timer3–6 where present) | yes | yes | yes |
+| Timer0, Timer1, Timer2 (Timer3–6 where present) | yes | yes | yes. Timer0 and Timer1/3/5 can count the edges of their clock pin (`T0CKIPPS`, `TxCKIPPS`) and Timer1/3/5 can be gated by `TxGPPS`; the pin is driven by the stimulus file |
 | EUSART / UART | EUSART1/2, asynchronous | UART1–3 | EUSART, asynchronous |
 | ADC | yes | yes (12-bit) | yes (several variants) |
 | Data EEPROM | yes | yes | yes |
@@ -699,7 +699,7 @@ Models exist for the following; a register of anything else is plain storage tha
 | CWG1 | yes | — | — |
 | Comparators C1/C2 | yes | — | — |
 | CLC1–CLC8 | yes | — | — |
-| Windowed watchdog and the non-power-on resets | yes | — | `CLRWDT` only |
+| Watchdog (windowed on the Q10) and the resets it causes | yes | — | yes: windowed WWDT (PIC16F131xx, PIC16F171xx) or single-register WDT (PIC16F152xx, PIC16F183xx, PIC16F180x6) |
 | CRC and memory scanner | yes | — | — |
 | External interrupts INT0–2, interrupt-on-change | yes | — | the INT pin and interrupt-on-change |
 | MCLR pin reset | yes | yes | the MCLR pin is part of the port model |
@@ -707,7 +707,11 @@ Models exist for the following; a register of anything else is plain storage tha
 
 Where this table says "—", `docs/FACTS-SIM.md` documents no model for that peripheral on that family: its registers are plain storage and the program is reported as touching unmodelled SFRs. (The watchdog, CRC, comparator, CLC, CWG, CCP and external-interrupt models are written and cited against the Q10 data sheet.) `docs/FACTS-SIM.md` is the authoritative list, section by section, with the data sheet page for each rule; peripherals are added over time.
 
-**Not modelled anywhere:** DMA, synchronous EUSART mode, weak pull-ups, open-drain outputs, input thresholds, the oscillator start-up and clock switching (the oscillator registers take their reset values from the configuration words, but `CSWEN` and the ready bits are not applied), brown-out, `LVP`, code and write protection. The watchdog is documented for the PIC18-Q10; on a PIC16 `CLRWDT` only sets TO and PD and the watchdog never times out.
+**Not modelled anywhere:** DMA, synchronous EUSART mode, weak pull-ups, open-drain outputs, input thresholds, the oscillator start-up and clock switching (the oscillator registers take their reset values from the configuration words, but `CSWEN` and the ready bits are not applied), brown-out, `LVP`, code and write protection. 
+
+**The watchdog on a PIC16 part.** It times out and resets the part (TO and `RWDT` cleared) when the configuration enables it (`WDTE`), and a time-out in Sleep wakes the part with TO = PD = 0. A program that is built without `WDTE` set to off therefore has a watchdog: an erased configuration word enables it, with the default period of 2 s, and a program that never executes `CLRWDT` is reset after 2 s of simulated time. The period is counted in simulated instruction cycles from the clock the stimulus names (`fosc_mhz`, 64 MHz until set): at the wrong `fosc_mhz` the time-out arrives at the wrong simulated time. On the windowed parts (PIC16F131xx, PIC16F171xx) a `CLRWDT` that the window does not allow, or one that did not follow a read of `WDTCON0` while a window is set, resets the part and clears `WDTWV`. `WDTCON` of the PIC16F152xx is documented with a reset value of 0 but with a default period of 2 s: the simulator uses the 2 s. The PIC16F180x6 are modelled from the device file only, because their data sheet is not available to the project. The watchdog clock is always LFINTOSC (31 kHz, or 31.25 kHz where `WDTCON.CS` says MFINTOSC); EXTOSC and SOSC are not modelled.
+
+**Pins on a PIC16 part.** Only the pin changes that the stimulus makes (`[[pin]]`, `[[port]]`) reach `T0CKIPPS`, `TxCKIPPS` and `TxGPPS`; a level that the program or a peripheral puts on a pin is not seen by them. The CCP/PWM modules and the EUSART RX/TX pins of the PIC16 parts are not modelled.
 
 ## Configuration words
 

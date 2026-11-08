@@ -29,7 +29,7 @@ mod board;
 mod ccp;
 mod clc;
 mod crc;
-mod wdt;
+pub(crate) mod wdt;
 mod cmp;
 mod cwg;
 mod flash;

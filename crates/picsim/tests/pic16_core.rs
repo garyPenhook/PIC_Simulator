@@ -446,7 +446,19 @@ fn machine_on(part: &str, prog: &[u16], isr: &[u16], stvren: bool) -> Machine16 
     for (i, &w) in isr.iter().enumerate() {
         put(4 + i as u32, w);
     }
-    put(0x8008, if stvren { 0x3FFF } else { 0x3FFF & !(1 << 12) });
+    let mut cfg2: u32 = if stvren { 0x3FFF } else { 0x3FFF & !(1 << 12) };
+    // the watchdog is off (WDTE = 0): unprogrammed it is on, and these tests watch a SLEEP that nothing wakes
+    for r in m.dev.config.clone() {
+        if let Some(f) = r.fields.iter().find(|f| f.name == "WDTE") {
+            let v = r.default & !(((1u32 << f.width) - 1) << f.pos);
+            if r.addr == 0x8008 {
+                cfg2 &= v;
+            } else {
+                put(r.addr, v as u16);
+            }
+        }
+    }
+    put(0x8008, cfg2 as u16);
     m.load_hex(&(text + ":00000001FF\n")).unwrap();
     m
 }
@@ -779,6 +791,7 @@ fn timer1_starts_one_cycle_after_on_and_a_tmr1h_write_clears_the_prescaler_witho
 fn timer1_gate_and_unknown_clocks_are_noted_and_it_stops_in_sleep() {
     let mut m = machine(&[NOP; 4], &[], true);
     poke(&mut m, "T1CLK", 1);
+    poke(&mut m, "T1GATE", 1); // TMR0_overflow_OUT: not a gate source the simulator models (the pin, GSS = 0, is)
     poke(&mut m, "T1GCON", 0x80);
     poke(&mut m, "T1CON", 0x01);
     run(&mut m, 3);

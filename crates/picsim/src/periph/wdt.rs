@@ -63,6 +63,13 @@ impl Wdt {
         })
     }
 
+    /// The single-register watchdog of the PIC16F152xx, PIC16F183xx and PIC16F180x6: WDTCON holds PS (bits 5:1), SEN (bit 0) and,
+    /// on the PIC16F152xx, CS (bit 7). There is no window and no WDTPSL/H, WDTTMR; their fields are unused (`usize::MAX`).
+    pub fn find_simple(dev: &Device) -> Option<Wdt> {
+        let con0 = dev.find_sfr("WDTCON")?.addr as usize;
+        Some(Wdt { con0, con1: usize::MAX, psl: usize::MAX, psh: usize::MAX, tmr: usize::MAX, wdte: 0, ps_fixed: false, win_fixed: false, cs_fixed: false, start: 0, armed: false, was_on: false, fosc_mhz: 64.0 })
+    }
+
     /// n of WDTPS: the period is 2^(n + 5) clocks.
     pub fn n(ps: u8) -> u32 {
         let n = u32::from(ps >> 1 & 31);

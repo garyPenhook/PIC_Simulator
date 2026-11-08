@@ -13,6 +13,7 @@ use crate::config::Config;
 use crate::periph::adc::Adc;
 use crate::periph::nvm16::Nvm16;
 use crate::periph::uart::{self, Uart};
+use crate::periph::wdt::{self, Wdt};
 use crate::periph::mssp::{self, I2cEv, Mssp};
 use crate::periph::{pin_name, Board, Bus, Pin, PinView, RxStream};
 use devdesc::Device;
@@ -42,6 +43,8 @@ struct Port16 {
 /// 8-bit mode compares TMR0L with the live TMR0H and goes to 0 on the next clock; 16-bit mode rolls over at FFFFh and
 /// buffers TMR0H; prescaler and postscaler are cleared by a write to TMR0L, T0CON0 or T0CON1 `[A106]`.
 struct Timer0 {
+    /// T0CKIPPS, the pin of the clock sources 000 (true) and 001 (inverted).
+    cki: Option<usize>,
     l: usize,
     h: usize,
     c0: usize,
@@ -57,6 +60,10 @@ struct Timer0 {
 /// 0000h. RD16 buffers TMRxH like Timer0; only a write to TMRxL clears the prescaler (23.6). Fosc/4 and Fosc clocks `[A107]`.
 struct Timer1 {
     n: u8,
+    /// TxCKIPPS (the clock pin), TxGPPS (the gate pin) and TxGATE (the gate source, newer layout only).
+    cki: Option<usize>,
+    gpps: Option<usize>,
+    gate: Option<usize>,
     l: usize,
     h: usize,
     con: usize,
@@ -89,6 +96,16 @@ struct Timer2 {
     last: u64,
 }
 
+/// The clock of a Timer1-type timer.
+enum Src {
+    /// Fosc/4 ticks per instruction cycle: 1 for Fosc/4, 4 for Fosc.
+    Cycles(u64),
+    /// The rising edges of the pin an input selection register (TxCKIPPS) selects.
+    Pin(usize),
+    /// A source the simulator does not model.
+    None,
+}
+
 /// Where an access made through a file-register operand or an FSR ends up.
 #[derive(Clone, Copy, Debug)]
 enum Tgt {
@@ -108,6 +125,10 @@ pub enum Reset {
     Software,
     StackOverflow,
     StackUnderflow,
+    /// Watchdog time-out (TO = 0, PCON0.RWDT = 0).
+    Wdt,
+    /// CLRWDT in the closed window of the windowed watchdog, or unarmed (PCON0.WDTWV = 0; TO = 0).
+    WdtWindow,
 }
 
 pub struct Pic16 {
@@ -244,6 +265,11 @@ pub struct Pic16 {
     iocif: Option<(usize, u8)>,
     int_pin: Option<(usize, (usize, u8), usize, u8)>,
     ioc_at: u64,
+    /// The watchdog (`periph/wdt.rs`, the timing model of the Q10; `[A126]`): the windowed WWDT of the PIC16F131xx and
+    /// PIC16F171xx (WDTCON0/1) or the single-register WDT (WDTCON). `wdt_reg` marks its registers.
+    wdt: Option<Wdt>,
+    wdt_simple: bool,
+    wdt_reg: Vec<bool>,
 }
 
 fn por_bits(s: &str) -> u8 {
@@ -368,6 +394,9 @@ impl Pic16 {
             iocif: None,
             int_pin: None,
             ioc_at: 0,
+            wdt: None,
+            wdt_simple: false,
+            wdt_reg: vec![false; MEM],
         };
         for g in &d.gpr {
             for a in g.start..g.end {
@@ -424,6 +453,20 @@ impl Pic16 {
         for a in [p.a_stkptr, p.a_tos, p.a_tos + 1] {
             p.core[a] = true;
         }
+        p.wdt = Wdt::find(dev).or_else(|| {
+            p.wdt_simple = true;
+            Wdt::find_simple(dev)
+        });
+        if let Some(w) = &p.wdt {
+            let regs: Vec<usize> = if p.wdt_simple { vec![w.con0] } else { vec![w.con0, w.con1, w.psl, w.psh, w.tmr] };
+            if regs.iter().all(|&r| r < MEM) {
+                for r in regs {
+                    (p.core[r], p.wdt_reg[r]) = (true, true);
+                }
+            } else {
+                p.wdt = None;
+            }
+        }
         p.a_pcon0 = dev.find_sfr("PCON0").map(|s| s.addr as usize);
         if let Some(a) = p.a_pcon0 {
             p.core[a] = true;
@@ -452,7 +495,10 @@ impl Pic16 {
                 p.core[a] = true;
                 p.tmr_reg[a] = true;
             }
-            p.t0 = Some(Timer0 { l, h, c0, c1, flag, cnt: 0, pre: 0, post: 0, last: 0 });
+            if let Some(a) = addr("T0CKIPPS") {
+                p.core[a] = true;
+            }
+            p.t0 = Some(Timer0 { cki: addr("T0CKIPPS"), l, h, c0, c1, flag, cnt: 0, pre: 0, post: 0, last: 0 });
         }
         // Timer1/3/5: the newer parts select the clock in TxCLK; the PIC16F183xx has no TxCLK (clock in TxCON).
         for n in [1u8, 3, 5] {
@@ -476,7 +522,10 @@ impl Pic16 {
                     p.core[a] = true;
                     p.tmr_reg[a] = true;
                 }
-                p.t1.push(Timer1 { n, l, h, con, clk, gcon, flag, cnt: 0, pre: 0, last: 0 });
+                for a in [addr(&format!("T{n}CKIPPS")), addr(&format!("T{n}GPPS")), addr(&format!("T{n}GATE"))].into_iter().flatten() {
+                    p.core[a] = true; // read by the model (the clock and gate pins)
+                }
+                p.t1.push(Timer1 { n, cki: addr(&format!("T{n}CKIPPS")), gpps: addr(&format!("T{n}GPPS")), gate: addr(&format!("T{n}GATE")), l, h, con, clk, gcon, flag, cnt: 0, pre: 0, last: 0 });
             }
         }
         // Timer2/4/6: T2TMR/T2PR with T2HLT and T2CLKCON, or the PIC16F183xx's TMR2/PR2 with neither.
@@ -682,6 +731,7 @@ impl Pic16 {
             }
         }
         self.cfg = Config::decode_words(&self.cfg_regs, &self.aux);
+        self.wdt_reset_regs();
         if let (Some(n), Some(b)) = (self.nvm.as_mut(), self.ee_base) {
             for (i, v) in n.eeprom.iter_mut().enumerate() {
                 *v = self.aux.get(&(b + 2 * i as u32)).copied().unwrap_or(0xFF);
@@ -814,6 +864,17 @@ impl Pic16 {
                         return v;
                     }
                 }
+                if self.wdt_reg[a] {
+                    let w = self.wdt.as_ref().unwrap();
+                    return if a == w.con0 {
+                        self.wdt.as_mut().unwrap().armed = true; // a read of WDTCON0 arms the WWDT in every mode (`[A90]`)
+                        self.mem[a]
+                    } else if a == w.con1 {
+                        self.mem[a]
+                    } else {
+                        self.wdt_value(if a == w.psl { wdt::PSL } else if a == w.psh { wdt::PSH } else { wdt::TMR })
+                    };
+                }
                 if a == 2 {
                     self.pc as u8
                 } else if a == self.a_tos || a == self.a_tos + 1 {
@@ -857,6 +918,8 @@ impl Pic16 {
                     let p = &self.ports[usize::from(i)];
                     let v = v & self.implemented[p.lat]; // RA3 has no latch bit where it is input only
                     (self.mem[p.lat], self.mem[p.port]) = (v, v & self.implemented[p.port]);
+                } else if self.wdt_reg[a] {
+                    self.wdt_write(a, v);
                 } else if self.pps_lock == Some(a) {
                     self.write_ppslock(v);
                 } else if self.pps_reg[a] {
@@ -1167,20 +1230,31 @@ impl Pic16 {
     /// Bring Timer0 to the current cycle: the clock ticks of cycles `last+1 ..= cycles`.
     fn sync_t0(&mut self) {
         let now = self.cycles;
-        let Some(t) = self.t0.as_mut() else { return };
-        let dt = now.saturating_sub(t.last);
-        t.last = now;
-        let (c0, c1) = (self.mem[t.c0], self.mem[t.c1]);
+        let Some(t0) = self.t0.as_ref() else { return };
+        let (last, cki) = (t0.last, t0.cki);
+        let (c0, c1) = (self.mem[t0.c0], self.mem[t0.c1]);
+        let dt = now.saturating_sub(last);
+        self.t0.as_mut().unwrap().last = now;
         if c0 & 0x80 == 0 || dt == 0 {
             return;
         }
-        if c1 >> 5 != 2 {
-            self.notes.insert(format!("Timer0 clock source CS={} is not modelled (only Fosc/4 is); it does not count", c1 >> 5));
-            return;
-        }
+        // the clock ticks of cycles last+1 ..= now: Fosc/4 cycles, or the edges of the T0CKIPPS pin that the stimulus makes (CS = 000
+        // counts rising edges, 001 the pin inverted: falling ones; the synchroniser of ASYNC = 0 adds no delay `[A127]`)
+        let ticks = match c1 >> 5 {
+            2 => dt,
+            cs @ (0 | 1) => match cki {
+                Some(r) => self.pin_edges(r, last, now, cs == 0),
+                None => 0,
+            },
+            cs => {
+                self.notes.insert(format!("Timer0 clock source CS={cs} is not modelled (Fosc/4 and the T0CKIPPS pin are); it does not count"));
+                return;
+            }
+        };
+        let t = self.t0.as_mut().unwrap();
         let sh = u32::from(c1 & 15);
         let mut raised = false;
-        let total = t.pre + dt;
+        let total = t.pre + ticks;
         t.pre = total & ((1u64 << sh) - 1);
         for _ in 0..total >> sh {
             let wrap = if c0 & 0x10 != 0 {
@@ -1383,61 +1457,158 @@ impl Pic16 {
     /// Sleep: Fosc/4 and Fosc stop, so no timer counts and none owes ticks when the part wakes.
     fn park_timers(&mut self) {
         let now = self.cycles;
-        if let Some(t) = self.t0.as_mut() {
+        // Timer0 with ASYNC = 1 and Timer1 with SYNC = 1 on their clock pins go on in Sleep and wake the part (DS40002343F 22.4
+        // p.246, 23.5 p.255, `[A127]`); the others have no clock
+        if self.t0_pin_async() {
+            self.sync_t0();
+        } else if let Some(t) = self.t0.as_mut() {
             t.last = now;
         }
         // `max` keeps the one-cycle start delay of a timer switched on just before SLEEP (`[A110]`)
-        for t in &mut self.t1 {
-            t.last = t.last.max(now);
+        for i in 0..self.t1.len() {
+            if self.t1_pin_async(i) {
+                self.sync_t1(i);
+            } else {
+                self.t1[i].last = self.t1[i].last.max(now);
+            }
         }
         for t in &mut self.t2 {
             t.last = t.last.max(now);
         }
     }
 
-    /// Timer1-type timer `i`: the Fosc/4 (CS = 1) or Fosc (CS = 2, four ticks a cycle) clock ticks of cycles `last+1 ..= cycles`.
+    /// Timer0 is on, takes its clock from the T0CKIPPS pin and is not synchronised to Fosc/4 (ASYNC = 1).
+    fn t0_pin_async(&self) -> bool {
+        self.t0.as_ref().is_some_and(|t| self.mem[t.c0] & 0x80 != 0 && self.mem[t.c1] >> 5 < 2 && self.mem[t.c1] & 0x10 != 0 && t.cki.is_some())
+    }
+
+    /// Timer1-type timer `i` is on, takes its clock from the TxCKIPPS pin and is not synchronised (SYNC = 1).
+    fn t1_pin_async(&self, i: usize) -> bool {
+        let t = &self.t1[i];
+        let con = self.mem[t.con];
+        let pin = match t.clk {
+            Some(c) => self.mem[c] & 0x1F == 0,
+            None => con >> 6 == 2 && con & 8 == 0,
+        };
+        con & 1 != 0 && con & 4 != 0 && pin && t.cki.is_some()
+    }
+
+    /// Timer1-type timer `i`: the Fosc/4 (CS = 1) or Fosc (CS = 2, four ticks a cycle) clock ticks of cycles `last+1 ..= cycles`,
+    /// or the rising edges of the TxCKIPPS pin (CS = 0; on the PIC16F183xx TMRxCS = 10 with TxSOSC = 0), counted only while the
+    /// gate lets the timer count when TMRxGE = 1 and the gate source is the TxGPPS pin `[A127]`.
     fn sync_t1(&mut self, i: usize) {
         let now = self.cycles;
-        let t = &mut self.t1[i];
-        let dt = now.saturating_sub(t.last);
-        t.last = t.last.max(now); // `last` is one cycle ahead just after TMRxON is set (`[A110]`)
-        let con = self.mem[t.con];
-        // the clock as Fosc/4 ticks per cycle: Some(1) Fosc/4, Some(4) Fosc, None for a source that is not modelled
-        let (cs, ticks) = match t.clk {
+        let (con_a, clk_a, gcon_a, gate_a, cki, gpps, last) = {
+            let t = &self.t1[i];
+            (t.con, t.clk, t.gcon, t.gate, t.cki, t.gpps, t.last)
+        };
+        let dt = now.saturating_sub(last);
+        self.t1[i].last = last.max(now); // `last` is one cycle ahead just after TMRxON is set (`[A110]`)
+        let con = self.mem[con_a];
+        // the clock: Fosc/4 ticks per cycle (1 for Fosc/4, 4 for Fosc), a pin, or a source that is not modelled
+        let (cs, src) = match clk_a {
             Some(c) => {
                 let cs = self.mem[c] & 0x1F;
-                (cs, [None, Some(1), Some(4)].get(usize::from(cs)).copied().flatten())
+                (cs, match cs {
+                    1 => Src::Cycles(1),
+                    2 => Src::Cycles(4),
+                    0 => cki.map_or(Src::None, Src::Pin),
+                    _ => Src::None,
+                })
             }
-            None => (con >> 6, [Some(1), Some(4)].get(usize::from(con >> 6)).copied().flatten()),
+            None => (con >> 6, match con >> 6 {
+                0 => Src::Cycles(1),
+                1 => Src::Cycles(4),
+                2 if con & 8 == 0 => cki.map_or(Src::None, Src::Pin),
+                _ => Src::None,
+            }),
         };
+        let g = self.mem[gcon_a];
+        let n = self.t1[i].n;
         let mut raised = false;
         'run: {
             if con & 1 == 0 || dt == 0 {
                 break 'run;
             }
-            if self.mem[t.gcon] & 0x80 != 0 {
-                self.notes.insert(format!("Timer{} gate (GE = 1) is not modelled; the timer holds its count", t.n));
+            let mut gate = None;
+            if g & 0x80 != 0 {
+                // gate enable mode on the gate pin; toggle, single-pulse and the other gate sources hold the count (noted)
+                let pin_src = gate_a.map_or(g & 3 == 0, |r| self.mem[r] & 0x1F == 0);
+                match gpps {
+                    Some(r) if pin_src && g & 0x30 == 0 => gate = Some((r, g & 0x40 != 0)),
+                    _ => {
+                        self.notes.insert(format!("Timer{n} gate: only the gate enable mode on the TxGPPS pin is modelled (not toggle, single pulse, or another source); the timer holds its count"));
+                        break 'run;
+                    }
+                }
+            }
+            if matches!(src, Src::None) {
+                self.notes.insert(format!("Timer{n} clock source CS={cs} is not modelled (Fosc/4, Fosc and the TxCKIPPS pin are); it does not count"));
                 break 'run;
             }
-            let Some(ticks) = ticks else {
-                self.notes.insert(format!("Timer{} clock source CS={cs} is not modelled (only Fosc/4 and Fosc); it does not count", t.n));
-                break 'run;
-            };
+            let ticks = self.t1_ticks(&src, gate, last, now);
+            let t = &mut self.t1[i];
             let sh = u32::from((con >> 4) & 3);
-            let total = t.pre + ticks * dt;
+            let total = t.pre + ticks;
             t.pre = total & ((1u64 << sh) - 1);
             let sum = u64::from(t.cnt) + (total >> sh);
             raised = sum >= 0x10000;
             t.cnt = sum as u16;
         }
+        let t = &self.t1[i];
+        let cnt = t.cnt;
+        let (h, l, f) = (t.h, t.l, t.flag);
         if con & 2 == 0 {
-            self.mem[t.h] = (t.cnt >> 8) as u8;
+            self.mem[h] = (cnt >> 8) as u8;
         }
-        self.mem[t.l] = t.cnt as u8;
-        let f = t.flag;
+        self.mem[l] = cnt as u8;
         if raised {
             self.raise_flag(f);
         }
+    }
+
+    /// Changes of the level of the pin the input selection register `reg` selects that the stimulus makes in cycles `from+1 ..= to`:
+    /// (cycle, new level). A pin change made by the program or a peripheral is not seen (`[A125]`).
+    fn pin_changes(&self, reg: usize, from: u64, to: u64) -> Vec<(u64, bool)> {
+        let mut times: Vec<u64> = self.drive.iter().map(|d| d.0).filter(|&t| t > from && t <= to).collect();
+        times.sort_unstable();
+        times.dedup();
+        times
+            .into_iter()
+            .filter_map(|t| {
+                let (old, new) = (self.pps_input_at(reg, t - 1)?, self.pps_input_at(reg, t)?);
+                (old != new).then_some((t, new))
+            })
+            .collect()
+    }
+
+    /// Rising (or falling) edges of the pin of `reg` in cycles `from+1 ..= to`.
+    fn pin_edges(&self, reg: usize, from: u64, to: u64, rising: bool) -> u64 {
+        self.pin_changes(reg, from, to).iter().filter(|c| c.1 == rising).count() as u64
+    }
+
+    /// The clock ticks `src` makes in cycles `from+1 ..= to` while the gate (the level of the pin of the register, active high or
+    /// low) is open; no gate: all of them.
+    fn t1_ticks(&self, src: &Src, gate: Option<(usize, bool)>, from: u64, to: u64) -> u64 {
+        // the gate pin's changes cut the interval into stretches of one level: stretch (a, b] ends one cycle before a change
+        let mut cuts = vec![from];
+        if let Some((r, _)) = gate {
+            cuts.extend(self.pin_changes(r, from, to).into_iter().map(|c| c.0 - 1));
+        }
+        cuts.push(to);
+        let mut total = 0;
+        for w in cuts.windows(2) {
+            let (a, b) = (w[0], w[1]);
+            if b <= a || gate.is_some_and(|(r, hi)| self.pps_input_at(r, b) != Some(hi)) {
+                continue;
+            }
+            total += match *src {
+                Src::Cycles(m) => m * (b - a),
+                Src::Pin(r) => self.pin_edges(r, a, b, true),
+                Src::None => 0,
+            };
+        }
+        total
     }
 
     /// Timer2-type timer `i`: the clock ticks of cycles `last+1 ..= cycles`.
@@ -1713,6 +1884,23 @@ impl Pic16 {
             let (a, set, clr) = self.mclr[i];
             self.mem[a] = (self.mem[a] & !clr | set) & self.implemented[a] | self.ones[a];
         }
+        // Table 10-4 (DS40002343F p.76): a watchdog time-out clears TO and RWDT; as on the Q10 the table, not the prose, decides
+        // (`[A91]`): a window violation only clears WDTWV.
+        match kind {
+            Reset::Wdt => {
+                self.flags(NTO, 0);
+                if let Some(a) = self.a_pcon0 {
+                    self.mem[a] &= !0x10;
+                }
+            }
+            Reset::WdtWindow => {
+                if let Some(a) = self.a_pcon0 {
+                    self.mem[a] &= !0x20;
+                }
+            }
+            _ => {}
+        }
+        self.wdt_reset_regs();
         self.mem[self.a_stkptr] = EMPTY;
         if let Some(t) = self.t0.as_mut() {
             (t.cnt, t.pre, t.post, t.last) = (0, 0, 0, self.cycles);
@@ -1749,6 +1937,124 @@ impl Pic16 {
         self.irq_new = false;
         self.stk_fault = None;
         self.reset_req = None;
+        if let Some(w) = self.wdt.as_mut() {
+            (w.start, w.armed, w.was_on) = (self.cycles, false, false); // any Reset clears the watchdog (14.5)
+        }
+    }
+
+    // ----- watchdog --------------------------------------------------------------------------------------------
+
+    /// WDTE, WDTCPS, WDTCWS and WDTCCS from the configuration words, and the registers' values after a Reset `[A126]`.
+    /// Windowed (DS40002343F 14.7.1-14.7.2 p.148-149): PS = WDTCPS (01011 when WDTCPS = 11111), WINDOW = WDTCWS, CS = WDTCCS
+    /// (000 when 111); SEN = 0; a field the configuration fixes is read only. Single register (DS40001839E Register 10-1
+    /// p.121, DS40002195E 14.6.1 p.105): PS = 01011 (2 s), SEN = 0, CS = 0.
+    fn wdt_reset_regs(&mut self) {
+        let Some(w) = self.wdt.as_mut() else { return };
+        let (cps, cws, ccs) = (self.cfg.get("WDTCPS").unwrap_or(0x1F), self.cfg.get("WDTCWS").unwrap_or(7), self.cfg.get("WDTCCS").unwrap_or(7));
+        (w.wdte, w.ps_fixed, w.win_fixed, w.cs_fixed) = (self.cfg.get("WDTE").unwrap_or(0) as u8, cps != 0x1F, cws != 7, ccs != 7);
+        if self.wdt_simple {
+            self.mem[w.con0] = 0x16 & self.implemented[w.con0];
+        } else {
+            let ps = if cps == 0x1F { 0x0B } else { cps as u8 };
+            self.mem[w.con0] = ps << 1 & self.implemented[w.con0];
+            let cs = if ccs == 7 { 0 } else { ccs as u8 };
+            self.mem[w.con1] = (cs << 4 | cws as u8) & self.implemented[w.con1];
+        }
+    }
+
+    /// WDTCON0 or WDTCON1 as `Wdt` expects them (the single-register WDT keeps CS in bit 7 of WDTCON: 1 is MFINTOSC).
+    fn wdt_cons(&self) -> (u8, u8) {
+        let w = self.wdt.as_ref().unwrap();
+        let c0 = self.mem[w.con0];
+        (c0, if self.wdt_simple { (c0 >> 7) << 4 } else { self.mem[w.con1] })
+    }
+
+    fn wdt_fosc(&mut self) {
+        let f = if self.board.fosc_mhz > 0.0 { self.board.fosc_mhz } else { 64.0 };
+        if let Some(w) = self.wdt.as_mut() {
+            w.fosc_mhz = f;
+        }
+    }
+
+    /// Awake: the watchdog is held clear while it is off, and a time-out resets the part.
+    fn wdt_tick(&mut self) {
+        if self.wdt.is_none() {
+            return;
+        }
+        self.wdt_fosc();
+        let (c0, c1) = self.wdt_cons();
+        let now = self.cycles;
+        let w = self.wdt.as_mut().unwrap();
+        let on = w.on(c0);
+        if !on || !w.was_on {
+            (w.start, w.armed) = (now, false);
+        }
+        w.was_on = on;
+        if on && now >= w.deadline(c0, c1) {
+            self.reset_req.get_or_insert(Reset::Wdt);
+        }
+    }
+
+    /// The cycle the watchdog times out while the part sleeps, when it counts in Sleep.
+    fn wdt_sleep_deadline(&mut self) -> Option<u64> {
+        self.wdt.as_ref()?;
+        self.wdt_fosc();
+        let (c0, c1) = self.wdt_cons();
+        let w = self.wdt.as_ref().unwrap();
+        w.on_sleep(c0).then(|| w.deadline(c0, c1))
+    }
+
+    /// Value of WDTPSL, WDTPSH or WDTTMR (`sub`) now (DS40002343F 14.7.3-14.7.5 p.150-152).
+    fn wdt_value(&mut self, sub: u8) -> u8 {
+        self.wdt_fosc();
+        let (c0, c1) = self.wdt_cons();
+        let (w, now) = (self.wdt.as_ref().unwrap(), self.cycles);
+        let psc = (w.clocks(now, c1) & ((1u64 << Wdt::n(c0)) - 1)) as u32;
+        match sub {
+            wdt::PSL => psc as u8,
+            wdt::PSH => (psc >> 8) as u8,
+            _ => w.window_value(now, c0, c1) << 3 | u8::from(w.armed) << 2 | (psc >> 16) as u8 & 3,
+        }
+    }
+
+    /// A write to WDTCON0 / WDTCON1 / WDTCON: read-only fields keep their value and the watchdog is cleared (14.5). The other
+    /// watchdog registers are read only.
+    fn wdt_write(&mut self, a: usize, v: u8) {
+        let Some(w) = self.wdt.as_mut() else { return };
+        let v = v & self.implemented[a];
+        if a == w.con0 {
+            let keep = if w.ps_fixed { 0x3E } else { 0 };
+            self.mem[a] = v & !keep | self.mem[a] & keep;
+        } else if a == w.con1 {
+            let keep = if w.cs_fixed { 0x70 } else { 0 } | if w.win_fixed { 0x07 } else { 0 };
+            self.mem[a] = v & !keep | self.mem[a] & keep;
+            if self.mem[a] >> 4 & 7 > 1 {
+                self.notes.insert("WDTCS selects a clock the simulator does not model (EXTOSC, SOSC or reserved): the watchdog runs from LFINTOSC".into());
+            }
+        } else {
+            return;
+        }
+        (w.start, w.armed) = (self.cycles, false);
+    }
+
+    /// CLRWDT. A valid one clears the watchdog; in the windowed WWDT one in the closed window, or not armed by a read of
+    /// WDTCON0, is a window violation and resets the part (14.4, 14.5.1 p.146-147). Nothing happens while the watchdog is off.
+    fn wdt_clear(&mut self) {
+        if self.wdt.is_none() {
+            return;
+        }
+        self.wdt_fosc();
+        let (c0, c1) = self.wdt_cons();
+        let now = self.cycles;
+        let w = self.wdt.as_mut().unwrap();
+        if !w.on(c0) {
+            return;
+        }
+        if !self.wdt_simple && w.violation(now, c0, c1) {
+            self.reset_req.get_or_insert(Reset::WdtWindow);
+        } else {
+            (w.start, w.armed) = (now, false);
+        }
     }
 
     // ----- program memory --------------------------------------------------------------------------------------
@@ -1806,7 +2112,12 @@ impl Pic16 {
     /// Asleep with nothing that can wake the part (no watchdog or peripheral is modelled yet).
     pub fn sleep_dead(&self) -> bool {
         // a pin the stimulus has yet to change can raise an IOC or INT flag
-        self.sleeping && !self.enabled_flag_any() && !self.drive.iter().any(|d| d.0 > self.cycles)
+        self.sleeping && !self.enabled_flag_any() && !self.drive.iter().any(|d| d.0 > self.cycles) && !self.wdt_counts_in_sleep()
+    }
+
+    /// The watchdog is on in Sleep (WDTE = 3, or 1 with SEN): it will wake the part.
+    fn wdt_counts_in_sleep(&self) -> bool {
+        self.wdt.as_ref().is_some_and(|w| w.on_sleep(self.mem[w.con0]))
     }
 
     /// A PIE & PIR bit pair is set (the wake-up condition; GIE and PEIE do not matter, 12.7 p.113).
@@ -1827,8 +2138,20 @@ impl Pic16 {
     fn step_core(&mut self) -> u32 {
         let start = self.cycles;
         if self.sleeping {
-            if self.enabled_flag_any() {
+            let wdt_wake = self.wdt_sleep_deadline().is_some_and(|d| self.cycles >= d);
+            if self.enabled_flag_any() || wdt_wake {
                 self.sleeping = false;
+                if let Some(w) = self.wdt.as_mut() {
+                    (w.start, w.armed) = (self.cycles, false); // leaving Sleep clears the watchdog again
+                }
+                if wdt_wake && !self.enabled_flag_any() {
+                    // a time-out in Sleep is no Reset: the part runs on with TO = PD = 0 (14.6 p.147); the single-register WDT also
+                    // clears RWDT (DS40002195E 14.5 p.104), the windowed one leaves PCON0 alone (Table 10-4) `[A126]`
+                    self.flags(NPD | NTO, 0);
+                    if self.wdt_simple && let Some(a) = self.a_pcon0 {
+                        self.mem[a] &= !0x10;
+                    }
+                }
                 let slept = self.cycles - self.sleep_at;
                 if let Some(a) = self.adc.as_mut() {
                     a.shift(slept); // only the ADCRC clock runs in Sleep and it is not modelled: the conversion waits
@@ -1840,7 +2163,16 @@ impl Pic16 {
                 }
                 self.no_irq = true; // the instruction after SLEEP runs first
             } else {
-                self.cycles += 1;
+                // With the watchdog counting, jump to its time-out or the next change the stimulus makes (a UART still receiving
+                // is stepped cycle by cycle) instead of stepping every cycle of a long Sleep.
+                let mut adv = 1;
+                if let Some(d) = self.wdt_sleep_deadline()
+                    && !self.uarts.iter().any(|u| !u.rx_in.is_empty() || u.rx_cur.is_some())
+                {
+                    let next = self.drive.iter().map(|x| x.0).filter(|&t| t > self.cycles).min().unwrap_or(u64::MAX);
+                    adv = d.min(next).saturating_sub(self.cycles).max(1);
+                }
+                self.cycles += adv;
                 self.park_timers(); // Fosc/4 does not run in Sleep
                 self.sync_nvm(); // the EEPROM write has its own timer `[A117]`
                 let mut ev = Vec::new();
@@ -1871,6 +2203,7 @@ impl Pic16 {
             self.run_one();
         }
         self.sync_timers();
+        self.wdt_tick();
         if let Some(k) = self.stk_fault.or(self.reset_req) {
             self.do_reset(k);
         }
@@ -2173,10 +2506,13 @@ impl Pic16 {
                 for u in &mut self.uarts {
                     u.sleep(true, 0);
                 }
-                self.notes.insert("SLEEP: the watchdog is not modelled, only an enabled interrupt flag wakes the part".into());
+                if let Some(w) = self.wdt.as_mut() {
+                    (w.start, w.armed) = (self.cycles, false); // entering Sleep clears the watchdog (14.6)
+                }
             }
             0x0064 => {
-                self.flags(NPD | NTO, NPD | NTO); // CLRWDT (the watchdog itself is not modelled)
+                self.flags(NPD | NTO, NPD | NTO); // CLRWDT: TO = PD = 1
+                self.wdt_clear();
             }
             0x0065..=0x0067 => {
                 if let Some(a) = self.a_tris[usize::from(w - 0x65)] {
