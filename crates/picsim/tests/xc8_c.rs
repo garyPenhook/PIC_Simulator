@@ -130,3 +130,35 @@ fn line_stepping_goes_through_the_c_source() {
     assert!(seen.windows(2).all(|w| w[0] != w[1]), "every step moves to a different line: {seen:?}");
     assert!(seen.contains(&6), "stepped into add (line 6): {seen:?}");
 }
+
+/// The Variables tab shows the locals of every routine with a pending call. Stopped on entry to `add` (first loop pass), the
+/// return address on the stack lies in `main`, and `main`'s locals read from their fixed addresses: x = 1, i = 0.
+#[test]
+fn the_caller_of_a_routine_is_found_from_the_stack_and_its_locals_read() {
+    let d = info("q10");
+    let mut m = q10();
+    let add = m.syms["add"];
+    m.until_routine = true;
+    assert_eq!(m.run(Some(add), 10_000), Stop::Halt);
+    let sp = usize::from(m.cpu.peek(m.cpu.m.regs.stkptr) & 0x7F);
+    assert_eq!(sp, 1, "one pending call");
+    let caller = d.func_at(m.cpu.stack[sp] - 2).expect("return address is in a routine"); // the CALL is the instruction before it
+    assert_eq!(d.funcs[caller].name, "main");
+    let mem: Vec<u8> = (0..0x1000).map(|a| m.cpu.peek(a)).collect();
+    let local = |d: &DebugInfo, n: &str| d.vars.iter().find(|v| v.name == n && v.scope == Some(caller)).unwrap_or_else(|| panic!("{n}")).show(&mem);
+    assert_eq!(local(&d, "x"), "1 (0x01)");
+    assert_eq!(local(&d, "i"), "0 (0x0000)");
+
+    let d = info("p16");
+    let mut m = p16();
+    let add = m.syms["add"];
+    m.until_routine = true;
+    assert_eq!(m.run(Some(add), 10_000), Stop::Halt);
+    assert_eq!(m.cpu.depth(), 1);
+    let caller = d.func_at(m.cpu.stack_entry(0) - 1).expect("return address is in a routine");
+    assert_eq!(d.funcs[caller].name, "main");
+    let mem: Vec<u8> = (0..0x1000).map(|a| m.cpu.peek(a)).collect();
+    let local = |d: &DebugInfo, n: &str| d.vars.iter().find(|v| v.name == n && v.scope == Some(caller)).unwrap_or_else(|| panic!("{n}")).show(&mem);
+    assert_eq!(local(&d, "x"), "1 (0x01)");
+    assert_eq!(local(&d, "i"), "0 (0x0000)");
+}
