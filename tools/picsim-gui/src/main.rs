@@ -776,10 +776,10 @@ impl eframe::App for App {
                         self.board_cfg = m.cpu.p.board.fresh();
                     }
                 }
-                4 => variables_ui(ui, &m.debug, pc, &m.cpu.m.mem, self.snap.as_ref()),
+                4 => variables_ui(ui, &m.debug, pc, &m.cpu.m.mem, &m.cpu.prog, self.snap.as_ref()),
                 _ => {
                     let (syms, vars, dev, debug) = (&m.syms, &m.debug.vars, &m.dev, &m.debug);
-                    watch_ui(ui, &mut self.watch, &mut self.watch_in, |n| syms.get(n).copied().or_else(|| vars.iter().find(|v| v.scope.is_none() && v.name == *n).map(|v| v.addr)).or_else(|| debug.path_addr(n).map(|p| p.0)).or_else(|| dev.find_sfr(n).map(|s| s.addr)), |a, l| m.peek(a, l));
+                    watch_ui(ui, &mut self.watch, &mut self.watch_in, |n| syms.get(n).copied().or_else(|| vars.iter().find(|v| v.scope.is_none() && !v.rom && v.name == *n).map(|v| v.addr)).or_else(|| debug.path_addr(n).map(|p| p.0)).or_else(|| dev.find_sfr(n).map(|s| s.addr)), |a, l| m.peek(a, l));
                 }
             }
         });
@@ -859,7 +859,7 @@ impl eframe::App for App {
 
 /// The Variables tab: the globals and the parameters and locals of the routine the PC is in, with their values in `mem`;
 /// those that differ from `snap` (data memory when the last Step or Run began) are marked.
-fn variables_ui(ui: &mut egui::Ui, debug: &picsim::debuginfo::DebugInfo, pc: u32, mem: &[u8], snap: Option<&Vec<u8>>) {
+fn variables_ui(ui: &mut egui::Ui, debug: &picsim::debuginfo::DebugInfo, pc: u32, mem: &[u8], prog: &[u8], snap: Option<&Vec<u8>>) {
     if debug.vars.is_empty() {
         ui.label("No variable information. Build with basil -g or xc8-cc -g and keep the .elf beside the .hex.");
         return;
@@ -869,15 +869,16 @@ fn variables_ui(ui: &mut egui::Ui, debug: &picsim::debuginfo::DebugInfo, pc: u32
         Some(i) => format!("in {}", debug.funcs[i].name),
         None => "in start-up code (globals only)".to_string(),
     });
+    let rom = debug.rom_image(prog);
     egui::ScrollArea::vertical().show(ui, |ui| {
         egui::Grid::new("vars").num_columns(3).striped(true).show(ui, |ui| {
             for v in debug.visible(f) {
                 let a = v.addr as usize;
-                let changed = snap.is_some_and(|s| s.get(a..a + v.bytes as usize) != mem.get(a..a + v.bytes as usize));
+                let changed = !v.rom && snap.is_some_and(|s| s.get(a..a + v.bytes as usize) != mem.get(a..a + v.bytes as usize));
                 let col = if changed { egui::Color32::from_rgb(255, 170, 60) } else { ui.visuals().text_color() };
                 ui.colored_label(col, format!("{}{}", v.name, if v.param { " (arg)" } else { "" }));
                 ui.weak(format!("{} @{:03X}", v.ty, v.addr));
-                ui.add(egui::Label::new(egui::RichText::new(v.show_with(mem, &debug.funcs)).monospace().color(col)).wrap());
+                ui.add(egui::Label::new(egui::RichText::new(v.show_with(mem, &rom, debug)).monospace().color(col)).wrap());
                 ui.end_row();
             }
         });
@@ -1031,10 +1032,10 @@ impl App {
                         self.board_cfg = m.cpu.board.fresh();
                     }
                 }
-                4 => variables_ui(ui, &m.debug, pc, &m.cpu.mem, self.snap.as_ref()),
+                4 => variables_ui(ui, &m.debug, pc, &m.cpu.mem, &m.cpu.prog, self.snap.as_ref()),
                 _ => {
                     let (syms, vars, dev, debug) = (&m.syms, &m.debug.vars, &m.dev, &m.debug);
-                    watch_ui(ui, &mut self.watch, &mut self.watch_in, |n| syms.get(n).copied().or_else(|| vars.iter().find(|v| v.scope.is_none() && v.name == *n).map(|v| v.addr)).or_else(|| debug.path_addr(n).map(|p| p.0)).or_else(|| dev.find_sfr(n).map(|s| s.addr)), |a, l| m.peek(a, l));
+                    watch_ui(ui, &mut self.watch, &mut self.watch_in, |n| syms.get(n).copied().or_else(|| vars.iter().find(|v| v.scope.is_none() && !v.rom && v.name == *n).map(|v| v.addr)).or_else(|| debug.path_addr(n).map(|p| p.0)).or_else(|| dev.find_sfr(n).map(|s| s.addr)), |a, l| m.peek(a, l));
                 }
             }
         });

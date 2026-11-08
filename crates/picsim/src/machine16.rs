@@ -70,11 +70,12 @@ impl Machine16 {
 
     /// Takes the debug information of an ELF: routines (and `__halt`) and global variables become symbols too,
     /// without replacing any that the assembly listing already gave.
-    pub fn load_debug(&mut self, d: DebugInfo) {
+    pub fn load_debug(&mut self, mut d: DebugInfo) {
+        d.set_word_addressed();
         for f in &d.funcs {
             self.syms.entry(f.name.clone()).or_insert(f.low);
         }
-        for v in d.vars.iter().filter(|v| v.scope.is_none()) {
+        for v in d.vars.iter().filter(|v| v.scope.is_none() && !v.rom) {
             self.syms.entry(v.name.clone()).or_insert(v.addr);
         }
         self.debug = d;

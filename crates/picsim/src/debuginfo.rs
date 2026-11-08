@@ -34,6 +34,8 @@ pub struct Var {
     /// Index into `DebugInfo::funcs` for a parameter or local; `None` for a global.
     pub scope: Option<usize>,
     pub param: bool,
+    /// The variable is a constant in program memory (`addr` is a program address), not in data memory.
+    pub rom: bool,
     /// The full type: members of a structure or union, enumerators, what a pointer points to.
     pub layout: Ty,
 }
@@ -51,6 +53,15 @@ pub struct DebugInfo {
     pub funcs: Vec<Func>,
     pub vars: Vec<Var>,
     pub lines: LineMap,
+    /// Every structure or union type seen, by the id a `Form::BackPtr` carries.
+    pub structs: std::collections::HashMap<u32, Ty>,
+    /// Program-memory address ranges that hold constants (`const` tables and string literals): variables there are read
+    /// from program memory, not data memory.
+    pub rom: Vec<(u32, u32)>,
+    /// Where a one-byte pointer into program memory (PIC18 `const` data) starts counting: the address of XC8's `smallconst` section.
+    pub near_base: Option<u32>,
+    /// True for a PIC16 (program memory is addressed in words, one byte of constant data per word).
+    pub word_addressed: bool,
 }
 
 impl DebugInfo {
@@ -63,6 +74,23 @@ impl DebugInfo {
         };
         let dwarf = gimli::Dwarf::load(load).map_err(|e| e.to_string())?;
         let mut info = DebugInfo { lines, ..Default::default() };
+        // Constants live in program memory: loadable sections that are neither code nor the image of initialised data. A variable
+        // in one of them is a constant unless it is also inside a data-memory (NOBITS) section, as the two address spaces overlap.
+        let ram: Vec<(u32, u32)> = obj.sections().filter(|s| s.kind() == object::SectionKind::UninitializedData).map(|s| (s.address() as u32, (s.address() + s.size()) as u32)).collect();
+        for s in obj.sections() {
+            let name = s.name().unwrap_or("");
+            if name.starts_with("smallconst") && info.near_base.is_none_or(|b| (s.address() as u32) < b) {
+                info.near_base = Some(s.address() as u32);
+            }
+            let flags: u64 = match s.flags() {
+                object::SectionFlags::Elf { sh_flags, .. } => sh_flags.0,
+                _ => 0,
+            };
+            let is_const = s.kind() != object::SectionKind::UninitializedData && flags & 0x2 != 0 && flags & 0x4 == 0 && !name.starts_with("idata") && !name.starts_with("cinit") && s.size() > 0;
+            if is_const {
+                info.rom.push((s.address() as u32, (s.address() + s.size()) as u32));
+            }
+        }
         let mut units = dwarf.units();
         while let Some(h) = units.next().map_err(|e| e.to_string())? {
             let unit = dwarf.unit(h).map_err(|e| e.to_string())?;
@@ -70,6 +98,7 @@ impl DebugInfo {
             // Only the compiler's own units: the assembler writes entries for its symbols too, and XC8 writes one for the
             // device header, which holds every SFR as a variable.
             let mut ours = false;
+            let mut xc8 = false;
             let mut cur_func: Option<usize> = None;
             let mut func_depth = 0isize;
             while let Some(e) = entries.next_dfs().map_err(|e| e.to_string())? {
@@ -82,6 +111,7 @@ impl DebugInfo {
                         let text = |at: gimli::DwAt| e.attr_value(at).and_then(|v| dwarf.attr_string(&unit, v).ok()).map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
                         let producer = text(gimli::DW_AT_producer);
                         // XC8 writes a unit per C file; only those (not the `.s` or `.h` units) hold the program's routines and variables.
+                        xc8 = producer.starts_with("Microchip MPLAB XC8");
                         ours = producer == "basil" || (producer.starts_with("Microchip MPLAB XC8") && text(gimli::DW_AT_name).to_ascii_lowercase().ends_with(".c"));
                     }
                     gimli::DW_TAG_subprogram if ours => {
@@ -109,7 +139,9 @@ impl DebugInfo {
                         let addr = ex[1..].iter().rev().fold(0u32, |a, b| a << 8 | u32::from(*b));
                         let Some(AttributeValue::UnitRef(t)) = e.attr_value(gimli::DW_AT_type) else { continue };
                         let Some(ty) = describe(&dwarf, &unit, t, &mut Vec::new()) else { continue };
-                        info.vars.push(Var { name, addr, bytes: ty.bytes, kind: ty.kind.clone(), elem: ty.elem, array: ty.array, ty: ty.name.clone(), layout: ty.clone(), scope: if e.tag() == gimli::DW_TAG_formal_parameter || cur_func.is_some() { cur_func } else { None }, param: e.tag() == gimli::DW_TAG_formal_parameter });
+                        register(&ty, &mut info.structs);
+                        let rom = xc8 && info.rom.iter().any(|r| (r.0..r.1).contains(&addr)) && !ram.iter().any(|r| (r.0..r.1).contains(&addr));
+                        info.vars.push(Var { rom, name, addr, bytes: ty.bytes, kind: ty.kind.clone(), elem: ty.elem, array: ty.array, ty: ty.name.clone(), layout: ty.clone(), scope: if e.tag() == gimli::DW_TAG_formal_parameter || cur_func.is_some() { cur_func } else { None }, param: e.tag() == gimli::DW_TAG_formal_parameter });
                     }
                     _ => {}
                 }
@@ -128,10 +160,32 @@ impl DebugInfo {
         self.funcs.iter().any(|f| f.low == addr && f.high > f.low)
     }
 
+    /// Program memory as one byte per address, which is how `Var::show_with` reads constants and what pointers into it point at:
+    /// the bytes themselves on a PIC18; on a PIC16 the low byte of each 14-bit word, which is where XC8 keeps one byte of constant data.
+    pub fn rom_image<'a>(&self, prog: &'a [u8]) -> std::borrow::Cow<'a, [u8]> {
+        if self.word_addressed {
+            prog.chunks(2).map(|w| w[0]).collect::<Vec<u8>>().into()
+        } else {
+            prog.into()
+        }
+    }
+
+    /// Marks the program as built for a PIC16: program addresses count words, and the section sizes in the ELF count bytes.
+    pub fn set_word_addressed(&mut self) {
+        self.word_addressed = true;
+        for r in &mut self.rom {
+            r.1 = r.0 + (r.1 - r.0) / 2;
+        }
+        let rom = self.rom.clone();
+        for v in &mut self.vars {
+            v.rom = v.rom && rom.iter().any(|r| (r.0..r.1).contains(&v.addr));
+        }
+    }
+
     /// The address and size of a global written as a path: `pt`, `pt.x`, `sh.tag[1]`, `pts[1].y`. `None` when any part is not found.
     pub fn path_addr(&self, path: &str) -> Option<(u32, u32)> {
         let end = path.find(['.', '[']).unwrap_or(path.len());
-        let v = self.vars.iter().find(|v| v.scope.is_none() && v.name == path[..end].trim())?;
+        let v = self.vars.iter().find(|v| v.scope.is_none() && v.name == path[..end].trim() && !v.rom)?;
         let (off, ty) = v.layout.resolve(&path[end..])?;
         Some((v.addr + off, ty.bytes))
     }
@@ -160,12 +214,26 @@ pub enum Form {
     Scalar,
     Array { of: Box<Ty>, count: u32 },
     /// A structure, or a union (every member at offset 0).
-    Struct { union: bool, members: Vec<Member> },
+    Struct { union: bool, members: Vec<Member>, id: u32 },
     Enum(Vec<(i64, String)>),
     /// `to` is `None` for `void *`, a function pointer, or a type that points back into itself (`struct node *next`).
-    Pointer { to: Option<Box<Ty>> },
+    Pointer { to: Option<Box<Ty>>, space: PtrSpace },
     /// A pointer to a function: the value is a program address, shown with the routine it enters.
     FuncPtr,
+    /// A pointer to a structure that was still being described (`struct node *next` inside `struct node`): `id` is the key
+    /// into `DebugInfo::structs`, where the structure is found once the whole type has been read.
+    BackPtr { id: u32 },
+}
+
+/// Where a pointer's value points, from the `DW_AT_address_class` XC8 writes.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum PtrSpace {
+    /// Data memory.
+    Data,
+    /// A one-byte offset into the `smallconst` section of program memory (PIC18 `const` data, class 31).
+    Near,
+    /// Two bytes whose bit 15 says program memory (the word address below it) when set and data memory when clear (PIC16 `const` pointers, class 25).
+    Either,
 }
 
 #[derive(Clone, Debug)]
@@ -175,6 +243,27 @@ pub struct Member {
     pub ty: Ty,
     /// `(bit offset from the member's byte, width)` of a bit-field.
     pub bits: Option<(u32, u32)>,
+}
+
+/// Records every structure and union inside `ty` (and what its pointers point to) under its id.
+fn register(ty: &Ty, into: &mut std::collections::HashMap<u32, Ty>) {
+    match &ty.form {
+        Form::Struct { members, id, .. } => {
+            if into.insert(*id, ty.clone()).is_none() {
+                for m in members {
+                    register(&m.ty, into);
+                }
+            }
+        }
+        Form::Array { of, .. } => register(of, into),
+        Form::Pointer { to: Some(t), .. } => register(t, into),
+        _ => {}
+    }
+}
+
+/// An id for the type entry at `at` that is unique across the program's units.
+fn uid(unit: &gimli::Unit<R<'_>>, at: gimli::UnitOffset) -> u32 {
+    at.to_debug_info_offset(&unit.header).map_or(at.0 as u32, |o| o.0 as u32)
 }
 
 fn attr_name(dwarf: &gimli::Dwarf<R<'_>>, unit: &gimli::Unit<R<'_>>, e: &gimli::DebuggingInformationEntry<R<'_>>) -> Option<String> {
@@ -282,7 +371,7 @@ fn describe(dwarf: &gimli::Dwarf<R<'_>>, unit: &gimli::Unit<R<'_>>, at: gimli::U
                 members.push(Member { name: attr_name(dwarf, unit, c).unwrap_or_default(), offset: offset_of(c), ty, bits });
             }
             open.pop();
-            Some(Ty { bytes, elem: bytes, kind: Kind::Unsigned, array: false, name, form: Form::Struct { union, members } })
+            Some(Ty { bytes, elem: bytes, kind: Kind::Unsigned, array: false, name, form: Form::Struct { union, members, id: uid(unit, at) } })
         }
         gimli::DW_TAG_enumeration_type => {
             let bytes = e.attr_value(gimli::DW_AT_byte_size)?.udata_value()? as u32;
@@ -307,36 +396,62 @@ fn describe(dwarf: &gimli::Dwarf<R<'_>>, unit: &gimli::Unit<R<'_>>, at: gimli::U
         }
         gimli::DW_TAG_pointer_type => {
             let bytes = e.attr_value(gimli::DW_AT_byte_size).and_then(|v| v.udata_value()).unwrap_or(2) as u32;
-            if let Some(AttributeValue::UnitRef(t)) = e.attr_value(gimli::DW_AT_type) {
-                if unit.entry(t).is_ok_and(|x| x.tag() == gimli::DW_TAG_subroutine_type) {
-                    return Some(Ty { bytes, elem: bytes, kind: Kind::Unsigned, array: false, name: "function *".into(), form: Form::FuncPtr });
-                }
+            let to_function = matches!(e.attr_value(gimli::DW_AT_type), Some(AttributeValue::UnitRef(t)) if unit.entry(t).is_ok_and(|x| x.tag() == gimli::DW_TAG_subroutine_type));
+            if to_function {
+                return Some(Ty { bytes, elem: bytes, kind: Kind::Unsigned, array: false, name: "function *".into(), form: Form::FuncPtr });
             }
             let target = match e.attr_value(gimli::DW_AT_type) {
                 Some(AttributeValue::UnitRef(t)) if !open.contains(&t) => describe(dwarf, unit, t, open),
                 Some(AttributeValue::UnitRef(t)) => {
                     // A pointer back to a structure being described: name only, so a list node does not recurse forever.
                     let n = unit.entry(t).ok().and_then(|x| attr_name(dwarf, unit, &x)).unwrap_or_default();
-                    return Some(Ty { bytes, elem: bytes, kind: Kind::Unsigned, array: false, name: format!("struct {n} *"), form: Form::Pointer { to: None } });
+                    return Some(Ty { bytes, elem: bytes, kind: Kind::Unsigned, array: false, name: format!("struct {n} *"), form: Form::BackPtr { id: uid(unit, t) } });
                 }
                 _ => None,
             };
+            let space = match e.attr_value(gimli::DW_AT_address_class) {
+                Some(AttributeValue::AddressClass(gimli::DwAddr(31))) if bytes == 1 => PtrSpace::Near,
+                Some(AttributeValue::AddressClass(gimli::DwAddr(25))) if bytes == 2 => PtrSpace::Either,
+                _ => PtrSpace::Data,
+            };
             let name = format!("{} *", target.as_ref().map_or("void", |t| t.name.as_str()));
-            Some(Ty { bytes, elem: bytes, kind: Kind::Unsigned, array: false, name, form: Form::Pointer { to: target.map(Box::new) } })
+            Some(Ty { bytes, elem: bytes, kind: Kind::Unsigned, array: false, name, form: Form::Pointer { to: target.map(Box::new), space } })
         }
         _ => None,
+    }
+}
+
+/// What displaying a value may look up: the routines (function pointers) and the structure types (back pointers).
+struct Ctx<'a> {
+    /// Data memory: where a pointer into data points, whichever memory the pointer itself is in.
+    data: &'a [u8],
+    funcs: &'a [Func],
+    structs: Option<&'a std::collections::HashMap<u32, Ty>>,
+    /// Program memory as one byte per address (`DebugInfo::rom_image`), for pointers into it.
+    rom: &'a [u8],
+    near_base: Option<u32>,
+}
+
+impl<'a> Ctx<'a> {
+    fn bare(data: &'a [u8]) -> Self {
+        Ctx { data, funcs: &[], structs: None, rom: &[], near_base: None }
     }
 }
 
 impl Var {
     /// The value in `mem` (data memory) as text. Multi-byte values are little-endian.
     pub fn show(&self, mem: &[u8]) -> String {
-        self.layout.show_in(mem, self.addr, 1, &[])
+        self.layout.show_in(mem, self.addr, 1, &Ctx::bare(mem))
     }
 
-    /// As `show`, with the program's routines so that a function pointer names the routine it points at.
-    pub fn show_with(&self, mem: &[u8], funcs: &[Func]) -> String {
-        self.layout.show_in(mem, self.addr, 1, funcs)
+    /// As `show`, with the program's routines and structure types: a function pointer names the routine it enters and a
+    /// pointer to its own structure type (`struct node *next`) shows what it points at.
+    ///
+    /// `rom` is the program memory as `DebugInfo::rom_image` gives it: a pointer into program memory (`const char *` to a
+    /// string literal) shows what it points at, and a constant held in program memory (a `const` table) is read from there.
+    pub fn show_with(&self, mem: &[u8], rom: &[u8], info: &DebugInfo) -> String {
+        let ctx = Ctx { data: mem, funcs: &info.funcs, structs: Some(&info.structs), rom, near_base: info.near_base };
+        self.layout.show_in(if self.rom { rom } else { mem }, self.addr, 1, &ctx)
     }
 }
 
@@ -369,10 +484,10 @@ impl Ty {
 
     /// The value of this type at data address `addr`. `deref` is how many levels of pointer to follow.
     pub fn show_at(&self, mem: &[u8], addr: u32, deref: u32) -> String {
-        self.show_in(mem, addr, deref, &[])
+        self.show_in(mem, addr, deref, &Ctx::bare(mem))
     }
 
-    fn show_in(&self, mem: &[u8], addr: u32, deref: u32, funcs: &[Func]) -> String {
+    fn show_in(&self, mem: &[u8], addr: u32, deref: u32, ctx: &Ctx<'_>) -> String {
         let Some(raw) = mem.get(addr as usize..(addr as usize).saturating_add(self.bytes as usize)) else { return "(outside RAM)".into() };
         match &self.form {
             Form::Scalar => scalar(&self.kind, raw),
@@ -382,11 +497,11 @@ impl Ty {
                     let s: String = raw.iter().take_while(|b| **b != 0).map(|b| if (32..127).contains(b) { *b as char } else { '.' }).collect();
                     return format!("\"{s}\"");
                 }
-                let items: Vec<String> = (0..(*count).min(16)).map(|i| of.show_in(mem, addr + i * of.bytes, deref, funcs)).collect();
+                let items: Vec<String> = (0..(*count).min(16)).map(|i| of.show_in(mem, addr + i * of.bytes, deref, ctx)).collect();
                 format!("{{{}{}}}", items.join(", "), if *count > 16 { ", ..." } else { "" })
             }
             Form::Struct { members, .. } => {
-                let items: Vec<String> = members.iter().map(|m| format!("{} = {}", m.name, m.show(mem, addr, deref, funcs))).collect();
+                let items: Vec<String> = members.iter().map(|m| format!("{} = {}", m.name, m.show(mem, addr, deref, ctx))).collect();
                 format!("{{{}}}", items.join(", "))
             }
             Form::Enum(names) => {
@@ -402,20 +517,38 @@ impl Ty {
                     return "NULL".into();
                 }
                 let at = format!("0x{u:0w$X}", w = raw.len() * 2);
-                match funcs.iter().find(|f| f.high > f.low && (f.low..f.high).contains(&(u as u32))) {
+                match ctx.funcs.iter().find(|f| f.high > f.low && (f.low..f.high).contains(&(u as u32))) {
                     Some(f) if f.low == u as u32 => format!("{at} -> {}", f.name),
                     Some(f) => format!("{at} -> {}+{}", f.name, u as u32 - f.low),
                     None => at,
                 }
             }
-            Form::Pointer { to } => {
+            Form::BackPtr { id } => {
                 let u: u64 = raw.iter().rev().fold(0, |x, y| x << 8 | u64::from(*y));
                 if u == 0 {
                     return "NULL".into();
                 }
                 let at = format!("0x{u:0w$X}", w = raw.len() * 2);
-                match to {
-                    Some(t) if deref > 0 && u as usize + t.bytes as usize <= mem.len() => format!("{at} -> {}", t.show_in(mem, u as u32, deref - 1, funcs)),
+                match ctx.structs.and_then(|m| m.get(id)) {
+                    Some(t) if deref > 0 && u as usize + t.bytes as usize <= ctx.data.len() => format!("{at} -> {}", t.show_in(ctx.data, u as u32, deref - 1, ctx)),
+                    _ => at,
+                }
+            }
+            Form::Pointer { to, space } => {
+                let u: u64 = raw.iter().rev().fold(0, |x, y| x << 8 | u64::from(*y));
+                if u == 0 {
+                    return "NULL".into();
+                }
+                let at = format!("0x{u:0w$X}", w = raw.len() * 2);
+                // The memory the pointer points into and the address in it.
+                let (buf, a) = match space {
+                    PtrSpace::Data => (Some(ctx.data), Some(u)),
+                    PtrSpace::Near => (Some(ctx.rom), ctx.near_base.map(|b| u64::from(b) + u)),
+                    PtrSpace::Either if u & 0x8000 != 0 => (Some(ctx.rom), Some(u & 0x7FFF)),
+                    PtrSpace::Either => (Some(ctx.data), Some(u)),
+                };
+                match (to, buf, a) {
+                    (Some(t), Some(b), Some(a)) if deref > 0 && a as usize + t.bytes as usize <= b.len() => format!("{at} -> {}", t.show_in(b, a as u32, deref - 1, ctx)),
                     _ => at,
                 }
             }
@@ -424,7 +557,7 @@ impl Ty {
 }
 
 impl Member {
-    fn show(&self, mem: &[u8], base: u32, deref: u32, funcs: &[Func]) -> String {
+    fn show(&self, mem: &[u8], base: u32, deref: u32, ctx: &Ctx<'_>) -> String {
         let at = base + self.offset;
         match self.bits {
             Some((lsb, width)) if (1..64).contains(&width) && lsb < 64 => {
@@ -433,7 +566,7 @@ impl Member {
                 let v = (u >> lsb) & ((1u64 << width) - 1);
                 if self.ty.kind == Kind::Signed && v >> (width - 1) & 1 == 1 { format!("{}", v as i64 - (1i64 << width)) } else { format!("{v}") }
             }
-            _ => self.ty.show_in(mem, at, deref, funcs),
+            _ => self.ty.show_in(mem, at, deref, ctx),
         }
     }
 }

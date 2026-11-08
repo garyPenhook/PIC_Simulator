@@ -63,6 +63,28 @@ fn pointers_show_the_address_and_what_it_points_at() {
         // A list node: the pointer to its own type shows the address only (no endless recursion), and NULL is NULL.
         assert!(var("n1").show(&mem).starts_with("{v = 1 (0x01), next = 0x") && !var("n1").show(&mem).contains("->"), "{tag}");
         assert_eq!(var("n2").show(&mem), "{v = 2 (0x02), next = NULL}", "{tag}");
+        // With the program's structure types, that pointer shows the node it points at; one level only, so a ring of nodes ends.
+        let n1 = var("n1").show_with(&mem, &d.rom_image(&[]), &d);
+        assert!(n1.starts_with("{v = 1 (0x01), next = 0x") && n1.ends_with(" -> {v = 2 (0x02), next = NULL}}"), "{tag}: {n1}");
+        assert_eq!(var("n2").show_with(&mem, &d.rom_image(&[]), &d), "{v = 2 (0x02), next = NULL}", "{tag}");
+        assert_eq!(var("n1").ty, "struct node");
+    }
+}
+
+#[test]
+fn a_ring_of_nodes_shows_one_level() {
+    for tag in ["q10", "p16"] {
+        let (d, mut mem) = run(tag);
+        let var = |n: &str| d.vars.iter().find(|v| v.name == n).unwrap();
+        let (n1, n2) = (var("n1").addr as usize, var("n2").addr as usize);
+        // n2.next -> n1, so n1 -> n2 -> n1 -> ...
+        let w = if tag == "q10" { 3 } else { 2 };
+        for i in 0..w {
+            mem[n2 + 1 + i] = (n1 as u32 >> (8 * i)) as u8;
+        }
+        let s = var("n1").show_with(&mem, &d.rom_image(&[]), &d);
+        assert_eq!(s.matches("->").count(), 1, "{tag}: {s}");
+        assert_eq!(s.matches("next = 0x").count(), 2, "{tag}: the inner node's pointer is the ring, shown as an address: {s}");
     }
 }
 

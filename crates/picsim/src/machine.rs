@@ -98,7 +98,7 @@ impl Machine {
         for f in &d.funcs {
             self.syms.entry(f.name.clone()).or_insert(f.low);
         }
-        for v in d.vars.iter().filter(|v| v.scope.is_none()) {
+        for v in d.vars.iter().filter(|v| v.scope.is_none() && !v.rom) {
             self.syms.entry(v.name.clone()).or_insert(v.addr);
         }
         self.debug = d;
