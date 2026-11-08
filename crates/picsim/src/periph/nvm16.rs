@@ -135,6 +135,11 @@ impl Nvm16 {
         a.checked_sub(0x7000).filter(|o| (*o as usize) < self.eeprom.len()).map(|o| o as usize)
     }
 
+    /// The cycle a write in progress ends, if one is.
+    pub fn deadline(&self) -> Option<u64> {
+        self.op.map(|o| o.0)
+    }
+
     /// Complete the write that is due by cycle `now`: true when it ended and NVMIF must be raised.
     pub fn sync(&mut self, mem: &mut [u8], now: u64) -> bool {
         if std::mem::take(&mut self.done) {

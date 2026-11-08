@@ -127,7 +127,7 @@ pub enum Reset {
     StackUnderflow,
     /// Watchdog time-out (TO = 0, PCON0.RWDT = 0).
     Wdt,
-    /// CLRWDT in the closed window of the windowed watchdog, or unarmed (PCON0.WDTWV = 0; TO = 0).
+    /// CLRWDT in the closed window of the windowed watchdog, or unarmed (PCON0.WDTWV = 0 only, `[A91]`; the CLRWDT itself left TO = PD = 1).
     WdtWindow,
 }
 
@@ -453,10 +453,11 @@ impl Pic16 {
         for a in [p.a_stkptr, p.a_tos, p.a_tos + 1] {
             p.core[a] = true;
         }
-        p.wdt = Wdt::find(dev).or_else(|| {
-            p.wdt_simple = true;
-            Wdt::find_simple(dev)
-        });
+        p.wdt = Wdt::find(dev);
+        p.wdt_simple = p.wdt.is_none();
+        if p.wdt_simple {
+            p.wdt = Wdt::find_simple(dev);
+        }
         if let Some(w) = &p.wdt {
             let regs: Vec<usize> = if p.wdt_simple { vec![w.con0] } else { vec![w.con0, w.con1, w.psl, w.psh, w.tmr] };
             if regs.iter().all(|&r| r < MEM) {
@@ -1591,6 +1592,13 @@ impl Pic16 {
     /// low) is open; no gate: all of them.
     fn t1_ticks(&self, src: &Src, gate: Option<(usize, bool)>, from: u64, to: u64) -> u64 {
         // the gate pin's changes cut the interval into stretches of one level: stretch (a, b] ends one cycle before a change
+        if gate.is_none() {
+            match *src {
+                Src::Cycles(m) => return m * (to - from),
+                Src::None => return 0,
+                Src::Pin(_) => {}
+            }
+        }
         let mut cuts = vec![from];
         if let Some((r, _)) = gate {
             cuts.extend(self.pin_changes(r, from, to).into_iter().map(|c| c.0 - 1));
@@ -2170,7 +2178,9 @@ impl Pic16 {
                     && !self.uarts.iter().any(|u| !u.rx_in.is_empty() || u.rx_cur.is_some())
                 {
                     let next = self.drive.iter().map(|x| x.0).filter(|&t| t > self.cycles).min().unwrap_or(u64::MAX);
-                    adv = d.min(next).saturating_sub(self.cycles).max(1);
+                    // a data EEPROM write ends on its own timer and raises NVMIF: the jump stops there too
+                    let nvm = self.nvm.as_ref().and_then(Nvm16::deadline).unwrap_or(u64::MAX);
+                    adv = d.min(next).min(nvm).saturating_sub(self.cycles).max(1);
                 }
                 self.cycles += adv;
                 self.park_timers(); // Fosc/4 does not run in Sleep
