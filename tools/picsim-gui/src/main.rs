@@ -857,6 +857,18 @@ impl eframe::App for App {
     }
 }
 
+/// The routines that get a "caller" section: those holding a pending CALL (innermost first), each once, without the current
+/// routine `cur` and without routines that have no parameters or locals.
+fn caller_frames(debug: &picsim::debuginfo::DebugInfo, cur: Option<usize>, callers: &[u32]) -> Vec<usize> {
+    let mut frames: Vec<usize> = Vec::new();
+    for &c in callers {
+        if let Some(i) = debug.func_at(c).filter(|&i| Some(i) != cur && !frames.contains(&i) && debug.vars.iter().any(|v| v.scope == Some(i))) {
+            frames.push(i);
+        }
+    }
+    frames
+}
+
 /// The Variables tab: the globals and the parameters and locals of the routine the PC is in, with their values in `mem`;
 /// those that differ from `snap` (data memory when the last Step or Run began) are marked. `callers` are the addresses of the
 /// pending CALL instructions, innermost first; each routine they lie in gets its own section (once, even when it recurses,
@@ -872,12 +884,7 @@ fn variables_ui(ui: &mut egui::Ui, debug: &picsim::debuginfo::DebugInfo, pc: u32
         None => "in start-up code (globals only)".to_string(),
     });
     let rom = debug.rom_image(prog);
-    let mut frames: Vec<usize> = Vec::new();
-    for &c in callers {
-        if let Some(i) = debug.func_at(c).filter(|&i| Some(i) != f && !frames.contains(&i) && debug.vars.iter().any(|v| v.scope == Some(i))) {
-            frames.push(i);
-        }
-    }
+    let frames = caller_frames(debug, f, callers);
     egui::ScrollArea::vertical().show(ui, |ui| {
         let row = |ui: &mut egui::Ui, v: &picsim::debuginfo::Var| {
             let a = v.addr as usize;
@@ -1345,5 +1352,46 @@ mod stopwatch_tests {
         sw.clear();
         assert_eq!(sw.elapsed(540), 0); // cleared
         assert!(!sw.counting);
+    }
+}
+
+#[cfg(test)]
+mod caller_frame_tests {
+    use super::caller_frames;
+    use picsim::debuginfo::{DebugInfo, Form, Func, Kind, Ty, Var};
+
+    fn var(name: &str, addr: u32, scope: Option<usize>) -> Var {
+        let layout = Ty { bytes: 1, elem: 1, kind: Kind::Unsigned, array: false, name: "unsigned char".into(), form: Form::Scalar };
+        Var { name: name.into(), addr, bytes: 1, kind: Kind::Unsigned, elem: 1, array: false, ty: "unsigned char".into(), scope, param: false, rom: false, layout }
+    }
+
+    /// main 0x100..0x200 and mid 0x200..0x300 and leaf 0x300..0x400 have variables; empty 0x400..0x500 has none.
+    fn info() -> DebugInfo {
+        let f = |n: &str, low, high| Func { name: n.into(), low, high };
+        DebugInfo {
+            funcs: vec![f("main", 0x100, 0x200), f("mid", 0x200, 0x300), f("leaf", 0x300, 0x400), f("empty", 0x400, 0x500)],
+            vars: vec![var("g", 0x20, None), var("m", 0x30, Some(0)), var("x", 0x31, Some(1)), var("y", 0x32, Some(2))],
+            ..DebugInfo::default()
+        }
+    }
+
+    #[test]
+    fn callers_come_innermost_first_without_the_current_routine() {
+        // In leaf, called from mid, called from main.
+        assert_eq!(caller_frames(&info(), Some(2), &[0x250, 0x150]), vec![1, 0]);
+    }
+
+    #[test]
+    fn a_recursive_routine_and_the_current_one_appear_once_or_not_at_all() {
+        // In mid, called from mid (recursion), called from main: mid is current, so only main is a caller.
+        assert_eq!(caller_frames(&info(), Some(1), &[0x250, 0x250, 0x150]), vec![0]);
+        // In leaf, mid recursing twice: mid once.
+        assert_eq!(caller_frames(&info(), Some(2), &[0x250, 0x250, 0x150]), vec![1, 0]);
+    }
+
+    #[test]
+    fn routines_without_variables_and_unknown_addresses_are_skipped() {
+        assert_eq!(caller_frames(&info(), Some(0), &[0x450, 0x900, 0x250]), vec![1]);
+        assert!(caller_frames(&info(), None, &[]).is_empty());
     }
 }
