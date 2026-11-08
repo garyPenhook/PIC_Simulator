@@ -164,6 +164,8 @@ pub enum Form {
     Enum(Vec<(i64, String)>),
     /// `to` is `None` for `void *`, a function pointer, or a type that points back into itself (`struct node *next`).
     Pointer { to: Option<Box<Ty>> },
+    /// A pointer to a function: the value is a program address, shown with the routine it enters.
+    FuncPtr,
 }
 
 #[derive(Clone, Debug)]
@@ -305,6 +307,11 @@ fn describe(dwarf: &gimli::Dwarf<R<'_>>, unit: &gimli::Unit<R<'_>>, at: gimli::U
         }
         gimli::DW_TAG_pointer_type => {
             let bytes = e.attr_value(gimli::DW_AT_byte_size).and_then(|v| v.udata_value()).unwrap_or(2) as u32;
+            if let Some(AttributeValue::UnitRef(t)) = e.attr_value(gimli::DW_AT_type) {
+                if unit.entry(t).is_ok_and(|x| x.tag() == gimli::DW_TAG_subroutine_type) {
+                    return Some(Ty { bytes, elem: bytes, kind: Kind::Unsigned, array: false, name: "function *".into(), form: Form::FuncPtr });
+                }
+            }
             let target = match e.attr_value(gimli::DW_AT_type) {
                 Some(AttributeValue::UnitRef(t)) if !open.contains(&t) => describe(dwarf, unit, t, open),
                 Some(AttributeValue::UnitRef(t)) => {
@@ -324,7 +331,12 @@ fn describe(dwarf: &gimli::Dwarf<R<'_>>, unit: &gimli::Unit<R<'_>>, at: gimli::U
 impl Var {
     /// The value in `mem` (data memory) as text. Multi-byte values are little-endian.
     pub fn show(&self, mem: &[u8]) -> String {
-        self.layout.show_at(mem, self.addr, 1)
+        self.layout.show_in(mem, self.addr, 1, &[])
+    }
+
+    /// As `show`, with the program's routines so that a function pointer names the routine it points at.
+    pub fn show_with(&self, mem: &[u8], funcs: &[Func]) -> String {
+        self.layout.show_in(mem, self.addr, 1, funcs)
     }
 }
 
@@ -357,6 +369,10 @@ impl Ty {
 
     /// The value of this type at data address `addr`. `deref` is how many levels of pointer to follow.
     pub fn show_at(&self, mem: &[u8], addr: u32, deref: u32) -> String {
+        self.show_in(mem, addr, deref, &[])
+    }
+
+    fn show_in(&self, mem: &[u8], addr: u32, deref: u32, funcs: &[Func]) -> String {
         let Some(raw) = mem.get(addr as usize..(addr as usize).saturating_add(self.bytes as usize)) else { return "(outside RAM)".into() };
         match &self.form {
             Form::Scalar => scalar(&self.kind, raw),
@@ -366,11 +382,11 @@ impl Ty {
                     let s: String = raw.iter().take_while(|b| **b != 0).map(|b| if (32..127).contains(b) { *b as char } else { '.' }).collect();
                     return format!("\"{s}\"");
                 }
-                let items: Vec<String> = (0..(*count).min(16)).map(|i| of.show_at(mem, addr + i * of.bytes, deref)).collect();
+                let items: Vec<String> = (0..(*count).min(16)).map(|i| of.show_in(mem, addr + i * of.bytes, deref, funcs)).collect();
                 format!("{{{}{}}}", items.join(", "), if *count > 16 { ", ..." } else { "" })
             }
             Form::Struct { members, .. } => {
-                let items: Vec<String> = members.iter().map(|m| format!("{} = {}", m.name, m.show(mem, addr, deref))).collect();
+                let items: Vec<String> = members.iter().map(|m| format!("{} = {}", m.name, m.show(mem, addr, deref, funcs))).collect();
                 format!("{{{}}}", items.join(", "))
             }
             Form::Enum(names) => {
@@ -380,6 +396,18 @@ impl Ty {
                     None => format!("{u}"),
                 }
             }
+            Form::FuncPtr => {
+                let u: u64 = raw.iter().rev().fold(0, |x, y| x << 8 | u64::from(*y));
+                if u == 0 {
+                    return "NULL".into();
+                }
+                let at = format!("0x{u:0w$X}", w = raw.len() * 2);
+                match funcs.iter().find(|f| f.high > f.low && (f.low..f.high).contains(&(u as u32))) {
+                    Some(f) if f.low == u as u32 => format!("{at} -> {}", f.name),
+                    Some(f) => format!("{at} -> {}+{}", f.name, u as u32 - f.low),
+                    None => at,
+                }
+            }
             Form::Pointer { to } => {
                 let u: u64 = raw.iter().rev().fold(0, |x, y| x << 8 | u64::from(*y));
                 if u == 0 {
@@ -387,7 +415,7 @@ impl Ty {
                 }
                 let at = format!("0x{u:0w$X}", w = raw.len() * 2);
                 match to {
-                    Some(t) if deref > 0 && u as usize + t.bytes as usize <= mem.len() => format!("{at} -> {}", t.show_at(mem, u as u32, deref - 1)),
+                    Some(t) if deref > 0 && u as usize + t.bytes as usize <= mem.len() => format!("{at} -> {}", t.show_in(mem, u as u32, deref - 1, funcs)),
                     _ => at,
                 }
             }
@@ -396,7 +424,7 @@ impl Ty {
 }
 
 impl Member {
-    fn show(&self, mem: &[u8], base: u32, deref: u32) -> String {
+    fn show(&self, mem: &[u8], base: u32, deref: u32, funcs: &[Func]) -> String {
         let at = base + self.offset;
         match self.bits {
             Some((lsb, width)) if (1..64).contains(&width) && lsb < 64 => {
@@ -405,7 +433,7 @@ impl Member {
                 let v = (u >> lsb) & ((1u64 << width) - 1);
                 if self.ty.kind == Kind::Signed && v >> (width - 1) & 1 == 1 { format!("{}", v as i64 - (1i64 << width)) } else { format!("{v}") }
             }
-            _ => self.ty.show_at(mem, at, deref),
+            _ => self.ty.show_in(mem, at, deref, funcs),
         }
     }
 }

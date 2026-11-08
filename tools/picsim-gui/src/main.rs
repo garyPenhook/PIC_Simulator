@@ -877,7 +877,7 @@ fn variables_ui(ui: &mut egui::Ui, debug: &picsim::debuginfo::DebugInfo, pc: u32
                 let col = if changed { egui::Color32::from_rgb(255, 170, 60) } else { ui.visuals().text_color() };
                 ui.colored_label(col, format!("{}{}", v.name, if v.param { " (arg)" } else { "" }));
                 ui.weak(format!("{} @{:03X}", v.ty, v.addr));
-                ui.add(egui::Label::new(egui::RichText::new(v.show(mem)).monospace().color(col)).wrap());
+                ui.add(egui::Label::new(egui::RichText::new(v.show_with(mem, &debug.funcs)).monospace().color(col)).wrap());
                 ui.end_row();
             }
         });
