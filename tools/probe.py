@@ -5,7 +5,7 @@
 
 Each quoted argument is one variant: its K=V pairs become -D defines for pic-as. Every variant is assembled, run
 to the label `done` on basil-sim (target/release/basil-sim, build it first) and, in one batched session, on MDB;
-the cycle count at `done` and the 8 bytes at 20h are printed for both, with `ok` or `DIFF`.
+the cycle count at `done` and the 8 bytes at 20h (NBYTES in the environment: more) are printed for both, with `ok` or `DIFF`.
 
     tools/probe.py /tmp/p tests/probe/t0_poll.S 16F17146 'PERIOD=9 PRE=7 CLR=1' 'PERIOD=9 PRE=8 CLR=1'
 
@@ -14,6 +14,7 @@ basil-sim's and `?` bytes. Override the tools with PICAS, DFP (the pack's xc8 fo
 """
 import glob, os, re, subprocess, sys
 
+NB = int(os.environ.get("NBYTES", "8"))  # bytes at 20h compared (NBYTES in the environment)
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
@@ -48,14 +49,14 @@ for i, v in enumerate(variants):
     done = int(re.search(r"\bdone ([0-9A-F]{4})\b", lst).group(1), 16)  # word address, from the symbol table
     open(os.path.join(d, "p.S"), "w").write(f";SYM done 0x{done:X}\n;SYM buf 0x20\n")
     s = subprocess.run([SIM, os.path.join(d, "p.hex"), "--device", part, "--asm", os.path.join(d, "p.S"),
-                        "--until", "done", "--dump", "buf:8", "--max-cycles", "100000"], capture_output=True, text=True).stdout
+                        "--until", "done", "--dump", f"buf:{NB}", "--max-cycles", "100000"], capture_output=True, text=True).stdout
     sc = re.search(r"cycles: (\d+)", s).group(1)
     sb = re.search(r"buf = \d+  \(([0-9A-F ]+)\)", s).group(1)
     jobs.append((v, os.path.join(d, "p.hex"), done, sc, sb))
 
 script = [f"device PIC{part}", "hwtool SIM"]
 for i, (v, hexf, done, _, _) in enumerate(jobs):
-    script += [f"program {hexf}", f"break *0x{done:X}", "run", "wait 20000", "stopwatch", "x /8xb 0x20", f"echo END_{i}", "delete"]
+    script += [f"program {hexf}", f"break *0x{done:X}", "run", "wait 20000", "stopwatch", f"x /{NB}xb 0x20", f"echo END_{i}", "delete"]
 script.append("quit")
 sp = os.path.join(out, "run.mdb")
 open(sp, "w").write("\n".join(script) + "\n")
@@ -67,7 +68,7 @@ bad = 0
 for i, (v, _, _, sc, sb) in enumerate(jobs):
     seg = segs[i] if i < len(segs) else ""
     mc = (re.findall(r"Stopwatch cycle count = (\d+)", seg) or ["?"])[-1]
-    m = re.search(r"x /8xb 0x20\s*\n((?:[0-9a-fA-F]{2}\s+){8})", seg)
+    m = re.search(rf"x /{NB}xb 0x20\s*\n((?:[0-9a-fA-F]{{2}}\s+){{{NB}}})", seg)
     mb = " ".join(x.upper() for x in m.group(1).split()) if m else "?"
     ok = sc == mc and sb == mb
     bad += not ok

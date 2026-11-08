@@ -27,6 +27,7 @@ use std::collections::{BTreeSet, VecDeque};
 pub(crate) mod adc;
 mod board;
 mod ccp;
+pub(crate) mod ccp16;
 mod clc;
 mod crc;
 pub(crate) mod wdt;

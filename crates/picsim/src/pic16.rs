@@ -11,6 +11,7 @@
 
 use crate::config::Config;
 use crate::periph::adc::Adc;
+use crate::periph::ccp16::{self, Ccp16};
 use crate::periph::nvm16::Nvm16;
 use crate::periph::uart::{self, Uart};
 use crate::periph::wdt::{self, Wdt};
@@ -270,6 +271,12 @@ pub struct Pic16 {
     wdt: Option<Wdt>,
     wdt_simple: bool,
     wdt_reg: Vec<bool>,
+    /// CCP1-CCP4 (`periph/ccp16.rs`, `[A128]`-`[A130]`), CCPTMRS(0), and per address the CCPxCON register's module.
+    ccps: Vec<Ccp16>,
+    ccptmrs: Option<usize>,
+    ccp_con: Vec<Option<u8>>,
+    /// CCPRxL/H and CCPxCAP: a write first brings the timers to the writing cycle, as a timer register write does.
+    ccp_data: Vec<bool>,
 }
 
 fn por_bits(s: &str) -> u8 {
@@ -397,6 +404,10 @@ impl Pic16 {
             wdt: None,
             wdt_simple: false,
             wdt_reg: vec![false; MEM],
+            ccps: Vec::new(),
+            ccptmrs: None,
+            ccp_con: vec![None; MEM],
+            ccp_data: vec![false; MEM],
         };
         for g in &d.gpr {
             for a in g.start..g.end {
@@ -702,6 +713,33 @@ impl Pic16 {
                 }
             }
         }
+        // CCP1-CCP4: the registers belong to the model (CCPxCON through `write_ccp_con`); the pin they drive is chosen by RxyPPS.
+        p.ccptmrs = addr("CCPTMRS0").or_else(|| addr("CCPTMRS")).filter(|&a| a < MEM);
+        for n in 1..=4u8 {
+            let Some(flag) = flag_of(&format!("CCP{n}IF")) else { continue };
+            match Ccp16::find(dev, n, flag) {
+                Some(c) if [c.con, c.cap, c.rl, c.rh].iter().all(|&a| a < MEM) => {
+                    for a in [c.con, c.cap, c.rl, c.rh].into_iter().chain(c.pps) {
+                        p.core[a] = true;
+                    }
+                    p.ccp_con[c.con] = Some(p.ccps.len() as u8);
+                    for a in [c.cap, c.rl, c.rh] {
+                        p.ccp_data[a] = true;
+                    }
+                    p.ccps.push(c);
+                }
+                Some(_) => {
+                    p.notes.insert(format!("CCP{n}: a register is outside the data memory; it is not modelled"));
+                }
+                None if dev.find_sfr(&format!("CCP{n}CON")).is_some() => {
+                    p.notes.insert(format!("CCP{n}: the simulator does not know this family's RxyPPS output code; it is not modelled"));
+                }
+                None => {}
+            }
+        }
+        if let Some(a) = p.ccptmrs.filter(|_| !p.ccps.is_empty()) {
+            p.core[a] = true;
+        }
         p.mclr = dev
             .sfr
             .iter()
@@ -927,6 +965,8 @@ impl Pic16 {
                     self.write_pps(a, v);
                 } else if self.tmr_reg[a] {
                     self.write_tmr(a, v & self.implemented[a]);
+                } else if let Some(ci) = self.ccp_con[a] {
+                    self.write_ccp_con(usize::from(ci), a, v);
                 } else if self.a_fvr == Some(a) {
                     // RDY is read only and follows EN at once; the data sheets give no start-up time (17146: 37.2 p.569)
                     let v = v & self.implemented[a];
@@ -962,6 +1002,9 @@ impl Pic16 {
                     self.uarts[usize::from(i)].write(sub, v, now, &mut self.mem, &mut self.tx);
                     self.flags_after(i, before);
                 } else {
+                    if self.ccp_data[a] {
+                        self.sync_timers(); // a match or a capture of the writing cycle sees the old CCPRx
+                    }
                     if self.flag_reg[a] {
                         // a flag Timer1 or the older Timer2 sets in this cycle is set before the write, so a write that
                         // clears it wins, also for CLRF and MOVWF; Timer0's and the newer Timer2's come after it (`[A110]`)
@@ -1011,6 +1054,14 @@ impl Pic16 {
         let v = self.mem[p.lat] & !tris | (ext | mclr_high) & tris & !ana;
         // The OLED's bus lines: an external pull-up on a released pin, held low while the OLED acknowledges.
         let v = v | self.pullup.get(i).copied().unwrap_or(0) & tris;
+        // a pin whose RxyPPS selects a CCP shows its output while the pin is an output (TRIS keeps control, 18.3 p.201)
+        let v = self.pps_out.iter().filter(|o| o.1 == i).fold(v, |v, &(reg, _, bit)| {
+            let code = self.mem[reg] & self.implemented[reg];
+            match self.ccps.iter().find(|c| code != 0 && c.code == code) {
+                Some(c) if tris >> bit & 1 == 0 => v & !(1 << bit) | u8::from(c.out) << bit,
+                _ => v,
+            }
+        });
         (v & !self.forced.get(i).copied().unwrap_or(0)) & self.implemented[p.port]
     }
 
@@ -1207,7 +1258,7 @@ impl Pic16 {
         }
         let v = v & self.implemented[a];
         self.mem[a] = v;
-        if v != 0 && self.pps_out.iter().any(|o| o.0 == a) {
+        if v != 0 && self.pps_out.iter().any(|o| o.0 == a) && !self.ccps.iter().any(|c| c.code == v) {
             self.notes.insert("a RxyPPS output source other than LATxy is not modelled on PIC16 parts; the pin shows its latch".into());
         }
     }
@@ -1287,6 +1338,7 @@ impl Pic16 {
 
     /// Bring every timer to the current cycle.
     fn sync_timers(&mut self) {
+        self.sync_captures(); // before the timers move on: a capture reads the count at its edge
         self.sync_uarts();
         self.sync_mssps();
         self.sync_adc();
@@ -1303,6 +1355,7 @@ impl Pic16 {
     /// Bring the timers whose flags land before a PIRn access in the same cycle to the current cycle: Timer1/3/5 and
     /// the older Timer2/4/6 (`flag_reg`, `[A110]`).
     fn sync_flag_timers(&mut self) {
+        self.sync_captures();
         self.sync_uarts();
         self.sync_mssps();
         self.sync_adc();
@@ -1476,6 +1529,14 @@ impl Pic16 {
         for t in &mut self.t2 {
             t.last = t.last.max(now);
         }
+        // no capture edges are looked for in Sleep, and a PWM pulse that was running goes on when the part wakes: the pin keeps
+        // its level and Timer2 does not count (27.4.7 p.334)
+        for c in &mut self.ccps {
+            if let Some(q) = c.clear_at.as_mut() {
+                *q += now - c.scan;
+            }
+            c.scan = now;
+        }
     }
 
     /// Timer0 is on, takes its clock from the T0CKIPPS pin and is not synchronised to Fosc/4 (ASYNC = 1).
@@ -1498,7 +1559,11 @@ impl Pic16 {
     /// or the rising edges of the TxCKIPPS pin (CS = 0; on the PIC16F183xx TMRxCS = 10 with TxSOSC = 0), counted only while the
     /// gate lets the timer count when TMRxGE = 1 and the gate source is the TxGPPS pin `[A127]`.
     fn sync_t1(&mut self, i: usize) {
-        let now = self.cycles;
+        self.sync_t1_to(i, self.cycles);
+    }
+
+    /// `sync_t1` up to cycle `now`, which is not later than the current one (a capture edge is looked at in its own cycle).
+    fn sync_t1_to(&mut self, i: usize, now: u64) {
         let (con_a, clk_a, gcon_a, gate_a, cki, gpps, last) = {
             let t = &self.t1[i];
             (t.con, t.clk, t.gcon, t.gate, t.cki, t.gpps, t.last)
@@ -1552,9 +1617,7 @@ impl Pic16 {
             let sh = u32::from((con >> 4) & 3);
             let total = t.pre + ticks;
             t.pre = total & ((1u64 << sh) - 1);
-            let sum = u64::from(t.cnt) + (total >> sh);
-            raised = sum >= 0x10000;
-            t.cnt = sum as u16;
+            raised = self.t1_count(i, total >> sh);
         }
         let t = &self.t1[i];
         let cnt = t.cnt;
@@ -1565,6 +1628,169 @@ impl Pic16 {
         self.mem[l] = cnt as u8;
         if raised {
             self.raise_flag(f);
+        }
+    }
+
+    // ----- CCP1-CCP4 (`periph/ccp16.rs`, `[A128]`-`[A130]`) ----------------------------------------------------
+
+    /// Set the output latch of CCP `ci` and the OUT bit of its CCPxCON.
+    fn ccp_set_out(&mut self, ci: usize, level: bool) {
+        let c = &mut self.ccps[ci];
+        c.out = level;
+        if level { self.mem[c.con] |= 0x20 } else { self.mem[c.con] &= !0x20 }
+    }
+
+    /// Timer1-type timer `i` counts `incr` clocks (after its prescaler): the compare modules that use it see their matches.
+    /// Returns whether TMRx rolled over from FFFFh to 0000h (TMRxIF).
+    fn t1_count(&mut self, i: usize, incr: u64) -> bool {
+        let n = self.t1[i].n;
+        let cnt = self.t1[i].cnt;
+        let users: Vec<usize> = (0..self.ccps.len())
+            .filter(|&k| {
+                let c = &self.ccps[k];
+                c.en(&self.mem) && matches!(c.mode(&self.mem), 1 | 2 | 8 | 9 | 10 | 11) && ccp16::timer_of(self.ccptmrs, &self.mem, c.n, false) == n
+            })
+            .collect();
+        if users.is_empty() {
+            let sum = u64::from(cnt) + incr;
+            self.t1[i].cnt = sum as u16;
+            return sum >= 0x10000;
+        }
+        let cmps: Vec<ccp16::Cmp> = users.iter().map(|&k| ccp16::Cmp { ccpr: self.ccps[k].ccpr(&self.mem), mode: self.ccps[k].mode(&self.mem) }).collect();
+        let a = ccp16::advance(cnt, incr, &cmps);
+        self.t1[i].cnt = a.cnt;
+        for (j, &k) in users.iter().enumerate() {
+            let hits = a.matches[j];
+            if hits == 0 {
+                continue;
+            }
+            match cmps[j].mode {
+                8 => self.ccp_set_out(k, true),
+                9 => self.ccp_set_out(k, false),
+                1 | 2 => {
+                    if hits % 2 == 1 {
+                        let level = !self.ccps[k].out;
+                        self.ccp_set_out(k, level);
+                    }
+                }
+                _ => {
+                    self.notes.insert(format!("CCP{} compare pulse output (MODE 1010/1011) does not drive the pin", self.ccps[k].n));
+                }
+            }
+            let f = self.ccps[k].flag;
+            self.raise_flag(f);
+        }
+        a.overflow
+    }
+
+    /// Capture: the edges the stimulus makes on the CCPxPPS pins since the last look. Each is looked at in its own cycle, with
+    /// Timer1 brought to that cycle first, so the captured count is the one at the edge. Edges are not watched in Sleep
+    /// (Timer1 does not run from Fosc/4 then, 27.2.5 p.328) nor while a module is not capturing.
+    fn sync_captures(&mut self) {
+        let now = self.cycles;
+        for ci in 0..self.ccps.len() {
+            let (scan, mode, ok) = {
+                let c = &self.ccps[ci];
+                (c.scan, c.mode(&self.mem), c.en(&self.mem))
+            };
+            self.ccps[ci].scan = now;
+            if !ok || !(3..=7).contains(&mode) {
+                continue;
+            }
+            let c = &self.ccps[ci];
+            let (n, cap, pps) = (c.n, self.mem[c.cap] & 15, c.pps);
+            let tn = ccp16::timer_of(self.ccptmrs, &self.mem, n, false);
+            let Some(ti) = self.t1.iter().position(|t| t.n == tn) else {
+                self.notes.insert(format!("CCP{n} selects a capture/compare timer this part does not have (CCPTMRS); it is not modelled"));
+                continue;
+            };
+            if cap != 0 {
+                self.notes.insert(format!("CCP{n} capture source CTS={cap} is not modelled (only the CCPxPPS pin); no capture"));
+                continue;
+            }
+            let Some(reg) = pps else { continue };
+            for (t, rising) in self.pin_changes(reg, scan, now) {
+                let hit = match mode {
+                    3 => true,
+                    4 => !rising,
+                    5 => rising,
+                    _ if rising => {
+                        let c = &mut self.ccps[ci];
+                        c.edges += 1;
+                        if c.edges == if mode == 6 { 4 } else { 16 } {
+                            c.edges = 0;
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                    _ => false,
+                };
+                if hit {
+                    self.sync_t1_to(ti, t);
+                    let cnt = self.t1[ti].cnt;
+                    let c = &self.ccps[ci];
+                    (self.mem[c.rl], self.mem[c.rh]) = (cnt as u8, (cnt >> 8) as u8);
+                    let f = c.flag;
+                    self.raise_flag(f);
+                }
+            }
+        }
+    }
+
+    /// PWM: Timer2-type timer `i` went through the period ends `ends` (cycles) with PR `pr` and prescaler 1:2^`sh` and is now at
+    /// cycle `now`. At each the pin of a module that uses the timer is set, unless the duty is 0, and the duty is taken from
+    /// CCPRx; the pin clears, and CCPxIF is set, when the time base reaches the duty `[A62]`.
+    fn pwm_apply(&mut self, i: usize, ends: &[u64], pr: u8, sh: u32, now: u64) {
+        let tn = self.t2[i].n;
+        for ci in 0..self.ccps.len() {
+            let c = &self.ccps[ci];
+            if !c.en(&self.mem) || c.mode(&self.mem) < 12 || ccp16::timer_of(self.ccptmrs, &self.mem, c.n, true) != tn {
+                continue;
+            }
+            let duty = c.duty(&self.mem);
+            // MDB (`tests/probe/ccp_pwm_seq.S`): the pin stays set for ceil(duty / 4) + 1 Timer2 counts (one count = 2^sh
+            // cycles), whatever the prescaler: one count longer than Equation 27-2 says at 1:1 and more at the others `[A128]`
+            let (pulse, period) = ((duty.div_ceil(4) + 1) << sh, (u64::from(pr) + 1) << sh);
+            let mut ended = false;
+            for &w in ends {
+                if self.ccps[ci].clear_at.is_some_and(|q| q <= w) {
+                    ended = true;
+                    self.ccp_set_out(ci, false);
+                }
+                self.ccps[ci].clear_at = None;
+                if duty == 0 {
+                    self.ccp_set_out(ci, false);
+                } else {
+                    self.ccp_set_out(ci, true);
+                    self.ccps[ci].clear_at = (pulse < period).then_some(w + pulse);
+                }
+            }
+            if self.ccps[ci].clear_at.is_some_and(|q| q <= now) {
+                ended = true;
+                self.ccps[ci].clear_at = None;
+                self.ccp_set_out(ci, false);
+            }
+            if ended {
+                let f = self.ccps[ci].flag;
+                self.raise_flag(f);
+            }
+        }
+    }
+
+    /// A write to CCPxCON: OUT is read only; turning the module off, or EN = 0, forces the output latch low (27.3.1 p.329) and
+    /// clears the capture prescaler; another mode ends a running PWM pulse's schedule.
+    fn write_ccp_con(&mut self, ci: usize, a: usize, v: u8) {
+        self.sync_timers();
+        let old = self.mem[a];
+        let v = v & self.implemented[a];
+        self.mem[a] = v & !0x20 | old & 0x20;
+        self.ccps[ci].edges = 0;
+        if v & 0x80 == 0 || v & 15 == 0 {
+            self.ccps[ci].clear_at = None;
+            self.ccp_set_out(ci, false);
+        } else if (v ^ old) & 15 != 0 {
+            self.ccps[ci].clear_at = None;
         }
     }
 
@@ -1622,11 +1848,15 @@ impl Pic16 {
     /// Timer2-type timer `i`: the clock ticks of cycles `last+1 ..= cycles`.
     fn sync_t2(&mut self, i: usize) {
         let now = self.cycles;
+        // a CCP in PWM mode that uses this timer
+        let tn = self.t2[i].n;
+        let pwm_user = self.ccps.iter().any(|c| c.en(&self.mem) && c.mode(&self.mem) >= 12 && ccp16::timer_of(self.ccptmrs, &self.mem, c.n, true) == tn);
         let t = &mut self.t2[i];
         let dt = now.saturating_sub(t.last);
         t.last = t.last.max(now); // one cycle ahead just after TMR2ON is set (`[A110]`)
         let con = self.mem[t.con];
         let mut raised = false;
+        let mut pwm: Option<(Vec<u64>, u8, u32)> = None;
         // (on, clock source, prescaler shift, OUTPS): T2CON of the newer parts, or the PIC16F183xx's (Fosc/4 only)
         let (on, cs, sh, outps) = match t.clk {
             Some(c) => (con & 0x80 != 0, self.mem[c] & 15, u32::from((con >> 4) & 7), con & 15),
@@ -1641,6 +1871,12 @@ impl Pic16 {
                     self.notes.insert(format!("Timer{} MODE={mode:#04x} needs an external reset/gate source; run as the software mode", t.n));
                 }
                 let one_shot = mode >> 3 == 1;
+                // CCP PWM: the period ends of a free-running timer on Fosc/4 (27.4.1 p.330)
+                if cs == 1 && mode == 0 {
+                    pwm = Some((ccp16::period_sets(t.cnt, t.pre, self.mem[t.pr], sh, u64::from(t.clk.is_none()), t.last - dt, t.last), self.mem[t.pr], sh));
+                } else if pwm_user {
+                    self.notes.insert(format!("Timer{} is not a free-running Fosc/4 timer: the CCP PWM that uses it does not run", t.n));
+                }
                 let total = t.pre + if cs == 2 { 4 * dt } else { dt };
                 t.pre = total & ((1u64 << sh) - 1);
                 let mut left = total >> sh;
@@ -1679,6 +1915,19 @@ impl Pic16 {
         let f = t.flag;
         if raised {
             self.raise_flag(f);
+        }
+        if let Some((ends, pr, sh)) = pwm {
+            self.pwm_apply(i, &ends, pr, sh, now);
+        } else if dt > 0 {
+            // Timer2 did not count (off, or a mode that is not modelled): a pulse that was running holds, pin and all
+            for ci in 0..self.ccps.len() {
+                let c = &mut self.ccps[ci];
+                if ccp16::timer_of(self.ccptmrs, &self.mem, c.n, true) == tn
+                    && let Some(q) = c.clear_at.as_mut()
+                {
+                    *q += dt;
+                }
+            }
         }
     }
 
@@ -1920,6 +2169,10 @@ impl Pic16 {
         }
         for t in &mut self.t2 {
             (t.cnt, t.pre, t.post, t.last) = (0, 0, 0, self.cycles);
+        }
+        for c in &mut self.ccps {
+            (c.out, c.clear_at, c.edges, c.scan) = (false, None, 0, self.cycles);
+            self.mem[c.con] &= !0x20;
         }
         if let Some(a) = self.a_fvr {
             // the MCLR column leaves FVRRDY (q) alone: it follows FVREN, or stays 1

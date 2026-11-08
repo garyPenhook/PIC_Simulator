@@ -1,6 +1,6 @@
 # pic-sim Manual
 
-Revision for **pic-sim 0.2.3** and **basil-sim 0.2.3** (one workspace version). Simulated families: **PIC18** (PIC18F27Q10 and the PIC18F04/05/06/14/15/16Q41) and **PIC16 enhanced mid-range** (PIC16F131xx, 152xx, 171xx, 180x6 and 183xx).
+Revision for **pic-sim 0.2.4** and **basil-sim 0.2.4** (one workspace version). Simulated families: **PIC18** (PIC18F27Q10 and the PIC18F04/05/06/14/15/16Q41) and **PIC16 enhanced mid-range** (PIC16F131xx, 152xx, 171xx, 180x6 and 183xx).
 
 This manual describes what the simulator does today. It is organised in the order you meet the tools: what the simulator is, how to build and start it, how to prepare a program for it, the graphical front end `pic-sim`, the command-line front end `basil-sim`, the stimulus file that describes the outside world, the simulated board (LEDs and OLED), and finally what is and is not modelled. Anything not listed here is not supported.
 
@@ -695,7 +695,7 @@ Models exist for the following; a register of anything else is plain storage tha
 | MSSP (SPI and I2C host) | yes | — | I2C host mode, to drive the OLED |
 | SPI host | via MSSP | yes | — |
 | I2C host | via MSSP | yes | — |
-| CCP1/2 and PWM3/4 | yes | — | — |
+| CCP1/2 and PWM3/4 | yes | — | CCP1 to CCP4 (capture, compare, standard PWM) on PIC16F131xx, 152xx, 171xx and 183xx; the separate PWM modules (PWM3 to PWM6, the PWM1/2 of the 171xx) are not modelled |
 | CWG1 | yes | — | — |
 | Comparators C1/C2 | yes | — | — |
 | CLC1–CLC8 | yes | — | — |
@@ -711,7 +711,9 @@ Where this table says "—", `docs/FACTS-SIM.md` documents no model for that per
 
 **The watchdog on a PIC16 part.** It times out and resets the part (TO and `RWDT` cleared) when the configuration enables it (`WDTE`), and a time-out in Sleep wakes the part with TO = PD = 0. A program that is built without `WDTE` set to off therefore has a watchdog: an erased configuration word enables it, with the default period of 2 s, and a program that never executes `CLRWDT` is reset after 2 s of simulated time. The period is counted in simulated instruction cycles from the clock the stimulus names (`fosc_mhz`, 64 MHz until set): at the wrong `fosc_mhz` the time-out arrives at the wrong simulated time. On the windowed parts (PIC16F131xx, PIC16F171xx) a `CLRWDT` that the window does not allow, or one that did not follow a read of `WDTCON0` while a window is set, resets the part and clears `WDTWV`. `WDTCON` of the PIC16F152xx is documented with a reset value of 0 but with a default period of 2 s: the simulator uses the 2 s. The PIC16F180x6 are modelled from the device file only, because their data sheet is not available to the project. The watchdog clock is always LFINTOSC (31 kHz, or 31.25 kHz where `WDTCON.CS` says MFINTOSC); EXTOSC and SOSC are not modelled.
 
-**Pins on a PIC16 part.** Only the pin changes that the stimulus makes (`[[pin]]`, `[[port]]`) reach `T0CKIPPS`, `TxCKIPPS` and `TxGPPS`; a level that the program or a peripheral puts on a pin is not seen by them. The CCP/PWM modules and the EUSART RX/TX pins of the PIC16 parts are not modelled.
+**Pins on a PIC16 part.** Only the pin changes that the stimulus makes (`[[pin]]`, `[[port]]`) reach `T0CKIPPS`, `TxCKIPPS` and `TxGPPS`; a level that the program or a peripheral puts on a pin is not seen by them (so a CCP output cannot be looped back into a capture input). The EUSART RX/TX pins of the PIC16 parts are not modelled.
+
+**CCP on a PIC16 part.** CCP1 to CCP4 drive the pin whose `RxyPPS` holds the CCP's output code while that pin is an output (TRIS bit clear); PORTx and the board's LEDs see it. Compare and PWM run on the same Timer1/Timer2 as the program (CCPTMRS picks the timer). Compare and PWM timing follow MDB where the data sheet's equations differ from it: a compare match is the Timer1 clock after TMR1 reached CCPR; after a match of MODE 0001 or 1011 TMR1 restarts at 1, so the period is CCPR clocks; a PWM pin is set at the first cycle of the last Timer2 count and stays set for `ceil(duty / 4) + 1` counts (one count is 2^n cycles for a 1:2^n prescaler). Not modelled: the compare pulse modes (MODE 1010, 1011 set the flag only), capture sources other than the `CCPxPPS` pin, capture in Sleep, a timer clocked from Fosc, and the PIC16F180x6 (no output code table). CCPxIF in PWM mode is set when the pulse ends.
 
 ## Configuration words
 
