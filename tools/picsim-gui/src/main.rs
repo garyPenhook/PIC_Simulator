@@ -128,6 +128,8 @@ struct App {
     last_src: Option<(PathBuf, u32)>,
     /// Data memory when the last Step/Run began: variables that differ are marked as changed.
     snap: Option<Vec<u8>>,
+    /// The calls when `snap` was taken: a variable on the software stack is compared with it only in the same frame.
+    snap_frames: Vec<picsim::debuginfo::Frame>,
     job: Option<Job>,
     /// (time, cycles) at the last rate sample, and the measured simulated cycles per second.
     rate: (std::time::Instant, u64, f64),
@@ -185,6 +187,7 @@ impl App {
             src_view: true,
             last_src: None,
             snap: None,
+            snap_frames: Vec::new(),
             job: None,
             rate: (std::time::Instant::now(), 0, 0.0),
             sw: Stopwatch::default(),
@@ -357,6 +360,7 @@ impl App {
 
     fn snapshot(&mut self) {
         self.snap = self.m.as_ref().map(|m| m.cpu.m.mem.clone()).or_else(|| self.m16.as_ref().map(|m| m.cpu.mem.clone()));
+        self.snap_frames = self.m.as_ref().map(|m| m.frames()).or_else(|| self.m16.as_ref().map(|m| m.frames())).unwrap_or_default();
     }
 
     /// Steps to the next BASIC line. `over` runs calls (and interrupts) to completion; `out` runs until the current
@@ -703,7 +707,8 @@ impl eframe::App for App {
             stopwatch_ui(ui, &mut self.sw, m.cpu.cycles, self.fosc_mhz);
             ui.separator();
             ui.heading(if m.debug.funcs.is_empty() { "Return stack" } else { "Call stack" });
-            let sp = usize::from(g(r.stkptr) & 0x7F).min(m.cpu.stack.len() - 1);
+            let sp = (m.cpu.stack_level() as usize).min(m.cpu.stack.len() - 1); // STKPTR without its flag bits
+            let sites = m.call_sites(); // innermost first: level sp, sp - 1, ...
             let dbg = &m.debug;
             // Routine and BASIC line of a program address.
             let loc = |a: u32| -> String {
@@ -722,7 +727,8 @@ impl eframe::App for App {
                 if dbg.funcs.is_empty() {
                     ui.monospace(format!("{i:>3}  {ret:06X}"));
                 } else {
-                    ui.monospace(format!("{i:>3}  {}", loc(ret.saturating_sub(2))));
+                    // The CALL before the return address, or the instruction an interrupt resumes at.
+                    ui.monospace(format!("{i:>3}  {}", loc(sites[sp - i])));
                 }
             }
             if !m.cpu.m.unmodelled.is_empty() || !m.cpu.notes.is_empty() {
@@ -776,7 +782,7 @@ impl eframe::App for App {
                         self.board_cfg = m.cpu.p.board.fresh();
                     }
                 }
-                4 => variables_ui(ui, &m.debug, pc, &(1..=usize::from(m.cpu.m.mem[m.cpu.m.regs.stkptr as usize] & 0x7F).min(m.cpu.stack.len() - 1)).rev().map(|i| m.cpu.stack[i].saturating_sub(2)).collect::<Vec<_>>(), &m.cpu.m.mem, &m.cpu.prog, self.snap.as_ref()),
+                4 => variables_ui(ui, &m.debug, pc, &m.frames(), &m.cpu.m.mem, &m.cpu.prog, self.snap.as_ref().map(|s| (s, self.snap_frames.as_slice()))),
                 _ => {
                     let (syms, vars, dev, debug) = (&m.syms, &m.debug.vars, &m.dev, &m.debug);
                     watch_ui(ui, &mut self.watch, &mut self.watch_in, |n| syms.get(n).copied().map(|a| (a, false)).or_else(|| vars.iter().find(|v| v.scope.is_none() && !v.rom && v.name == *n).map(|v| (v.addr, false))).or_else(|| debug.path_ref(n).map(|p| (p.0, p.2))).or_else(|| dev.find_sfr(n).map(|s| (s.addr, false))), |a, l, rom| if rom { debug.rom_bytes(&m.cpu.prog, a, l) } else { m.peek(a, l) });
@@ -807,8 +813,7 @@ impl eframe::App for App {
             }
             if self.src_view && !self.lines.is_empty() {
                 let home = std::path::Path::new(self.hex_path.trim()).file_stem().map(|s| s.to_string_lossy().trim_end_matches("_debug").to_ascii_lowercase());
-                let sp = usize::from(m.cpu.m.mem[m.cpu.m.regs.stkptr as usize] & 0x7F).min(m.cpu.stack.len() - 1);
-                let callers: Vec<u32> = (1..=sp).rev().map(|i| m.cpu.stack[i].saturating_sub(2)).collect(); // the CALL is the instruction before the return address
+                let callers = m.call_sites();
                 source_pane(ui, &self.lines, &self.elf_dir, &mut self.sources, &mut self.last_src, &mut m.breakpoints, &callers, pc, self.follow, if self.stay_home { home } else { None });
                 return;
             }
@@ -857,23 +862,32 @@ impl eframe::App for App {
     }
 }
 
-/// The routines that get a "caller" section: those holding a pending CALL (innermost first), each once, without the current
-/// routine `cur` and without routines that have no parameters or locals.
-fn caller_frames(debug: &picsim::debuginfo::DebugInfo, cur: Option<usize>, callers: &[u32]) -> Vec<usize> {
-    let mut frames: Vec<usize> = Vec::new();
-    for &c in callers {
-        if let Some(i) = debug.func_at(c).filter(|&i| Some(i) != cur && !frames.contains(&i) && debug.vars.iter().any(|v| v.scope == Some(i))) {
-            frames.push(i);
+/// The calls that get a "caller" section, as indices into `frames` (`DebugInfo::frames`: the current routine first, then each
+/// pending CALL, innermost first). A routine without parameters or locals gets none. A routine whose variables
+/// all have fixed addresses gets one section, and none when it is the current routine, as every call of it shows the same
+/// bytes; a routine with variables on XC8's software stack gets one per call, so each level of a recursion shows its own.
+fn caller_frames(debug: &picsim::debuginfo::DebugInfo, frames: &[picsim::debuginfo::Frame]) -> Vec<usize> {
+    let cur = frames.first().and_then(|f| f.func);
+    let mut out: Vec<usize> = Vec::new();
+    for (k, f) in frames.iter().enumerate().skip(1) {
+        let Some(i) = f.func else { continue };
+        let scoped = || debug.vars.iter().filter(move |v| v.scope == Some(i));
+        if scoped().next().is_none() {
+            continue;
+        }
+        if scoped().any(|v| v.frame.is_some()) || (Some(i) != cur && !out.iter().any(|&o| frames[o].func == Some(i))) {
+            out.push(k);
         }
     }
-    frames
+    out
 }
 
 /// The Variables tab: the globals and the parameters and locals of the routine the PC is in, with their values in `mem`;
-/// those that differ from `snap` (data memory when the last Step or Run began) are marked. `callers` are the addresses of the
-/// pending CALL instructions, innermost first; each routine they lie in gets its own section (once, even when it recurses,
-/// because its locals have one fixed address) below the current routine's.
-fn variables_ui(ui: &mut egui::Ui, debug: &picsim::debuginfo::DebugInfo, pc: u32, callers: &[u32], mem: &[u8], prog: &[u8], snap: Option<&Vec<u8>>) {
+/// those that differ from `snap` (data memory and the calls when the last Step or Run began) are marked; a variable on the
+/// software stack only when its call is the same one, at the same frame base, as then (`same_call`). `live` are the calls with their
+/// frame bases (`Machine::frames`), innermost first; the callers get sections below the current routine's (see
+/// `caller_frames`). Variables on XC8's software stack are read at the frame base of their call.
+fn variables_ui(ui: &mut egui::Ui, debug: &picsim::debuginfo::DebugInfo, pc: u32, live: &[picsim::debuginfo::Frame], mem: &[u8], prog: &[u8], snap: Option<(&Vec<u8>, &[picsim::debuginfo::Frame])>) {
     if debug.vars.is_empty() {
         ui.label("No variable information. Build with basil -g or xc8-cc -g and keep the .elf beside the .hex.");
         return;
@@ -884,33 +898,50 @@ fn variables_ui(ui: &mut egui::Ui, debug: &picsim::debuginfo::DebugInfo, pc: u32
         None => "in start-up code (globals only)".to_string(),
     });
     let rom = debug.rom_image(prog);
-    let frames = caller_frames(debug, f, callers);
+    let frames = caller_frames(debug, live);
+    // On a PIC16 a frame is at a linear address (2000h up): read through the linear view of data memory.
+    let data = debug.data_view(mem);
+    let (snap, then) = (snap.map(|s| debug.data_view(s.0)), snap.map_or(&[][..], |s| s.1));
     egui::ScrollArea::vertical().show(ui, |ui| {
-        let row = |ui: &mut egui::Ui, v: &picsim::debuginfo::Var| {
-            let a = v.addr as usize;
-            let changed = !v.rom && snap.is_some_and(|s| s.get(a..a + v.bytes as usize) != mem.get(a..a + v.bytes as usize));
+        let row = |ui: &mut egui::Ui, v: &picsim::debuginfo::Var, k: usize| {
+            let base = live.get(k).and_then(|f| f.base);
+            let at = v.place(base);
+            let comparable = v.frame.is_none() || same_call(then, live, k);
+            let changed = !v.rom && comparable && at.is_some_and(|a| snap.as_ref().is_some_and(|s| s.get(a as usize..(a + v.bytes) as usize) != data.get(a as usize..(a + v.bytes) as usize)));
             let col = if changed { egui::Color32::from_rgb(255, 170, 60) } else { ui.visuals().text_color() };
             ui.colored_label(col, format!("{}{}", v.name, if v.param { " (arg)" } else { "" }));
-            ui.weak(format!("{} @{:03X}", v.ty, v.addr));
-            ui.add(egui::Label::new(egui::RichText::new(v.show_with(mem, &rom, debug)).monospace().color(col)).wrap());
+            ui.weak(match (at, v.frame) {
+                (Some(a), _) => format!("{} @{a:03X}", v.ty),
+                (None, Some(off)) => format!("{} @frame{off:+}", v.ty),
+                (None, None) => v.ty.clone(),
+            });
+            ui.add(egui::Label::new(egui::RichText::new(v.show_framed(&data, &rom, debug, base)).monospace().color(col)).wrap());
             ui.end_row();
         };
         egui::Grid::new("vars").num_columns(3).striped(true).show(ui, |ui| {
             for v in debug.visible(f) {
-                row(ui, v);
+                row(ui, v, 0);
             }
         });
-        for (n, &i) in frames.iter().enumerate() {
+        for (n, &k) in frames.iter().enumerate() {
+            let i = live[k].func.unwrap_or_default();
             ui.separator();
             ui.label(format!("caller: {}", debug.funcs[i].name));
             egui::Grid::new(format!("vars_caller{n}")).num_columns(3).striped(true).show(ui, |ui| {
                 for v in debug.vars.iter().filter(|v| v.scope == Some(i)) {
-                    row(ui, v);
+                    row(ui, v, k);
                 }
             });
         }
     });
     ui.label("orange: changed since the last Step or Run");
+}
+
+/// True when call `k` of `now` (innermost first) is the call at the same depth of `then`, from the bottom of the stack, with
+/// the same routine and frame base: only then do the bytes of its frame in the snapshot belong to it.
+fn same_call(then: &[picsim::debuginfo::Frame], now: &[picsim::debuginfo::Frame], k: usize) -> bool {
+    let Some(j) = now.len().checked_sub(k + 1) else { return false };
+    then.len() > j && now.get(k) == then.get(then.len() - 1 - j)
 }
 
 /// The Watch tab: symbols (or SFR names) with a byte count, shown as unsigned, signed and hex. `addr` resolves a name,
@@ -996,6 +1027,7 @@ impl App {
                 ui.monospace(format!("> {}", loc(pc)));
             }
             let depth = m.cpu.depth() as usize;
+            let sites = m.call_sites(); // innermost first: slot depth - 1, depth - 2, ...
             for i in (0..depth.min(16)).rev() { // STKPTR keeps counting after an overflow with STVREN = 0, but only 16 entries exist
                 let ret = m.cpu.stack_entry(i);
                 if dbg.funcs.is_empty() {
@@ -1003,7 +1035,8 @@ impl App {
                     let near = self.labels.range(..=ret.saturating_sub(1)).next_back().map_or(String::new(), |(a, n)| format!("  {n}+{}", ret.saturating_sub(1) - a));
                     ui.monospace(format!("{:>3}  {ret:04X}{near}", i + 1));
                 } else {
-                    ui.monospace(format!("{:>3}  {}", i + 1, loc(ret.saturating_sub(1)))); // the CALL is the word before the return address
+                    // The CALL is the word before the return address; an interrupt resumes at it.
+                    ui.monospace(format!("{:>3}  {}", i + 1, loc(sites[depth.min(16) - 1 - i])));
                 }
             }
             if !m.cpu.unmodelled.is_empty() || !m.cpu.notes.is_empty() {
@@ -1059,7 +1092,7 @@ impl App {
                         self.board_cfg = m.cpu.board.fresh();
                     }
                 }
-                4 => variables_ui(ui, &m.debug, pc, &(0..(m.cpu.depth() as usize).min(16)).rev().map(|i| m.cpu.stack_entry(i).saturating_sub(1)).collect::<Vec<_>>(), &m.cpu.mem, &m.cpu.prog, self.snap.as_ref()),
+                4 => variables_ui(ui, &m.debug, pc, &m.frames(), &m.cpu.mem, &m.cpu.prog, self.snap.as_ref().map(|s| (s, self.snap_frames.as_slice()))),
                 _ => {
                     let (syms, vars, dev, debug) = (&m.syms, &m.debug.vars, &m.dev, &m.debug);
                     watch_ui(ui, &mut self.watch, &mut self.watch_in, |n| syms.get(n).copied().map(|a| (a, false)).or_else(|| vars.iter().find(|v| v.scope.is_none() && !v.rom && v.name == *n).map(|v| (v.addr, false))).or_else(|| debug.path_ref(n).map(|p| (p.0, p.2))).or_else(|| dev.find_sfr(n).map(|s| (s.addr, false))), |a, l, rom| if rom { debug.rom_bytes(&m.cpu.prog, a, l) } else { m.peek(a, l) });
@@ -1090,7 +1123,7 @@ impl App {
             }
             if self.src_view && !self.lines.is_empty() {
                 let home = std::path::Path::new(self.hex_path.trim()).file_stem().map(|s| s.to_string_lossy().trim_end_matches("_debug").to_ascii_lowercase());
-                let callers: Vec<u32> = (0..(m.cpu.depth() as usize).min(16)).rev().map(|i| m.cpu.stack_entry(i).saturating_sub(1)).collect(); // the CALL is the word before the return address
+                let callers = m.call_sites();
                 source_pane(ui, &self.lines, &self.elf_dir, &mut self.sources, &mut self.last_src, &mut m.breakpoints, &callers, pc, self.follow, if self.stay_home { home } else { None });
                 return;
             }
@@ -1358,16 +1391,27 @@ mod stopwatch_tests {
 #[cfg(test)]
 mod caller_frame_tests {
     use super::caller_frames;
-    use picsim::debuginfo::{DebugInfo, Form, Func, Kind, Ty, Var};
+    use picsim::debuginfo::{DebugInfo, Form, Frame, Func, Kind, Ty, Var};
+
+    /// The routines of the calls as `DebugInfo::frames` lists them (no frame bases): `cur`, then each CALL address.
+    fn calls(cur: Option<usize>, callers: &[u32]) -> Vec<Frame> {
+        let d = info();
+        std::iter::once(Frame { func: cur, base: None }).chain(callers.iter().map(|&c| Frame { func: d.func_at(c), base: None })).collect()
+    }
+
+    fn sections(cur: Option<usize>, callers: &[u32]) -> Vec<usize> {
+        let fr = calls(cur, callers);
+        caller_frames(&info(), &fr).into_iter().map(|k| fr[k].func.unwrap()).collect()
+    }
 
     fn var(name: &str, addr: u32, scope: Option<usize>) -> Var {
         let layout = Ty { bytes: 1, elem: 1, kind: Kind::Unsigned, array: false, name: "unsigned char".into(), form: Form::Scalar };
-        Var { name: name.into(), addr, bytes: 1, kind: Kind::Unsigned, elem: 1, array: false, ty: "unsigned char".into(), scope, param: false, rom: false, layout }
+        Var { name: name.into(), addr, bytes: 1, kind: Kind::Unsigned, elem: 1, array: false, ty: "unsigned char".into(), scope, param: false, rom: false, layout, frame: None }
     }
 
     /// main 0x100..0x200 and mid 0x200..0x300 and leaf 0x300..0x400 have variables; empty 0x400..0x500 has none.
     fn info() -> DebugInfo {
-        let f = |n: &str, low, high| Func { name: n.into(), low, high };
+        let f = |n: &str, low, high| Func { name: n.into(), low, high, frame_reg: None };
         DebugInfo {
             funcs: vec![f("main", 0x100, 0x200), f("mid", 0x200, 0x300), f("leaf", 0x300, 0x400), f("empty", 0x400, 0x500)],
             vars: vec![var("g", 0x20, None), var("m", 0x30, Some(0)), var("x", 0x31, Some(1)), var("y", 0x32, Some(2))],
@@ -1378,20 +1422,44 @@ mod caller_frame_tests {
     #[test]
     fn callers_come_innermost_first_without_the_current_routine() {
         // In leaf, called from mid, called from main.
-        assert_eq!(caller_frames(&info(), Some(2), &[0x250, 0x150]), vec![1, 0]);
+        assert_eq!(sections(Some(2), &[0x250, 0x150]), vec![1, 0]);
     }
 
     #[test]
     fn a_recursive_routine_and_the_current_one_appear_once_or_not_at_all() {
         // In mid, called from mid (recursion), called from main: mid is current, so only main is a caller.
-        assert_eq!(caller_frames(&info(), Some(1), &[0x250, 0x250, 0x150]), vec![0]);
+        assert_eq!(sections(Some(1), &[0x250, 0x250, 0x150]), vec![0]);
         // In leaf, mid recursing twice: mid once.
-        assert_eq!(caller_frames(&info(), Some(2), &[0x250, 0x250, 0x150]), vec![1, 0]);
+        assert_eq!(sections(Some(2), &[0x250, 0x250, 0x150]), vec![1, 0]);
     }
 
     #[test]
     fn routines_without_variables_and_unknown_addresses_are_skipped() {
-        assert_eq!(caller_frames(&info(), Some(0), &[0x450, 0x900, 0x250]), vec![1]);
-        assert!(caller_frames(&info(), None, &[]).is_empty());
+        assert_eq!(sections(Some(0), &[0x450, 0x900, 0x250]), vec![1]);
+        assert!(sections(None, &[]).is_empty());
+    }
+
+    #[test]
+    fn a_routine_with_stack_locals_gets_a_section_per_call_with_its_base() {
+        let mut d = info();
+        d.vars[2].frame = Some(-1); // mid's x is on the software stack
+        let fr = |func, base| Frame { func: Some(func), base };
+        // In mid at base 0x50, mid called at base 0x48, then main.
+        let live = [fr(1, Some(0x50)), fr(1, Some(0x48)), fr(1, None), fr(0, Some(0x40)), fr(0, None)];
+        assert_eq!(caller_frames(&d, &live), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn a_frame_is_compared_with_the_snapshot_only_when_it_is_the_same_call() {
+        use super::same_call;
+        let fr = |func, base| Frame { func: Some(func), base: Some(base) };
+        let then = [fr(1, 0x50), fr(0, 0x40)];
+        // One call deeper since: the old frames, counted from the bottom, are still the same calls; the new one is not.
+        let now = [fr(2, 0x58), fr(1, 0x50), fr(0, 0x40)];
+        assert!(!same_call(&then, &now, 0));
+        assert!(same_call(&then, &now, 1) && same_call(&then, &now, 2));
+        // Returned and called again at another base: not the same call.
+        assert!(!same_call(&then, &[fr(1, 0x52), fr(0, 0x40)], 0));
+        assert!(!same_call(&then, &now, 3));
     }
 }

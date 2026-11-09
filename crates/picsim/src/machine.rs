@@ -82,6 +82,7 @@ impl Machine {
             c.p.set_board(self.cpu.p.board.fresh());
             c.stim = self.stimulus.clone();
             self.cpu = c;
+            self.watch_main();
         }
     }
 
@@ -94,7 +95,12 @@ impl Machine {
 
     /// Takes the debug information of an ELF: routines (and `__halt`) and global variables become symbols too,
     /// without replacing any that the assembly listing already gave.
-    pub fn load_debug(&mut self, d: DebugInfo) {
+    pub fn load_debug(&mut self, mut d: DebugInfo) {
+        let reg = |n: &str| self.dev.find_sfr(n).map(|s| s.addr);
+        d.fsr1l = reg("FSR1L");
+        if let (Some(fsr1h), Some(postinc1), Some(postdec1)) = (reg("FSR1H"), reg("POSTINC1"), reg("POSTDEC1")) {
+            d.stack_regs = Some(crate::debuginfo::StackRegs { fsr1h, postinc1, postdec1 });
+        }
         for f in &d.funcs {
             self.syms.entry(f.name.clone()).or_insert(f.low);
         }
@@ -102,6 +108,7 @@ impl Machine {
             self.syms.entry(v.name.clone()).or_insert(v.addr);
         }
         self.debug = d;
+        self.watch_main();
     }
 
     /// Symbols from the assembly listing basil writes next to the hex: `;SYM name 0xADDR` for code labels and
@@ -110,9 +117,31 @@ impl Machine {
         self.syms.extend(parse_asm_symbols(asm));
     }
 
-    /// Hardware stack depth (STKPTR).
+    /// Where each routine with a pending return is, innermost first: the CALL instruction before a return address, or for
+    /// an interrupt (`Pic18::entry_irq`) the instruction it will resume at.
+    pub fn call_sites(&self) -> Vec<u32> {
+        (1..=self.levels()).rev().map(|i| if self.cpu.entry_irq[i] { self.cpu.stack[i] } else { self.cpu.stack[i].saturating_sub(2) }).collect()
+    }
+
+    /// Return-stack levels in use (STKPTR without its flag bits), within the stack the model keeps.
+    fn levels(&self) -> usize {
+        (self.cpu.stack_level() as usize).min(self.cpu.stack.len() - 1)
+    }
+
+    /// The live calls with their frame bases (`DebugInfo::frames`), innermost first: FSR1 at each call from `Pic18::entry_sp`.
+    pub fn frames(&self) -> Vec<crate::debuginfo::Frame> {
+        let entries: Vec<Option<u32>> = (0..=self.levels()).rev().map(|l| self.cpu.entry_sp.get(l).copied().flatten()).collect();
+        self.debug.frames(self.cpu.pc, &self.call_sites(), &entries, &self.cpu.prog)
+    }
+
+    /// Has the core note FSR1 when `main` is entered (`Pic18::entry_watch`); after loading debug information and a Reset.
+    fn watch_main(&mut self) {
+        self.cpu.entry_watch = self.debug.funcs.iter().find(|f| f.name == "main").map(|f| f.low);
+    }
+
+    /// Hardware stack depth (STKPTR without its flag bits, `Pic18::stack_level`).
     pub fn stack_depth(&self) -> u8 {
-        self.cpu.m.mem[self.cpu.m.regs.stkptr as usize] & 0x7F
+        self.cpu.stack_level() as u8
     }
 
     /// Starts a source-line step (see `line_step`).

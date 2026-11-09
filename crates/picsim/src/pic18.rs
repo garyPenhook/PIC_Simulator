@@ -32,6 +32,16 @@ pub struct Pic18 {
     pub state: State,
     pub depth: u32,
     pub stack: Vec<u32>,
+    /// FSR1 when each live call was made, by return-stack level (the level the call's return address went to; level 0 is
+    /// the routine at the bottom, recorded when the PC reaches `entry_watch`). The debugger works out the frame of each
+    /// call on XC8's software stack from it (`DebugInfo::frames`). `None` until a call at that level, and after a Reset.
+    pub entry_sp: Vec<Option<u32>>,
+    /// By the same level: true when an interrupt pushed the return address there (it is the instruction to resume, not the
+    /// one after a CALL).
+    pub entry_irq: Vec<bool>,
+    /// The routine at the bottom of the call stack (`main`, which start-up code enters with GOTO), for `entry_sp[0]`: noted
+    /// when the PC reaches it with the return stack empty.
+    pub entry_watch: Option<u32>,
     pub shadow: (u8, u8, u8),
     /// Configuration fields as programmed by the loaded image.
     pub cfg: crate::config::Config,
@@ -180,6 +190,9 @@ impl Pic18 {
             notes: BTreeSet::new(),
             wide_fsr,
             stk_mask: (depth + 1).next_power_of_two() as u8 - 1,
+            entry_sp: vec![None; depth as usize + 2],
+            entry_irq: vec![false; depth as usize + 2],
+            entry_watch: None,
             stk_fault: None,
             mclr_ev: Vec::new(),
             mclr_next: 0,
@@ -437,17 +450,26 @@ impl Pic18 {
 
     // ----- hardware stack ------------------------------------------------------------------------------------
 
+    /// Return-stack levels in use: STKPTR without its flag bits (`stk_mask`), at most the part's depth.
+    pub fn stack_level(&self) -> u32 {
+        u32::from(self.m.mem[self.m.regs.stkptr as usize] & self.stk_mask).min(self.depth)
+    }
+
     fn push(&mut self, v: u32) {
         let a = self.m.regs.stkptr as usize;
         let sp = u32::from(self.m.mem[a] & self.stk_mask);
         if sp >= self.depth {
             self.set_pcon(0x80); // STKOVF
             self.stack[self.depth as usize] = v; // overwrites the top entry; the pointer stays
+            self.entry_sp[self.depth as usize] = Some(self.fsr(1));
+            self.entry_irq[self.depth as usize] = false;
             if self.cfg.get("STVREN") != Some(0) {
                 self.stk_fault = Some(ResetKind::StackOverflow);
             }
         } else {
             self.stack[sp as usize + 1] = v;
+            self.entry_sp[sp as usize + 1] = Some(self.fsr(1));
+            self.entry_irq[sp as usize + 1] = false;
             self.m.mem[a] = self.m.mem[a] & !self.stk_mask | (sp as u8 + 1);
         }
     }
@@ -495,6 +517,9 @@ impl Pic18 {
     /// Execute one instruction; returns the cycles it took (also added to `self.cycles`).
     pub fn step(&mut self) -> u32 {
         let start = self.cycles;
+        if self.entry_watch == Some(self.pc) && self.stack_level() == 0 {
+            self.entry_sp[0] = Some(self.fsr(1));
+        }
         if self.mclr_hold {
             return self.hold_step();
         }
@@ -926,6 +951,8 @@ impl Pic18 {
         };
         let ret = self.pc;
         self.push(ret);
+        let level = self.stack_level() as usize;
+        self.entry_irq[level] = true;
         self.pc = target & self.pc_mask;
         // MDB reaches the vector three cycles after the flag was set, whichever cycle of a multi-cycle instruction
         // that was; never less than two cycles after the instruction `[A4]`. A flag that was already pending
@@ -1294,6 +1321,8 @@ impl Pic18 {
     /// the reset state, data RAM and the program stay, and the peripherals start over (rebuilt, the stimulus applied again; the
     /// logs, the notes and the board stay). `[A91]`-`[A93]` in FACTS-SIM.md.
     pub fn reset_cond(&mut self, kind: ResetKind) {
+        self.entry_sp.fill(None);
+        self.entry_irq.fill(false);
         for &(a, set, clr) in &self.mclr {
             self.m.mem[a] = (self.m.mem[a] & !clr | set) & self.m.implemented[a];
         }

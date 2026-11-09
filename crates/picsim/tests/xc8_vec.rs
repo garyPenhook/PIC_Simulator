@@ -66,3 +66,23 @@ fn a_vector_outside_the_program_memory_resets_with_nmemv_clear() {
     assert_eq!(sfr(&m, "PCON1") & 0x02, 0, "nMEMV cleared by the memory violation reset");
     assert_eq!(var(&m, "t2n"), 0);
 }
+
+#[test]
+fn an_interrupted_routine_is_found_at_the_address_it_resumes_at() {
+    let mut m = machine();
+    let isr = m.debug.funcs.iter().find(|f| f.name == "t2isr").unwrap().low;
+    let mut guard = 0;
+    while m.cpu.pc != isr && guard < 400_000 {
+        m.cpu.step();
+        guard += 1;
+    }
+    assert_eq!(m.cpu.pc, isr);
+    let level = m.cpu.stack_level() as usize;
+    assert!(m.cpu.entry_irq[level], "the interrupt pushed this level");
+    let resume = m.cpu.stack[level];
+    // Not the instruction before (as for a CALL): the interrupted instruction itself, which may be a routine's first.
+    assert_eq!(m.call_sites()[0], resume);
+    let frames = m.frames();
+    assert_eq!(frames[1].func, m.debug.func_at(resume), "the routine below the ISR is the interrupted one");
+    assert!(frames[1].func.is_some(), "interrupted in a C routine");
+}

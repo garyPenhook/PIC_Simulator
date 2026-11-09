@@ -153,6 +153,16 @@ pub struct Pic16 {
     pub cycles: u64,
     pub icount: u64,
     stack: [u16; 16],
+    /// FSR1 when each live call was made, by return-stack level (the level the call's return address went to; level 0 is
+    /// the routine at the bottom, recorded when the PC reaches `entry_watch`). The debugger works out the frame of each
+    /// call on XC8's software stack from it (`DebugInfo::frames`). `None` until a call at that level, and after a Reset.
+    pub entry_sp: [Option<u32>; 17],
+    /// By the same level: true when an interrupt pushed the return address there (it is the instruction to resume, not the
+    /// one after a CALL).
+    pub entry_irq: [bool; 17],
+    /// The routine at the bottom of the call stack (`main`, which start-up code enters with GOTO), for `entry_sp[0]`: noted
+    /// when the PC reaches it with the return stack empty.
+    pub entry_watch: Option<u32>,
     pub cfg: Config,
     cfg_regs: Vec<devdesc::ConfigRegister>,
     /// Messages about things the model does not do, deduplicated.
@@ -335,6 +345,9 @@ impl Pic16 {
             cycles: 0,
             icount: 0,
             stack: [0; 16],
+            entry_sp: [None; 17],
+            entry_irq: [false; 17],
+            entry_watch: None,
             cfg: Config::decode_words(&dev.config, &BTreeMap::new()),
             cfg_regs: dev.config.clone(),
             notes: BTreeSet::new(),
@@ -833,8 +846,7 @@ impl Pic16 {
             let a = Pic16::phys(p);
             if a < 2 { Tgt::Null } else { Tgt::Mem(a) }
         } else if (0x2000..self.lin_end).contains(&p) {
-            let n = p - 0x2000;
-            Tgt::Mem(((n / 80) << 7) as usize + 0x20 + (n % 80) as usize)
+            Tgt::Mem(linear_to_data(p - 0x2000))
         } else if self.nvm.as_ref().is_some_and(|n| !n.eeprom.is_empty()) && p >> 8 == 0x70 {
             Tgt::Eeprom(p as u8)
         } else {
@@ -2085,6 +2097,11 @@ impl Pic16 {
         u32::from(self.tos_byte(1)) << 8 | u32::from(self.tos_byte(0))
     }
 
+    /// End (exclusive) of the part's linear data region (see `lin_end`), for the debugger's view of data memory.
+    pub fn linear_end(&self) -> u32 {
+        self.lin_end
+    }
+
     /// Entry `i` of the hardware return stack (0 is the oldest; `depth()` entries are in use), for the front ends.
     pub fn stack_entry(&self, i: usize) -> u32 {
         u32::from(self.stack[i & 15])
@@ -2112,6 +2129,8 @@ impl Pic16 {
         }
         let n = (sp + 1) & 0x1F;
         self.stack[usize::from(n & 15)] = (v & 0x7FFF) as u16;
+        self.entry_sp[usize::from(n & 15) + 1] = Some(u32::from(self.fsr(1)));
+        self.entry_irq[usize::from(n & 15) + 1] = false;
         self.mem[self.a_stkptr] = n;
     }
 
@@ -2137,6 +2156,8 @@ impl Pic16 {
     /// A reset other than power-on: SFRs take their MCLR-column value (bits marked u, q, x or - are left alone), the
     /// PC is cleared and the stack is empty. Peripherals do not exist yet.
     fn do_reset(&mut self, kind: Reset) {
+        self.entry_sp = [None; 17];
+        self.entry_irq = [false; 17];
         self.sync_nvm(); // a write that ended before the Reset is done, not lost
         if kind == Reset::Software
             && let Some(a) = self.a_pcon0
@@ -2354,7 +2375,12 @@ impl Pic16 {
             return false;
         }
         self.mem[self.a_intcon] &= !0x80;
+        let before = self.mem[self.a_stkptr];
         self.push(self.pc);
+        if self.mem[self.a_stkptr] != before {
+            let level = usize::from(self.mem[self.a_stkptr] & 15) + 1; // where push() noted this level
+            self.entry_irq[level] = true;
+        }
         let st = self.a_status;
         let src = [st, self.a_wreg, self.a_bsr, self.a_pclath, 4, 5, 6, 7];
         for (i, &s) in src.iter().enumerate() {
@@ -2396,6 +2422,9 @@ impl Pic16 {
 
     /// Execute one instruction (or take one interrupt); returns the cycles it took (also added to `self.cycles`).
     pub fn step(&mut self) -> u32 {
+        if self.entry_watch == Some(self.pc) && self.depth() == 0 {
+            self.entry_sp[0] = Some(u32::from(self.fsr(1)));
+        }
         let n = self.step_core();
         self.ioc_scan();
         self.board_poll();
@@ -2801,6 +2830,12 @@ impl Pic16 {
     pub fn disasm(&self, w: u16) -> String {
         disasm_for(w, self.bsr5)
     }
+}
+
+/// The banked data address of byte `n` of linear memory (FSR value 2000h + `n`): the 80 general-purpose bytes (20h-6Fh) of
+/// each bank laid end to end (DS40002343F 9.6.2 p.57, Figure 9-20).
+pub fn linear_to_data(n: u32) -> usize {
+    ((n / 80) << 7) as usize + 0x20 + (n % 80) as usize
 }
 
 /// Disassembly of one word in the syntax of Table 41-3; `bsr5` selects the PIC16F183xx MOVLB encoding (DS40001839E

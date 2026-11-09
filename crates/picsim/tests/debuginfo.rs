@@ -40,7 +40,7 @@ fn globals_params_and_locals_are_scoped() {
 fn var(kind: Kind, bytes: u32, elem: u32, array: bool) -> Var {
     let one = Ty { bytes: elem, elem, kind: kind.clone(), array: false, name: String::new(), form: Form::Scalar };
     let layout = if array { Ty { bytes, elem, kind: kind.clone(), array, name: String::new(), form: Form::Array { of: Box::new(one), count: bytes / elem } } } else { one };
-    Var { name: "x".into(), addr: 2, bytes, kind, elem, array, ty: String::new(), scope: None, param: false, rom: false, layout }
+    Var { name: "x".into(), addr: 2, bytes, kind, elem, array, ty: String::new(), scope: None, param: false, rom: false, layout, frame: None }
 }
 
 #[test]

@@ -54,6 +54,7 @@ impl Machine16 {
         }
         c.set_board(self.cpu.board.fresh()); // the parts stay wired, back at power-on
         self.cpu = c;
+        self.watch_main();
         Ok(())
     }
 
@@ -72,6 +73,8 @@ impl Machine16 {
     /// without replacing any that the assembly listing already gave.
     pub fn load_debug(&mut self, mut d: DebugInfo) {
         d.set_word_addressed();
+        d.linear_end = Some(self.cpu.linear_end());
+        d.fsr1l = self.dev.find_sfr("FSR1L").map(|s| s.addr);
         for f in &d.funcs {
             self.syms.entry(f.name.clone()).or_insert(f.low);
         }
@@ -79,6 +82,32 @@ impl Machine16 {
             self.syms.entry(v.name.clone()).or_insert(v.addr);
         }
         self.debug = d;
+        self.watch_main();
+    }
+
+    /// Where each routine with a pending return is, innermost first: the CALL (the word before a return address), or for an
+    /// interrupt (`Pic16::entry_irq`) the instruction it will resume at.
+    pub fn call_sites(&self) -> Vec<u32> {
+        (0..self.levels()).rev().map(|i| if self.cpu.entry_irq[i + 1] { self.cpu.stack_entry(i) } else { self.cpu.stack_entry(i).saturating_sub(1) }).collect()
+    }
+
+    /// Return-stack levels in use, within the 16 the part has.
+    fn levels(&self) -> usize {
+        (self.cpu.depth() as usize).min(16)
+    }
+
+    /// The live calls with their frame bases (`DebugInfo::frames`), innermost first: FSR1 at each call from `Pic16::entry_sp`.
+    pub fn frames(&self) -> Vec<crate::debuginfo::Frame> {
+        // Past 16 levels (an overflow with STVREN = 0) the 17th push overwrote level 1, so no level noted by a push can be
+        // trusted; level 0 (main, noted on entry) still can.
+        let full = self.cpu.depth() > 16;
+        let entries: Vec<Option<u32>> = (0..=self.levels()).rev().map(|l| self.cpu.entry_sp[l].filter(|_| l == 0 || !full)).collect();
+        self.debug.frames(self.cpu.pc, &self.call_sites(), &entries, &self.cpu.prog)
+    }
+
+    /// Has the core note FSR1 when `main` is entered (`Pic16::entry_watch`); after loading debug information and a Reset.
+    fn watch_main(&mut self) {
+        self.cpu.entry_watch = self.debug.funcs.iter().find(|f| f.name == "main").map(|f| f.low);
     }
 
     /// Starts a source-line step (see `line_step`).

@@ -18,10 +18,11 @@ pub enum Kind {
     Float,
 }
 
-/// A variable at a fixed data-memory address.
+/// A variable at a fixed data-memory address, or (`frame`) at an offset in its routine's frame on XC8's software stack.
 #[derive(Clone, Debug)]
 pub struct Var {
     pub name: String,
+    /// The data (or, for `rom`, program) address; 0 for a variable in a stack frame (`frame`).
     pub addr: u32,
     /// Size of the whole variable (an array: all elements).
     pub bytes: u32,
@@ -38,6 +39,10 @@ pub struct Var {
     pub rom: bool,
     /// The full type: members of a structure or union, enumerators, what a pointer points to.
     pub layout: Ty,
+    /// For a parameter or local on XC8's software stack (`-mstack=reentrant`, or a routine `hybrid` puts there): the offset
+    /// from the routine's frame base (`DW_OP_fbreg`). Its address is then known only while a frame of the routine is live;
+    /// see `DebugInfo::frames` and `Var::place`.
+    pub frame: Option<i32>,
 }
 
 /// A routine's program-address range `[low, high)`: byte addresses on a PIC18 part, word addresses on a PIC16 (the units of the PC).
@@ -46,6 +51,32 @@ pub struct Func {
     pub name: String,
     pub low: u32,
     pub high: u32,
+    /// The data address of the stack pointer the routine's frame base is read from (`DW_AT_frame_base`: XC8 names FSR1L).
+    pub frame_reg: Option<u32>,
+}
+
+/// One live call of a routine: innermost first in `DebugInfo::frames`. `base` is the frame base of that call (the value
+/// `DW_OP_fbreg` offsets add to), when it can be worked out.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Frame {
+    pub func: Option<usize>,
+    pub base: Option<u32>,
+}
+
+/// The PIC18 registers XC8's software-stack prologues and epilogues name (from the device description), besides FSR1L
+/// (`DebugInfo::fsr1l`): FSR1H, POSTINC1 and POSTDEC1. A PIC16 needs none (its prologues use `ADDFSR 1,k`).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct StackRegs {
+    pub fsr1h: u32,
+    pub postinc1: u32,
+    pub postdec1: u32,
+}
+
+/// How a routine sets up its frame on XC8's software stack: the prologue at its start adds `auto` bytes to FSR1. The frame
+/// base of a call is FSR1 at the call plus `auto` (`DebugInfo::frames`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Shape {
+    pub auto: i32,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -62,6 +93,13 @@ pub struct DebugInfo {
     pub near_base: Option<u32>,
     /// True for a PIC16 (program memory is addressed in words, one byte of constant data per word).
     pub word_addressed: bool,
+    /// Set by `Machine::load_debug` for a PIC18 part; needed to read a PIC18 routine's prologue (see `shape`).
+    pub stack_regs: Option<StackRegs>,
+    /// A PIC16: the end (exclusive) of the part's linear data region, set by `Machine16::load_debug` (`data_view`).
+    pub linear_end: Option<u32>,
+    /// The part's FSR1L (from the device description, set by the machines' `load_debug`): `frames` gives a frame base only
+    /// to a routine whose `DW_AT_frame_base` names it.
+    pub fsr1l: Option<u32>,
 }
 
 impl DebugInfo {
@@ -116,15 +154,22 @@ impl DebugInfo {
                     }
                     gimli::DW_TAG_subprogram if ours => {
                         let name = attr_name(&dwarf, &unit, e).unwrap_or_default();
-                        // high_pc is an address (basil, XC8 so far) or, in DWARF 4 style, an offset from low_pc.
+                        // high_pc is an address (basil, XC8 so far) or, in DWARF 4 style, an offset from low_pc. XC8 4.00 writes
+                        // the routine's last address (the second byte of a PIC18's final RETURN, a PIC16's final RETURN word),
+                        // not the address after it, so its end is one more.
                         let (low, high) = match (e.attr_value(gimli::DW_AT_low_pc), e.attr_value(gimli::DW_AT_high_pc)) {
-                            (Some(AttributeValue::Addr(l)), Some(AttributeValue::Addr(h))) => (l, h),
+                            (Some(AttributeValue::Addr(l)), Some(AttributeValue::Addr(h))) => (l, if xc8 && h >= l { h + 1 } else { h }),
                             (Some(AttributeValue::Addr(l)), Some(h)) if h.udata_value().is_some() => (l, l + h.udata_value().unwrap_or(0)),
                             _ => continue,
                         };
                         cur_func = Some(info.funcs.len());
                         func_depth = depth;
-                        info.funcs.push(Func { name, low: low as u32, high: high as u32 });
+                        let frame_reg = match e.attr_value(gimli::DW_AT_frame_base) {
+                            Some(AttributeValue::Exprloc(x)) => fixed_addr(x.0.slice()),
+                            Some(AttributeValue::Block(b)) => fixed_addr(b.slice()),
+                            _ => None,
+                        };
+                        info.funcs.push(Func { name, low: low as u32, high: high as u32, frame_reg });
                     }
                     gimli::DW_TAG_variable | gimli::DW_TAG_formal_parameter if ours => {
                         let name = attr_name(&dwarf, &unit, e).unwrap_or_default();
@@ -133,15 +178,24 @@ impl DebugInfo {
                             Some(AttributeValue::Block(b)) => b.slice().to_vec(),
                             _ => continue,
                         };
-                        if !matches!(ex.len(), 3 | 5) || ex[0] != 0x03 {
-                            continue; // DW_OP_addr <address> is all the compiler writes: 4 bytes on a PIC18, 2 may do on a PIC16
-                        }
-                        let addr = ex[1..].iter().rev().fold(0u32, |a, b| a << 8 | u32::from(*b));
+                        // DW_OP_addr <address> (4 bytes on a PIC18, 2 may do on a PIC16), or, for a local on XC8's software
+                        // stack, DW_OP_fbreg <sleb128>: an offset from the routine's frame base.
+                        let (addr, frame) = match (fixed_addr(&ex), ex.first()) {
+                            (Some(a), _) => (a, None),
+                            (None, Some(&0x91)) if cur_func.is_some() => {
+                                let mut r = EndianSlice::new(&ex[1..], LittleEndian);
+                                match gimli::Reader::read_sleb128(&mut r) {
+                                    Ok(off) if r.is_empty() => (0, Some(off as i32)),
+                                    _ => continue,
+                                }
+                            }
+                            _ => continue,
+                        };
                         let Some(AttributeValue::UnitRef(t)) = e.attr_value(gimli::DW_AT_type) else { continue };
                         let Some(ty) = describe(&dwarf, &unit, t, &mut Vec::new()) else { continue };
                         register(&ty, &mut info.structs);
-                        let rom = xc8 && info.rom.iter().any(|r| (r.0..r.1).contains(&addr)) && !ram.iter().any(|r| (r.0..r.1).contains(&addr));
-                        info.vars.push(Var { rom, name, addr, bytes: ty.bytes, kind: ty.kind.clone(), elem: ty.elem, array: ty.array, ty: ty.name.clone(), layout: ty.clone(), scope: if e.tag() == gimli::DW_TAG_formal_parameter || cur_func.is_some() { cur_func } else { None }, param: e.tag() == gimli::DW_TAG_formal_parameter });
+                        let rom = frame.is_none() && xc8 && info.rom.iter().any(|r| (r.0..r.1).contains(&addr)) && !ram.iter().any(|r| (r.0..r.1).contains(&addr));
+                        info.vars.push(Var { rom, name, addr, bytes: ty.bytes, kind: ty.kind.clone(), elem: ty.elem, array: ty.array, ty: ty.name.clone(), layout: ty.clone(), scope: if e.tag() == gimli::DW_TAG_formal_parameter || cur_func.is_some() { cur_func } else { None }, param: e.tag() == gimli::DW_TAG_formal_parameter, frame });
                     }
                     _ => {}
                 }
@@ -211,6 +265,116 @@ impl DebugInfo {
     /// Globals, then the parameters and locals of routine `f` when given.
     pub fn visible(&self, f: Option<usize>) -> impl Iterator<Item = &Var> {
         self.vars.iter().filter(move |v| v.scope.is_none() || v.scope == f)
+    }
+
+    /// The first `max` instructions of routine `f` as (address in PC units, first word); `prog` is program memory as the
+    /// core holds it (little-endian words; on a PIC16 two bytes per 14-bit word).
+    fn code(&self, f: &Func, prog: &[u8], max: usize) -> Vec<(u32, u16)> {
+        let word = |a: u32| {
+            let i = if self.word_addressed { 2 * a as usize } else { a as usize };
+            let w = u16::from(prog.get(i).copied().unwrap_or(0xFF)) | u16::from(prog.get(i + 1).copied().unwrap_or(0xFF)) << 8;
+            if self.word_addressed { w & 0x3FFF } else { w }
+        };
+        let mut out = Vec::new();
+        let mut a = f.low;
+        while a < f.high && out.len() < max {
+            let w = word(a);
+            out.push((a, w));
+            // Instruction lengths from the PIC18 disassembler (2- and 3-word instructions); every PIC16 instruction is one word.
+            a += if self.word_addressed { 1 } else { 2 * crate::disasm::disasm(a, w, word(a + 2), word(a + 4), false).1 };
+        }
+        out
+    }
+
+    /// A stack-pointer adjustment XC8 writes in a prologue or epilogue, starting at instruction `i`: the bytes it adds to FSR1
+    /// and how many instructions it takes. PIC18 (encodings as in `disasm.rs`, DS40002214G Table 45-2): `MOVF POSTINC1,F` (+1)
+    /// or `MOVF POSTDEC1,F` (-1) in the access bank, or `MOVLW lo; ADDWF FSR1L,F; MOVLW hi; ADDWFC FSR1H,F` (a 16-bit
+    /// amount). PIC16 (`pic16.rs` `disasm_for`): `ADDFSR 1,k`, k from -32 to 31 (the assembler writes several for more).
+    fn sp_step(&self, code: &[(u32, u16)], i: usize) -> Option<(i32, usize)> {
+        let w = code.get(i)?.1;
+        if self.word_addressed {
+            return (w & 0x3F80 == 0x3100 && w & 0x40 != 0).then_some((((w & 0x3F) as i32) << 26 >> 26, 1));
+        }
+        let (r, fsr1l) = (self.stack_regs?, self.fsr1l?);
+        let f = |a: u32| (a & 0xFF) as u16;
+        if w == 0x5200 | f(r.postinc1) {
+            return Some((1, 1));
+        }
+        if w == 0x5200 | f(r.postdec1) {
+            return Some((-1, 1));
+        }
+        match code.get(i..i + 4)? {
+            [(_, lo), (_, add), (_, hi), (_, addc)] if lo >> 8 == 0x0E && *add == 0x2600 | f(fsr1l) && hi >> 8 == 0x0E && *addc == 0x2200 | f(r.fsr1h) => {
+                Some((i32::from(((hi & 0xFF) << 8 | lo & 0xFF) as i16), 4))
+            }
+            _ => None,
+        }
+    }
+
+    /// How routine `f` sets up its frame: the run of stack-pointer increments it starts with (XC8 writes the prologue first).
+    /// `None` when the PIC18 stack registers are not known.
+    pub fn shape(&self, f: usize, prog: &[u8]) -> Option<Shape> {
+        if !self.word_addressed && (self.stack_regs.is_none() || self.fsr1l.is_none()) {
+            return None;
+        }
+        let func = self.funcs.get(f)?;
+        // The longest prologue: a PIC18 frame of 128 bytes (XC8's limit) as one MOVF POSTINC1,F per byte, and the 4-instruction
+        // group the scan looks ahead to.
+        let code = self.code(func, prog, 132);
+        let (mut auto, mut i) = (0, 0);
+        while let Some((d, n)) = self.sp_step(&code, i).filter(|s| s.0 > 0) {
+            auto += d;
+            i += n;
+        }
+        Some(Shape { auto })
+    }
+
+    /// The live calls, innermost first: the routine the PC is in, then the routine of each pending CALL in `callers` (the
+    /// addresses of the CALL instructions, innermost first), one entry per call, so a recursive routine appears once per level.
+    ///
+    /// `entries` holds, for each of those calls in the same order, FSR1 when the call was made (`Pic18::entry_sp`,
+    /// `Pic16::entry_sp`; for the bottom routine, when it was entered). A call's frame base is that plus what the routine's
+    /// prologue adds, at every instruction of the call: also inside the prologue and epilogue, and while a statement pushes
+    /// the arguments of another call. `None` without an entry, when the routine is not known, or when its frame base is not
+    /// FSR1L (`fsr1l`).
+    pub fn frames(&self, pc: u32, callers: &[u32], entries: &[Option<u32>], prog: &[u8]) -> Vec<Frame> {
+        // Each routine's shape once, however deep a recursion goes.
+        let mut memo: std::collections::HashMap<usize, Option<Shape>> = std::collections::HashMap::new();
+        std::iter::once(pc)
+            .chain(callers.iter().copied())
+            .enumerate()
+            .map(|(k, at)| {
+                let func = self.func_at(at);
+                let base = func.zip(entries.get(k).copied().flatten()).and_then(|(i, e)| {
+                    if self.funcs[i].frame_reg.is_none() || self.funcs[i].frame_reg != self.fsr1l {
+                        return None;
+                    }
+                    let s = (*memo.entry(i).or_insert_with(|| self.shape(i, prog)))?;
+                    u32::try_from(i64::from(e) + i64::from(s.auto)).ok()
+                });
+                Frame { func, base }
+            })
+            .collect()
+    }
+
+    /// Data memory as variables are read from it. A PIC18: `mem` itself. A PIC16: `mem` (banked addresses) followed, from
+    /// 2000h, by the linear view of the general-purpose RAM that XC8's software stack (FSR1) and pointers to it use: the
+    /// 80-byte blocks of the banks laid end to end, up to the part's `linear_end` (2FF0h, banks 0-50: DS40002343F 9.6.2 p.57,
+    /// Figure 9-20; 29B0h on the PIC16F183xx: DS40001839E 4.5.2 p.62).
+    pub fn data_view<'a>(&self, mem: &'a [u8]) -> std::borrow::Cow<'a, [u8]> {
+        if !self.word_addressed {
+            return mem.into();
+        }
+        // FSR values below 2000h are banked addresses (DS40002343F 9.6.1 p.56), so the linear view starts there. A data memory
+        // larger than that banked space would collide with it: then no linear view.
+        if mem.len() > 0x2000 {
+            return mem.into();
+        }
+        let mut v = mem.to_vec();
+        v.resize(0x2000, 0);
+        let end = self.linear_end.unwrap_or(0x2FF0).saturating_sub(0x2000).min((mem.len() / 128) as u32 * 80);
+        v.extend((0..end).map(|n| mem.get(crate::pic16::linear_to_data(n)).copied().unwrap_or(0)));
+        v.into()
     }
 }
 
@@ -459,7 +623,10 @@ impl<'a> Ctx<'a> {
 impl Var {
     /// The value in `mem` (data memory) as text. Multi-byte values are little-endian.
     pub fn show(&self, mem: &[u8]) -> String {
-        self.layout.show_in(mem, self.addr, 1, &Ctx::bare(mem))
+        match self.place(None) {
+            Some(a) => self.layout.show_in(mem, a, 1, &Ctx::bare(mem)),
+            None => "(no frame here)".into(),
+        }
     }
 
     /// As `show`, with the program's routines and structure types: a function pointer names the routine it enters and a
@@ -468,8 +635,24 @@ impl Var {
     /// `rom` is the program memory as `DebugInfo::rom_image` gives it: a pointer into program memory (`const char *` to a
     /// string literal) shows what it points at, and a constant held in program memory (a `const` table) is read from there.
     pub fn show_with(&self, mem: &[u8], rom: &[u8], info: &DebugInfo) -> String {
+        self.show_framed(mem, rom, info, None)
+    }
+
+    /// Where the variable is in the call whose frame base is `base` (`DebugInfo::frames`): its fixed address, or for a
+    /// variable on the software stack the base plus its offset; `None` when that base is not known.
+    pub fn place(&self, base: Option<u32>) -> Option<u32> {
+        match self.frame {
+            None => Some(self.addr),
+            Some(off) => base.and_then(|b| u32::try_from(i64::from(b) + i64::from(off)).ok()),
+        }
+    }
+
+    /// As `show_with`, for the call whose frame base is `base`; `mem` should be `DebugInfo::data_view` (on a PIC16 a frame is
+    /// at a linear address).
+    pub fn show_framed(&self, mem: &[u8], rom: &[u8], info: &DebugInfo, base: Option<u32>) -> String {
+        let Some(a) = self.place(base) else { return "(no frame here)".into() };
         let ctx = Ctx { data: mem, funcs: &info.funcs, structs: Some(&info.structs), rom, near_base: info.near_base };
-        self.layout.show_in(if self.rom { rom } else { mem }, self.addr, 1, &ctx)
+        self.layout.show_in(if self.rom { rom } else { mem }, a, 1, &ctx)
     }
 }
 
@@ -600,6 +783,11 @@ fn scalar(kind: &Kind, b: &[u8]) -> String {
         Kind::Signed if bits < 64 => format!("{} (0x{u:0w$X})", ((u << (64 - bits)) as i64) >> (64 - bits), w = b.len() * 2),
         _ => format!("{u} (0x{u:0w$X})", w = b.len() * 2),
     }
+}
+
+/// The address of a `DW_OP_addr <address>` expression (4 address bytes on a PIC18, 2 may do on a PIC16).
+fn fixed_addr(ex: &[u8]) -> Option<u32> {
+    (matches!(ex.len(), 3 | 5) && ex[0] == 0x03).then(|| ex[1..].iter().rev().fold(0u32, |a, b| a << 8 | u32::from(*b)))
 }
 
 /// The ELF that goes with a program given as a `.hex` or `.elf`: the same stem beside it, or one folder up (basil writes
