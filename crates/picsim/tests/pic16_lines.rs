@@ -1,5 +1,6 @@
 //! Source lines on the PIC16 core: the ELF's line table (word addresses), the part named in the ELF, and Machine16's line stepping.
-//! The fixture `data/p16lines.elf` is hand-written assembly with `#line` directives (see `data/p16lines.S`).
+//! The fixture `data/p16lines.elf` is hand-written assembly with `#line` directives (see `data/p16lines.S`),
+//! assembled with `pic-as -mcpu=16F17146 -mdfp=DFP -g p16lines.S -o p16lines.elf`.
 
 use devdesc::Device;
 use picsim::machine16::Machine16;

@@ -1,4 +1,6 @@
 //! Source-level stepping on a program built with `basil -g` (tests/data/i2c_q10_g.*).
+//! The fixture is `i2c_q10_g.bas` copied to `main.bas` (the tests name that file) and built with basil 0.1.124
+//! (Basic_Compiler commit 03709be): `basil -g main.bas`. A newer basil allocates RAM differently and moves addresses.
 use devdesc::Device;
 use picsim::debuginfo::DebugInfo;
 use picsim::{Machine, Stop};
