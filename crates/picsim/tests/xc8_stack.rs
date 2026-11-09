@@ -4,6 +4,9 @@
 //! `xc8-cc -mcpu=PART -mdfp=DFP -g -O0 -mstack=reentrant|hybrid xc8_TAG.c -o xc8_TAG.elf`.
 //! XC8 4.00 describes such a variable with `DW_OP_fbreg` from a frame base of FSR1 (`DW_AT_frame_base` = FSR1L); `rec`
 //! recurses, so every level has its own frame and each shows its own values.
+//! `data/xc8_tail_q10.*` / `xc8_tail_p16.*` are a tail call (`xc8-cc -mcpu=PART -mdfp=DFP -g -O3 -mstack=reentrant
+//! xc8_tail_TAG.c -o xc8_tail_TAG.elf`): XC8 4.00 at -O3 and -Os (not -O1 or -O2) turns a CALL followed by RETURN into a
+//! jump, here after pushing the callee's arguments.
 
 use devdesc::Device;
 use picsim::debuginfo::{DebugInfo, Frame, Shape, Var};
@@ -291,7 +294,7 @@ fn the_frame_base_is_fsr1_at_the_call_plus_the_prologue() {
         prog[2 * (0x100 + i)] = *w as u8;
         prog[2 * (0x100 + i) + 1] = (*w >> 8) as u8;
     }
-    let f = picsim::debuginfo::Func { name: "f".into(), low: 0x100, high: 0x107, frame_reg: Some(6) };
+    let f = picsim::debuginfo::Func { name: "f".into(), low: 0x100, high: 0x107, frame_reg: Some(6), unit: 0 };
     let mut d = DebugInfo { funcs: vec![f], word_addressed: true, fsr1l: Some(6), ..DebugInfo::default() };
     assert_eq!(d.shape(0, &prog), Some(Shape { auto: 2 }));
     for pc in 0x100..0x107 {
@@ -336,4 +339,48 @@ fn routine_ranges_of_every_xc8_fixture_do_not_overlap() {
         seen += 1;
     }
     assert!(seen >= 20, "only {seen} XC8 fixtures");
+}
+
+/// `n m l` of `inner` in the tail-call fixture, in each live call of it, innermost first.
+fn inner_calls(s: &Sim) -> Vec<String> {
+    let (d, data) = (s.d(), s.data());
+    let inner = fi(d, "inner");
+    s.frames().iter().filter(|f| f.func == Some(inner)).map(|f| ["n", "m", "l"].map(|n| var(d, "inner", n).show_framed(&data, &[], d, f.base)).join(" | ")).collect()
+}
+
+fn call_names(s: &Sim) -> Vec<String> {
+    s.frames().iter().map(|f| f.func.map_or("?".into(), |i| s.d().funcs[i].name.clone())).collect()
+}
+
+#[test]
+fn a_routine_entered_by_a_tail_jump_has_its_own_frame() {
+    for tag in ["tail_q10", "tail_p16"] {
+        let mut s = Sim::new(tag);
+        // hop's last instruction is the jump (GOTO on the PIC18, LJMP = MOVLP + GOTO on the PIC16), not CALL; RETURN.
+        let hop = fi(s.d(), "hop");
+        s.run_to("hop");
+        while s.d().func_at(s.pc()) == Some(hop) {
+            s.step();
+        }
+        assert_eq!(s.d().func_at(s.pc()), Some(fi(s.d(), "inner")), "{tag}: hop went on into inner");
+        assert_eq!(call_names(&s), ["inner", "main"], "{tag}: hop has no pending return");
+        let (d, data) = (s.d(), s.data());
+        let base = s.frames()[0].base;
+        let at_entry = ["n", "m"].map(|n| var(d, "inner", n).show_framed(&data, &[], d, base));
+        assert_eq!(at_entry, ["3 (0x03)", "165 (0xA5)"], "{tag}: at inner's first instruction");
+        s.run_to("mark");
+        assert_eq!(call_names(&s), ["mark", "inner", "main"], "{tag}");
+        let want = ["3 (0x03) | 165 (0xA5) | {3 (0x03), 165 (0xA5)}"];
+        assert_eq!(inner_calls(&s), want, "{tag}: in mark");
+        // Back out of mark and through inner's epilogue and RETURN to main.
+        let main = fi(s.d(), "main");
+        while s.d().func_at(s.pc()) != Some(main) {
+            let got = inner_calls(&s);
+            assert_eq!(got, want[..got.len()], "{tag}: at {:#x}", s.pc());
+            s.step();
+        }
+        // The second hop(4) reuses the same stack bytes.
+        s.run_to("mark");
+        assert_eq!(inner_calls(&s), ["4 (0x04) | 165 (0xA5) | {4 (0x04), 165 (0xA5)}"], "{tag}: the second call");
+    }
 }

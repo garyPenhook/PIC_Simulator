@@ -43,6 +43,11 @@ pub struct Var {
     /// from the routine's frame base (`DW_OP_fbreg`). Its address is then known only while a frame of the routine is live;
     /// see `DebugInfo::frames` and `Var::place`.
     pub frame: Option<i32>,
+    /// The compile unit (source file) that describes it: an index into `DebugInfo::units`.
+    pub unit: usize,
+    /// A global declared `static` (no `DW_AT_external`): it belongs to its unit, and another unit may have one of the same
+    /// name (`DebugInfo::global`). False for parameters and locals.
+    pub file_static: bool,
 }
 
 /// A routine's program-address range `[low, high)`: byte addresses on a PIC18 part, word addresses on a PIC16 (the units of the PC).
@@ -53,6 +58,9 @@ pub struct Func {
     pub high: u32,
     /// The data address of the stack pointer the routine's frame base is read from (`DW_AT_frame_base`: XC8 names FSR1L).
     pub frame_reg: Option<u32>,
+    /// The compile unit (source file) the routine is in: an index into `DebugInfo::units`. Two `static` routines of the
+    /// same name in different files are told apart by it (`DebugInfo::func_label`).
+    pub unit: usize,
 }
 
 /// One live call of a routine: innermost first in `DebugInfo::frames`. `base` is the frame base of that call (the value
@@ -83,6 +91,9 @@ pub struct Shape {
 pub struct DebugInfo {
     pub funcs: Vec<Func>,
     pub vars: Vec<Var>,
+    /// The name (`DW_AT_name`, the source file's path) of each compile unit the routines and variables come from: XC8
+    /// writes one per `.c` file of the program, basil one for the program.
+    pub units: Vec<String>,
     pub lines: LineMap,
     /// Every structure or union type seen, by the id a `Form::BackPtr` carries.
     pub structs: std::collections::HashMap<u32, Ty>,
@@ -151,6 +162,9 @@ impl DebugInfo {
                         // XC8 writes a unit per C file; only those (not the `.s` or `.h` units) hold the program's routines and variables.
                         xc8 = producer.starts_with("Microchip MPLAB XC8");
                         ours = producer == "basil" || (producer.starts_with("Microchip MPLAB XC8") && text(gimli::DW_AT_name).to_ascii_lowercase().ends_with(".c"));
+                        if ours {
+                            info.units.push(text(gimli::DW_AT_name));
+                        }
                     }
                     gimli::DW_TAG_subprogram if ours => {
                         let name = attr_name(&dwarf, &unit, e).unwrap_or_default();
@@ -169,7 +183,7 @@ impl DebugInfo {
                             Some(AttributeValue::Block(b)) => fixed_addr(b.slice()),
                             _ => None,
                         };
-                        info.funcs.push(Func { name, low: low as u32, high: high as u32, frame_reg });
+                        info.funcs.push(Func { name, low: low as u32, high: high as u32, frame_reg, unit: info.units.len().saturating_sub(1) });
                     }
                     gimli::DW_TAG_variable | gimli::DW_TAG_formal_parameter if ours => {
                         let name = attr_name(&dwarf, &unit, e).unwrap_or_default();
@@ -195,7 +209,10 @@ impl DebugInfo {
                         let Some(ty) = describe(&dwarf, &unit, t, &mut Vec::new()) else { continue };
                         register(&ty, &mut info.structs);
                         let rom = frame.is_none() && xc8 && info.rom.iter().any(|r| (r.0..r.1).contains(&addr)) && !ram.iter().any(|r| (r.0..r.1).contains(&addr));
-                        info.vars.push(Var { rom, name, addr, bytes: ty.bytes, kind: ty.kind.clone(), elem: ty.elem, array: ty.array, ty: ty.name.clone(), layout: ty.clone(), scope: if e.tag() == gimli::DW_TAG_formal_parameter || cur_func.is_some() { cur_func } else { None }, param: e.tag() == gimli::DW_TAG_formal_parameter, frame });
+                        let scope = if e.tag() == gimli::DW_TAG_formal_parameter || cur_func.is_some() { cur_func } else { None };
+                        // A global without DW_AT_external is `static` to its file (XC8 writes the attribute for the others).
+                        let file_static = xc8 && scope.is_none() && !matches!(e.attr_value(gimli::DW_AT_external), Some(AttributeValue::Flag(true)));
+                        info.vars.push(Var { rom, name, addr, bytes: ty.bytes, kind: ty.kind.clone(), elem: ty.elem, array: ty.array, ty: ty.name.clone(), layout: ty.clone(), scope, param: e.tag() == gimli::DW_TAG_formal_parameter, frame, unit: info.units.len().saturating_sub(1), file_static });
                     }
                     _ => {}
                 }
@@ -237,19 +254,95 @@ impl DebugInfo {
     }
 
     /// The address and size of a global written as a path: `pt`, `pt.x`, `sh.tag[1]`, `pts[1].y`. `None` when any part is not found.
+    /// A name several files define `static` is found as `global` finds it from outside any routine, or as `path@file.c`.
     pub fn path_addr(&self, path: &str) -> Option<(u32, u32)> {
-        let end = path.find(['.', '[']).unwrap_or(path.len());
-        let v = self.vars.iter().find(|v| v.scope.is_none() && v.name == path[..end].trim() && !v.rom)?;
-        let (off, ty) = v.layout.resolve(&path[end..])?;
-        Some((v.addr + off, ty.bytes))
+        self.path_find(path, None, &|v| !v.rom).map(|r| (r.0, r.1))
     }
 
     /// As `path_addr`, but also finds a `const` kept in program memory; the flag says the address is a program address.
     pub fn path_ref(&self, path: &str) -> Option<(u32, u32, bool)> {
+        self.path_ref_at(path, None)
+    }
+
+    /// As `path_ref`, with the global's name looked up as C does in the routine containing `pc` (`global`).
+    pub fn path_ref_at(&self, path: &str, pc: Option<u32>) -> Option<(u32, u32, bool)> {
+        self.path_find(path, pc, &|_| true)
+    }
+
+    fn path_find(&self, path: &str, pc: Option<u32>, keep: &dyn Fn(&Var) -> bool) -> Option<(u32, u32, bool)> {
+        let (path, file) = split_file(path);
         let end = path.find(['.', '[']).unwrap_or(path.len());
-        let v = self.vars.iter().find(|v| v.scope.is_none() && v.name == path[..end].trim())?;
+        let v = self.global_where(path[..end].trim(), file, pc, keep)?;
         let (off, ty) = v.layout.resolve(&path[end..])?;
         Some((v.addr + off, ty.bytes, v.rom))
+    }
+
+    /// The global `name` as C sees it from the routine containing `pc`: the `static` of that routine's file, else the one
+    /// with external linkage, else (from start-up code, or a routine of a third file) the first of that name.
+    /// `name@file.c` is the one of that file (the file's name without its folder).
+    pub fn global(&self, name: &str, pc: Option<u32>) -> Option<&Var> {
+        let (name, file) = split_file(name);
+        self.global_where(name, file, pc, &|_| true)
+    }
+
+    fn global_where(&self, name: &str, file: Option<&str>, pc: Option<u32>, keep: &dyn Fn(&Var) -> bool) -> Option<&Var> {
+        let all = || self.vars.iter().filter(|v| v.scope.is_none() && v.name == name && keep(v));
+        if let Some(file) = file {
+            return all().find(|v| self.unit_file(v.unit) == file);
+        }
+        let unit = pc.and_then(|pc| self.func_at(pc)).map(|f| self.funcs[f].unit);
+        all().find(|v| v.file_static && Some(v.unit) == unit).or_else(|| all().find(|v| !v.file_static)).or_else(|| all().next())
+    }
+
+    /// The routine `name`, or `name@file.c` for the one of that file: the first of that name.
+    pub fn routine(&self, name: &str) -> Option<usize> {
+        let (name, file) = split_file(name);
+        self.funcs.iter().position(|f| f.name == name && file.is_none_or(|file| self.unit_file(f.unit) == file))
+    }
+
+    /// The source file of compile unit `u`, without its folder.
+    pub fn unit_file(&self, u: usize) -> &str {
+        self.units.get(u).map_or("", |n| n.rsplit(['/', '\\']).next().unwrap_or(n))
+    }
+
+    /// How to name variable `v` where its name alone is ambiguous: a global that another global shares its name with (a
+    /// `static` in each of two files) gets its file, `count (util.c)`; any other variable is its name.
+    pub fn var_label(&self, v: &Var) -> String {
+        if v.scope.is_none() && self.vars.iter().filter(|w| w.scope.is_none() && w.name == v.name).nth(1).is_some() {
+            format!("{} ({})", v.name, self.unit_file(v.unit))
+        } else {
+            v.name.clone()
+        }
+    }
+
+    /// As `var_label`, for routine `f`: two `static` routines of the same name in different files get their files.
+    pub fn func_label(&self, f: usize) -> String {
+        let n = &self.funcs[f].name;
+        if self.funcs.iter().filter(|g| g.name == *n).nth(1).is_some() {
+            format!("{n} ({})", self.unit_file(self.funcs[f].unit))
+        } else {
+            n.clone()
+        }
+    }
+
+    /// True when `name` (without `@file`) is a routine, or a global, of more than one file (a `static` in each).
+    pub fn is_ambiguous(&self, name: &str) -> bool {
+        let (n, file) = split_file(name);
+        file.is_none()
+            && (self.funcs.iter().filter(|f| f.name == n).nth(1).is_some() || self.vars.iter().filter(|v| v.scope.is_none() && v.name == n).nth(1).is_some())
+    }
+
+    /// When `name` is ambiguous (`is_ambiguous`), a message saying so and how to name one: for front ends that take a
+    /// symbol by name outside any routine, which would otherwise pick one of them.
+    pub fn ambiguous(&self, name: &str) -> Option<String> {
+        if !self.is_ambiguous(name) {
+            return None;
+        }
+        let funcs: Vec<usize> = self.funcs.iter().filter(|f| f.name == name).map(|f| f.unit).collect();
+        let vars: Vec<usize> = self.vars.iter().filter(|v| v.scope.is_none() && v.name == name).map(|v| v.unit).collect();
+        let (what, units) = if funcs.len() > 1 { ("a routine", funcs) } else { ("a variable", vars) };
+        let files: Vec<&str> = units.iter().map(|&u| self.unit_file(u)).collect();
+        Some(format!("{name} is {what} in more than one file ({}): name one as {name}@{}", files.join(", "), files[0]))
     }
 
     /// `len` constant bytes starting at program address `addr` (see `rom_image` for what a byte is on a PIC16); bytes past the end read 0.
@@ -329,11 +422,23 @@ impl DebugInfo {
         Some(Shape { auto })
     }
 
+    /// The first instructions at which the cores note FSR1 (`Pic18::entry_watch`), sorted: `main`, which start-up code
+    /// enters with GOTO, and every routine whose frame base is FSR1L. A routine on the software stack can be entered by a
+    /// jump rather than a CALL: XC8 4.00 at -O3 and -Os turns CALL; RETURN into GOTO (PIC16: LJMP), after pushing the
+    /// callee's arguments, so FSR1 at the jumping routine's call is not where the callee's frame starts.
+    pub fn entry_points(&self) -> Vec<u32> {
+        let mut v: Vec<u32> = self.funcs.iter().filter(|f| f.name == "main" || (f.frame_reg.is_some() && f.frame_reg == self.fsr1l)).map(|f| f.low).collect();
+        v.sort_unstable();
+        v.dedup();
+        v
+    }
+
     /// The live calls, innermost first: the routine the PC is in, then the routine of each pending CALL in `callers` (the
     /// addresses of the CALL instructions, innermost first), one entry per call, so a recursive routine appears once per level.
     ///
     /// `entries` holds, for each of those calls in the same order, FSR1 when the call was made (`Pic18::entry_sp`,
-    /// `Pic16::entry_sp`; for the bottom routine, when it was entered). A call's frame base is that plus what the routine's
+    /// `Pic16::entry_sp`), or when the routine's first instruction was reached (the bottom routine, and one entered by a
+    /// jump; see `entry_points`). A call's frame base is that plus what the routine's
     /// prologue adds, at every instruction of the call: also inside the prologue and epilogue, and while a statement pushes
     /// the arguments of another call. `None` without an entry, when the routine is not known, or when its frame base is not
     /// FSR1L (`fsr1l`).
@@ -782,6 +887,14 @@ fn scalar(kind: &Kind, b: &[u8]) -> String {
         Kind::Signed if bits == 64 => format!("{} (0x{u:016X})", u as i64),
         Kind::Signed if bits < 64 => format!("{} (0x{u:0w$X})", ((u << (64 - bits)) as i64) >> (64 - bits), w = b.len() * 2),
         _ => format!("{u} (0x{u:0w$X})", w = b.len() * 2),
+    }
+}
+
+/// A symbol as front ends take it: `name`, or `name@file.c` (also `path@file.c`, `pts[1].y@main.c`) for the one of that file.
+pub fn split_file(sym: &str) -> (&str, Option<&str>) {
+    match sym.rsplit_once('@') {
+        Some((n, f)) if !n.trim().is_empty() && !f.trim().is_empty() => (n.trim(), Some(f.trim())),
+        _ => (sym.trim(), None),
     }
 }
 

@@ -127,6 +127,7 @@ A program built with MPLAB XC8 loads and runs like any other: the simulator exec
 
 ```
 xc8-cc -mcpu=18F27Q10 -mdfp=<pack>/xc8 -g -O0 prog.c -o prog.elf
+xc8-cc -mcpu=18F27Q10 -mdfp=<pack>/xc8 -g -O0 main.c util.c -o prog.elf    # a program of several files
 ```
 
 XC8 writes `prog.hex` beside `prog.elf`. Load either one, with `pic-sim` or `basil-sim`, as for a BASIC program (the part is read from the ELF in the window; give `--device` to `basil-sim`). What you get:
@@ -136,13 +137,15 @@ XC8 writes `prog.hex` beside `prog.elf`. Load either one, with `pic-sim` or `bas
 | Source pane, breakpoints on a C line, Line / Line over / Out, call stack with lines | Yes | `.c` files (and `.h` files that hold code) are source. The assembly XC8 generates (`prog.s`, `startup.s`) is not shown |
 | Routines by name | Yes | `--until`, `--bp`, the call stack. Library routines from XC8's own sources appear too |
 | Variables tab, Watch by name | Globals, locals and parameters of integer (up to 64 bits, signed or not), `float`/`double` (XC8 4.00 makes both 32-bit), `_Bool`, `char`, `unsigned char`, array, structure, union, enumeration, bit-field and pointer types, including `volatile`, `const` and `typedef` names (`uint8_t`). A structure shows as `{x = 7 (0x07), y = -300 (0xFED4)}`, an enumeration as `GREEN (5)`, a pointer as its address and, when it points into data memory, the value there (`0x15 -> 42 (0x2A)`; `NULL` for zero). Watch also takes a member or element: `pt.x`, `sh.tag[1]`, `pts[1].y` (add `:bytes` for more than one byte) | At `-O0` XC8 gives each variable a fixed address, which is what the simulator reads. A pointer to its own structure type (`struct node *next`) shows what it points at one level down (`next = 0x15 -> {v = 2, next = NULL}`), so a ring of nodes ends. A pointer into program memory (a `const char *` to a string literal, a pointer to a `const` table) shows the byte it points at too, on a PIC18 and a PIC16 alike. A `const` variable that XC8 keeps in program memory (a lookup table, a table of strings) is read from there and shows its values; Watch takes it too (`tab`, `tab[1]`, add `:bytes` for more) and reads program memory, marking the address `prog`. A function pointer shows its address and the routine it enters (`0x00109A -> a`) |
-| Software stack (`-mstack=reentrant`, `-mstack=hybrid`) | Yes | The parameters and locals XC8 keeps on the stack are read from the frame of each call: the current routine's, and every caller's, one per level of a recursion (tested at `-O0` on a PIC18 and a PIC16 part, reentrant and hybrid). See *Software stack* below |
+| Programs of several `.c` files | Yes | Each file's routines, globals and lines come from that file. A `static` variable that two files both define (`static int count;` in each) appears twice in the Variables tab, each named with its file (`count (util.c)`). Two `static` routines of one name are told apart the same way in the call stack. Watch reads the copy belonging to the file of the routine the PC is in, and names that file. Write `name@file.c` (`count@util.c`, `helper@main.c`; the file name without its folder) to pick one copy in Watch, `--until`, `--bp` and `--dump`. `basil-sim` refuses the bare name of such a symbol (section 10). An `extern` declaration adds nothing: the variable is the one its defining file describes (tested at `-O0` on a PIC18 and a PIC16 part) |
+| Software stack (`-mstack=reentrant`, `-mstack=hybrid`) | Yes | The parameters and locals XC8 keeps on the stack are read from the frame of each call: the current routine's, and every caller's, one per level of a recursion (tested at `-O0` on a PIC18 and a PIC16 part, reentrant and hybrid, and a tail call at `-O3`). See *Software stack* below |
 | Optimised builds (`-O1` and up) | Yes | XC8 4.00 still gives every variable it describes a fixed address, so the Variables tab and Watch read the right values (tested at `-O1`, `-O2`, `-Os` and `-O3` on a PIC18 and a PIC16 part) | The optimiser merges and reorders lines, so stepping jumps about. A local the compiler folds into a constant has no entry at all (at `-O0` too). At `-O2` and above the compiler overlays the locals of routines that are not running, so a routine's locals and parameters are meaningful only while it is on the call stack; a global the compiler folds away (`total` at `-Os`/`-O3`) has no entry. |
 
-**Software stack.** With `-mstack=reentrant` (or for the routines `-mstack=hybrid` puts on the stack, such as a recursive one) XC8 keeps parameters and locals in a frame on a stack that FSR1 points to, and the debug information gives each one as an offset from FSR1. The simulator notes FSR1 at every call (and when `main` is entered) and adds the bytes the routine's prologue reserves; that is where the call's frame is. What to expect:
+**Software stack.** With `-mstack=reentrant` (or for the routines `-mstack=hybrid` puts on the stack, such as a recursive one) XC8 keeps parameters and locals in a frame on a stack that FSR1 points to, and the debug information gives each one as an offset from FSR1. The simulator notes FSR1 at every call and at the first instruction of `main` and of each routine with a stack frame, and adds the bytes the routine's prologue reserves; that is where the call's frame is. What to expect:
 
 * The values are right at every instruction: at a source line, in a routine's prologue and epilogue (the parameters the caller pushed are readable before the prologue runs), and while a statement pushes the arguments of a call (`f(a, g(b))`).
 * Each call has its own frame, so the caller sections show each level of a recursion with its own values.
+* A tail call: at `-Os` and `-O3` XC8 ends a routine whose last action is a call with a jump to the callee (GOTO, on a PIC16 LJMP) instead of CALL and RETURN, after pushing the callee's arguments. The callee's frame is still right, because FSR1 is noted again at its first instruction. The routine that jumped has no pending return, so it is not on the call stack: the callee returns straight to its caller.
 * An interrupt routine gets its own stack: XC8 saves FSR1 and points it at a separate interrupt stack, and keeps the routine's own locals at fixed addresses. Routines it calls show their frames as usual, and below it the caller sections show the interrupted routine (found at the instruction it will resume at) with its frame.
 * A pointer into the stack (`&buf[1]`) shows the byte it points at; on a PIC16 it holds a linear address (2000h up).
 * The frames are known from the calls the simulator has run since the last Reset. In start-up code, before `main`, there are none.
@@ -306,7 +309,7 @@ A list of the special function registers with address, hex and binary value, in 
 
 ### Watch
 
-Enter `symbol` or `symbol:bytes` and press **Add** to watch a value; `bytes` is 1 to 8 (default 1). The symbol may be a code or data label from the listing, a global variable from the ELF, or an SFR name (`TMR0L`, `PIR0`). Each entry shows address and value as unsigned, signed and hex, for example `T_R1[2] @0123 = 1000 (1000) 0x3E8`. Multi-byte values are little-endian. A name that is not found shows `unknown`. Press `x` to remove an entry.
+Enter `symbol` or `symbol:bytes` and press **Add** to watch a value; `bytes` is 1 to 8 (default 1). The symbol may be a code or data label from the listing, a global variable from the ELF, or an SFR name (`TMR0L`, `PIR0`). Each entry shows address and value as unsigned, signed and hex, for example `T_R1[2] @0123 = 1000 (1000) 0x3E8`. Multi-byte values are little-endian. A `static` global that two C files both define is read from the file of the routine the PC is in, and the entry names that file (`count (util.c)`); `count@util.c` always reads that file's copy. A name that is not found shows `unknown`. Press `x` to remove an entry.
 
 ### Board
 
@@ -379,6 +382,8 @@ The program runs from reset until it stops, then `basil-sim` prints a report and
 | `--speed max\|R` | `max` | Limit the run to a fraction of real time: `1` is real time, `0.5`, `1/10`, `0.001` … |
 | `--fosc MHZ` | 64 | The clock `--speed` uses (0 < MHZ ≤ 64) |
 | `--version`, `-V` | | Print `basil-sim <version>` and exit |
+
+In a C program of several files, a symbol given to `--until`, `--dump` or `--bp` can carry its file: `helper@main.c`, `count@util.c:2`. That is required when two files each define a `static` of that name; the bare name is then refused before the run.
 
 An unknown option, a missing value, an unreadable file, an unknown device, a bad stimulus file or an unknown symbol stops with `basil-sim: <message>` on standard error and exit status 2.
 
@@ -746,6 +751,7 @@ The simulator follows the data sheet. Where it differs from MDB it says so in `d
 | Symptom | Cause and remedy |
 |---|---|
 | The device box is empty | `devices/` was not found at its build-time location. Rebuild from the workspace that holds it (section 2) |
+| `NAME is a routine in more than one file (a.c, b.c): name one as NAME@a.c` (or `a variable`) | Two C files each define a `static` of that name, and `basil-sim` will not pick one. Add the file, as the message shows: `--until helper@main.c`, `--dump count@util.c` |
 | `symbol NAME not found (no prog.S)` | The symbol given with `--until` or `--bp` is in neither the listing nor the ELF. Build with `-g` (for C also `-O0`, so the routine is not inlined away), or check the spelling. A C routine is named as in the source (`add`), without XC8's leading underscore |
 | `basil-sim` runs for a long time and exits with status 1 | The program never reaches `__halt` (a main loop). Add `--max-cycles` for the time you want to simulate |
 | `unknown option`, `needs a value` | Check the option spelling; `--dump`, `--bp` and `--until` take a value |

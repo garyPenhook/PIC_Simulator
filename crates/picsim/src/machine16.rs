@@ -54,7 +54,7 @@ impl Machine16 {
         }
         c.set_board(self.cpu.board.fresh()); // the parts stay wired, back at power-on
         self.cpu = c;
-        self.watch_main();
+        self.watch_entries();
         Ok(())
     }
 
@@ -82,7 +82,7 @@ impl Machine16 {
             self.syms.entry(v.name.clone()).or_insert(v.addr);
         }
         self.debug = d;
-        self.watch_main();
+        self.watch_entries();
     }
 
     /// Where each routine with a pending return is, innermost first: the CALL (the word before a return address), or for an
@@ -96,7 +96,7 @@ impl Machine16 {
         (self.cpu.depth() as usize).min(16)
     }
 
-    /// The live calls with their frame bases (`DebugInfo::frames`), innermost first: FSR1 at each call from `Pic16::entry_sp`.
+    /// The live calls with their frame bases (`DebugInfo::frames`), innermost first: FSR1 at each call or entry from `Pic16::entry_sp`.
     pub fn frames(&self) -> Vec<crate::debuginfo::Frame> {
         // Past 16 levels (an overflow with STVREN = 0) the 17th push overwrote level 1, so no level noted by a push can be
         // trusted; level 0 (main, noted on entry) still can.
@@ -105,9 +105,11 @@ impl Machine16 {
         self.debug.frames(self.cpu.pc, &self.call_sites(), &entries, &self.cpu.prog)
     }
 
-    /// Has the core note FSR1 when `main` is entered (`Pic16::entry_watch`); after loading debug information and a Reset.
-    fn watch_main(&mut self) {
-        self.cpu.entry_watch = self.debug.funcs.iter().find(|f| f.name == "main").map(|f| f.low);
+    /// Has the core note FSR1 when `main` or a routine with a stack frame is entered (`Pic16::entry_watch`); after loading
+    /// debug information and a Reset.
+    fn watch_entries(&mut self) {
+        self.cpu.entry_watch = self.debug.entry_points();
+        self.cpu.note_entry(); // the PC may already be at one
     }
 
     /// Starts a source-line step (see `line_step`).

@@ -82,7 +82,7 @@ impl Machine {
             c.p.set_board(self.cpu.p.board.fresh());
             c.stim = self.stimulus.clone();
             self.cpu = c;
-            self.watch_main();
+            self.watch_entries();
         }
     }
 
@@ -108,7 +108,7 @@ impl Machine {
             self.syms.entry(v.name.clone()).or_insert(v.addr);
         }
         self.debug = d;
-        self.watch_main();
+        self.watch_entries();
     }
 
     /// Symbols from the assembly listing basil writes next to the hex: `;SYM name 0xADDR` for code labels and
@@ -128,15 +128,17 @@ impl Machine {
         (self.cpu.stack_level() as usize).min(self.cpu.stack.len() - 1)
     }
 
-    /// The live calls with their frame bases (`DebugInfo::frames`), innermost first: FSR1 at each call from `Pic18::entry_sp`.
+    /// The live calls with their frame bases (`DebugInfo::frames`), innermost first: FSR1 at each call or entry from `Pic18::entry_sp`.
     pub fn frames(&self) -> Vec<crate::debuginfo::Frame> {
         let entries: Vec<Option<u32>> = (0..=self.levels()).rev().map(|l| self.cpu.entry_sp.get(l).copied().flatten()).collect();
         self.debug.frames(self.cpu.pc, &self.call_sites(), &entries, &self.cpu.prog)
     }
 
-    /// Has the core note FSR1 when `main` is entered (`Pic18::entry_watch`); after loading debug information and a Reset.
-    fn watch_main(&mut self) {
-        self.cpu.entry_watch = self.debug.funcs.iter().find(|f| f.name == "main").map(|f| f.low);
+    /// Has the core note FSR1 when `main` or a routine with a stack frame is entered (`Pic18::entry_watch`); after loading
+    /// debug information and a Reset.
+    fn watch_entries(&mut self) {
+        self.cpu.entry_watch = self.debug.entry_points();
+        self.cpu.note_entry(); // the PC may already be at one
     }
 
     /// Hardware stack depth (STKPTR without its flag bits, `Pic18::stack_level`).

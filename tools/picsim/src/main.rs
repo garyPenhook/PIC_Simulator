@@ -102,7 +102,7 @@ fn run() -> Result<ExitCode, String> {
     }
     let until = default_until(until, until_given, m.syms.contains_key("__halt"));
     let stop_at = match &until {
-        Some(s) => Some(*m.syms.get(s).ok_or(format!("symbol {s} not found (no {})", asm.display()))?),
+        Some(s) => Some(sym(&m.syms, &m.debug, s)?.ok_or(format!("symbol {s} not found (no {})", asm.display()))?),
         None => None,
     };
     m.until_routine = until_given && stop_at.is_some_and(|a| m.debug.is_routine_entry(a));
@@ -122,9 +122,10 @@ fn run() -> Result<ExitCode, String> {
         return Ok(ExitCode::SUCCESS);
     }
     for b in &bps {
-        let a = *m.syms.get(b).ok_or(format!("symbol {b} not found"))?;
+        let a = sym(&m.syms, &m.debug, b)?.ok_or(format!("symbol {b} not found"))?;
         m.breakpoints.push(a);
     }
+    check_dump(&m.debug, &dump)?;
     if let Some(p) = pace.as_mut() {
         p.restart(m.cpu.cycles);
     }
@@ -144,7 +145,7 @@ fn run() -> Result<ExitCode, String> {
     println!("stop: {stop:?}  cycles: {}  instructions: {}", m.cpu.cycles, m.cpu.icount);
     for d in &dump {
         let (name, len) = d.split_once(':').map_or((d.as_str(), 1), |(n, l)| (n, l.parse().unwrap_or(1)));
-        let addr = m.syms.get(name).copied().or_else(|| m.dev.find_sfr(name).map(|s| s.addr)).ok_or(format!("unknown symbol {name}"))?;
+        let addr = sym(&m.syms, &m.debug, name)?.or_else(|| m.dev.find_sfr(name).map(|s| s.addr)).ok_or(format!("unknown symbol {name}"))?;
         let b = m.peek(addr, len);
         let v: u64 = b.iter().rev().fold(0, |a, x| a << 8 | u64::from(*x));
         println!("{name} = {v}  ({})", b.iter().map(|x| format!("{x:02X}")).collect::<Vec<_>>().join(" "));
@@ -263,7 +264,7 @@ fn run16(
     }
     let until = default_until(until, until_given, m.syms.contains_key("__halt"));
     let stop_at = match &until {
-        Some(s) => Some(*m.syms.get(s).ok_or(format!("symbol {s} not found (no {})", asm.display()))?),
+        Some(s) => Some(sym(&m.syms, &m.debug, s)?.ok_or(format!("symbol {s} not found (no {})", asm.display()))?),
         None => None,
     };
     m.until_routine = until_given && stop_at.is_some_and(|a| m.debug.is_routine_entry(a));
@@ -279,8 +280,9 @@ fn run16(
         return Ok(ExitCode::SUCCESS);
     }
     for b in bps {
-        m.breakpoints.push(*m.syms.get(b).ok_or(format!("symbol {b} not found"))?);
+        m.breakpoints.push(sym(&m.syms, &m.debug, b)?.ok_or(format!("symbol {b} not found"))?);
     }
+    check_dump(&m.debug, dump)?;
     if let Some(p) = pace.as_mut() {
         p.restart(m.cpu.cycles);
     }
@@ -299,7 +301,7 @@ fn run16(
     println!("stop: {stop:?}  cycles: {}  instructions: {}", m.cpu.cycles, m.cpu.icount);
     for d in dump {
         let (name, len) = d.split_once(':').map_or((d.as_str(), 1), |(n, l)| (n, l.parse().unwrap_or(1)));
-        let addr = m.syms.get(name).copied().or_else(|| m.dev.find_sfr(name).map(|s| s.addr)).ok_or(format!("unknown symbol {name}"))?;
+        let addr = sym(&m.syms, &m.debug, name)?.or_else(|| m.dev.find_sfr(name).map(|s| s.addr)).ok_or(format!("unknown symbol {name}"))?;
         let b = m.peek(addr, len);
         let v: u64 = b.iter().rev().fold(0, |a, x| a << 8 | u64::from(*x));
         println!("{name} = {v}  ({})", b.iter().map(|x| format!("{x:02X}")).collect::<Vec<_>>().join(" "));
@@ -317,6 +319,24 @@ fn run16(
         eprintln!("note: unmodelled SFRs touched: {}", m.cpu.unmodelled.iter().cloned().collect::<Vec<_>>().join(" "));
     }
     Ok(if stop == Stop::Halt || until.is_none() { ExitCode::SUCCESS } else { ExitCode::from(1) })
+}
+
+/// The address of symbol `name`. `name@file.c` is the routine or global of that file the ELF describes; a name that is a
+/// routine or global of more than one file (a `static` in each) is an error, rather than one of them picked silently.
+fn sym(syms: &std::collections::BTreeMap<String, u32>, d: &picsim::debuginfo::DebugInfo, name: &str) -> Result<Option<u32>, String> {
+    if let Some(e) = d.ambiguous(name) {
+        return Err(e);
+    }
+    if picsim::debuginfo::split_file(name).1.is_some() {
+        // A data address for --dump (not a constant in program memory, not a frame offset).
+        return Ok(d.routine(name).map(|i| d.funcs[i].low).or_else(|| d.global(name, None).filter(|v| !v.rom && v.frame.is_none()).map(|v| v.addr)));
+    }
+    Ok(syms.get(name).copied())
+}
+
+/// Refuses, before the run, a `--dump` name that `sym` would refuse after it.
+fn check_dump(d: &picsim::debuginfo::DebugInfo, dump: &[String]) -> Result<(), String> {
+    dump.iter().filter_map(|x| d.ambiguous(x.split_once(':').map_or(x.as_str(), |p| p.0))).next().map_or(Ok(()), Err)
 }
 
 /// The symbol to stop at. Unless `--until` named one, that is `__halt`, which a basil program has; a C program built with XC8 has none, so

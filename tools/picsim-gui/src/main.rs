@@ -263,6 +263,10 @@ impl App {
                         self.labels.entry(*a).or_insert_with(|| n.clone());
                     }
                 }
+                // syms holds one address per name: a static routine that two files define is labelled from the ELF, with its file.
+                for (i, f) in m.debug.funcs.iter().enumerate().filter(|(_, f)| f.high > f.low && m.debug.is_ambiguous(&f.name)) {
+                    self.labels.insert(f.low, m.debug.func_label(i));
+                }
                 let mut m = m;
                 if m.cpu.p.board.is_empty() {
                     m.cpu.p.set_board(self.board_cfg.fresh()); // keep the parts wired in an earlier session
@@ -712,7 +716,7 @@ impl eframe::App for App {
             let dbg = &m.debug;
             // Routine and BASIC line of a program address.
             let loc = |a: u32| -> String {
-                let f = dbg.func_at(a).map_or("?", |i| dbg.funcs[i].name.as_str());
+                let f = dbg.func_at(a).map_or("?".to_string(), |i| dbg.func_label(i));
                 match dbg.lines.lookup(a) {
                     Some((p, l)) => format!("{f}  {}:{l}", p.file_name().unwrap_or_default().to_string_lossy()),
                     None => f.to_string(),
@@ -784,8 +788,8 @@ impl eframe::App for App {
                 }
                 4 => variables_ui(ui, &m.debug, pc, &m.frames(), &m.cpu.m.mem, &m.cpu.prog, self.snap.as_ref().map(|s| (s, self.snap_frames.as_slice()))),
                 _ => {
-                    let (syms, vars, dev, debug) = (&m.syms, &m.debug.vars, &m.dev, &m.debug);
-                    watch_ui(ui, &mut self.watch, &mut self.watch_in, |n| syms.get(n).copied().map(|a| (a, false)).or_else(|| vars.iter().find(|v| v.scope.is_none() && !v.rom && v.name == *n).map(|v| (v.addr, false))).or_else(|| debug.path_ref(n).map(|p| (p.0, p.2))).or_else(|| dev.find_sfr(n).map(|s| (s.addr, false))), |a, l, rom| if rom { debug.rom_bytes(&m.cpu.prog, a, l) } else { m.peek(a, l) });
+                    let (syms, dev, debug, pc) = (&m.syms, &m.dev, &m.debug, m.cpu.pc);
+                    watch_ui(ui, &mut self.watch, &mut self.watch_in, |n| watch_addr(debug, syms, dev, n, pc), |a, l, rom| if rom { debug.rom_bytes(&m.cpu.prog, a, l) } else { m.peek(a, l) });
                 }
             }
         });
@@ -894,7 +898,7 @@ fn variables_ui(ui: &mut egui::Ui, debug: &picsim::debuginfo::DebugInfo, pc: u32
     }
     let f = debug.func_at(pc);
     ui.label(match f {
-        Some(i) => format!("in {}", debug.funcs[i].name),
+        Some(i) => format!("in {}", debug.func_label(i)),
         None => "in start-up code (globals only)".to_string(),
     });
     let rom = debug.rom_image(prog);
@@ -909,7 +913,7 @@ fn variables_ui(ui: &mut egui::Ui, debug: &picsim::debuginfo::DebugInfo, pc: u32
             let comparable = v.frame.is_none() || same_call(then, live, k);
             let changed = !v.rom && comparable && at.is_some_and(|a| snap.as_ref().is_some_and(|s| s.get(a as usize..(a + v.bytes) as usize) != data.get(a as usize..(a + v.bytes) as usize)));
             let col = if changed { egui::Color32::from_rgb(255, 170, 60) } else { ui.visuals().text_color() };
-            ui.colored_label(col, format!("{}{}", v.name, if v.param { " (arg)" } else { "" }));
+            ui.colored_label(col, format!("{}{}", debug.var_label(v), if v.param { " (arg)" } else { "" }));
             ui.weak(match (at, v.frame) {
                 (Some(a), _) => format!("{} @{a:03X}", v.ty),
                 (None, Some(off)) => format!("{} @frame{off:+}", v.ty),
@@ -926,7 +930,7 @@ fn variables_ui(ui: &mut egui::Ui, debug: &picsim::debuginfo::DebugInfo, pc: u32
         for (n, &k) in frames.iter().enumerate() {
             let i = live[k].func.unwrap_or_default();
             ui.separator();
-            ui.label(format!("caller: {}", debug.funcs[i].name));
+            ui.label(format!("caller: {}", debug.func_label(i)));
             egui::Grid::new(format!("vars_caller{n}")).num_columns(3).striped(true).show(ui, |ui| {
                 for v in debug.vars.iter().filter(|v| v.scope == Some(i)) {
                     row(ui, v, k);
@@ -944,9 +948,25 @@ fn same_call(then: &[picsim::debuginfo::Frame], now: &[picsim::debuginfo::Frame]
     then.len() > j && now.get(k) == then.get(then.len() - 1 - j)
 }
 
+/// Where Watch finds `name`: a global that several files define `static` as C sees it from the routine at `pc` (or the one
+/// `name@file.c` names), else as before, a symbol (the listing's win over the ELF's), a global or `const` from the ELF, an
+/// SFR. The flag: a program address. The text: the file of the copy taken, for a name several files define.
+fn watch_addr(debug: &picsim::debuginfo::DebugInfo, syms: &std::collections::BTreeMap<String, u32>, dev: &devdesc::Device, name: &str, pc: u32) -> Option<(u32, bool, Option<String>)> {
+    let (_, file) = picsim::debuginfo::split_file(name);
+    if debug.is_ambiguous(name) || file.is_some() {
+        let p = debug.path_ref_at(name, Some(pc))?;
+        let (base, _) = picsim::debuginfo::split_file(name);
+        let end = base.find(['.', '[']).unwrap_or(base.len());
+        let from = debug.global(&base[..end], Some(pc)).filter(|_| file.is_none()).map(|v| debug.unit_file(v.unit).to_string());
+        return Some((p.0, p.2, from));
+    }
+    let at = |p: (u32, u32, bool)| (p.0, p.2, None);
+    syms.get(name).map(|&a| (a, false, None)).or_else(|| debug.path_ref_at(name, Some(pc)).map(at)).or_else(|| dev.find_sfr(name).map(|s| (s.addr, false, None)))
+}
+
 /// The Watch tab: symbols (or SFR names) with a byte count, shown as unsigned, signed and hex. `addr` resolves a name,
 /// `peek` reads bytes without side effects.
-fn watch_ui(ui: &mut egui::Ui, watch: &mut Vec<(String, usize)>, input: &mut String, addr: impl Fn(&str) -> Option<(u32, bool)>, peek: impl Fn(u32, usize, bool) -> Vec<u8>) {
+fn watch_ui(ui: &mut egui::Ui, watch: &mut Vec<(String, usize)>, input: &mut String, addr: impl Fn(&str) -> Option<(u32, bool, Option<String>)>, peek: impl Fn(u32, usize, bool) -> Vec<u8>) {
     ui.horizontal(|ui| {
         ui.add(egui::TextEdit::singleline(input).hint_text("symbol[:bytes]"));
         if ui.button("Add").clicked() {
@@ -959,9 +979,10 @@ fn watch_ui(ui: &mut egui::Ui, watch: &mut Vec<(String, usize)>, input: &mut Str
     for (i, (n, l)) in watch.iter().enumerate() {
         ui.horizontal(|ui| {
             match addr(n) {
-                Some((a, rom)) => {
+                Some((a, rom, from)) => {
                     let v: u64 = peek(a, *l, rom).iter().rev().fold(0, |x, y| x << 8 | u64::from(*y));
                     let signed = if *l < 8 { ((v << (64 - 8 * l)) as i64) >> (64 - 8 * l) } else { v as i64 };
+                    let n = from.map_or(n.clone(), |f| format!("{n} ({f})")); // which file's copy, for a name two files define
                     ui.monospace(format!("{n}[{l}] @{}{a:04X} = {v} ({signed}) 0x{v:X}", if rom { "prog " } else { "" }));
                 }
                 None => {
@@ -1017,7 +1038,7 @@ impl App {
             ui.heading(if dbg.funcs.is_empty() { "Return stack" } else { "Call stack" });
             // Routine and BASIC line of a program (word) address.
             let loc = |a: u32| -> String {
-                let f = dbg.func_at(a).map_or("?", |i| dbg.funcs[i].name.as_str());
+                let f = dbg.func_at(a).map_or("?".to_string(), |i| dbg.func_label(i));
                 match dbg.lines.lookup(a) {
                     Some((p, l)) => format!("{f}  {}:{l}", p.file_name().unwrap_or_default().to_string_lossy()),
                     None => f.to_string(),
@@ -1094,8 +1115,8 @@ impl App {
                 }
                 4 => variables_ui(ui, &m.debug, pc, &m.frames(), &m.cpu.mem, &m.cpu.prog, self.snap.as_ref().map(|s| (s, self.snap_frames.as_slice()))),
                 _ => {
-                    let (syms, vars, dev, debug) = (&m.syms, &m.debug.vars, &m.dev, &m.debug);
-                    watch_ui(ui, &mut self.watch, &mut self.watch_in, |n| syms.get(n).copied().map(|a| (a, false)).or_else(|| vars.iter().find(|v| v.scope.is_none() && !v.rom && v.name == *n).map(|v| (v.addr, false))).or_else(|| debug.path_ref(n).map(|p| (p.0, p.2))).or_else(|| dev.find_sfr(n).map(|s| (s.addr, false))), |a, l, rom| if rom { debug.rom_bytes(&m.cpu.prog, a, l) } else { m.peek(a, l) });
+                    let (syms, dev, debug, pc) = (&m.syms, &m.dev, &m.debug, m.cpu.pc);
+                    watch_ui(ui, &mut self.watch, &mut self.watch_in, |n| watch_addr(debug, syms, dev, n, pc), |a, l, rom| if rom { debug.rom_bytes(&m.cpu.prog, a, l) } else { m.peek(a, l) });
                 }
             }
         });
@@ -1406,12 +1427,12 @@ mod caller_frame_tests {
 
     fn var(name: &str, addr: u32, scope: Option<usize>) -> Var {
         let layout = Ty { bytes: 1, elem: 1, kind: Kind::Unsigned, array: false, name: "unsigned char".into(), form: Form::Scalar };
-        Var { name: name.into(), addr, bytes: 1, kind: Kind::Unsigned, elem: 1, array: false, ty: "unsigned char".into(), scope, param: false, rom: false, layout, frame: None }
+        Var { name: name.into(), addr, bytes: 1, kind: Kind::Unsigned, elem: 1, array: false, ty: "unsigned char".into(), scope, param: false, rom: false, layout, frame: None, unit: 0, file_static: false }
     }
 
     /// main 0x100..0x200 and mid 0x200..0x300 and leaf 0x300..0x400 have variables; empty 0x400..0x500 has none.
     fn info() -> DebugInfo {
-        let f = |n: &str, low, high| Func { name: n.into(), low, high, frame_reg: None };
+        let f = |n: &str, low, high| Func { name: n.into(), low, high, frame_reg: None, unit: 0 };
         DebugInfo {
             funcs: vec![f("main", 0x100, 0x200), f("mid", 0x200, 0x300), f("leaf", 0x300, 0x400), f("empty", 0x400, 0x500)],
             vars: vec![var("g", 0x20, None), var("m", 0x30, Some(0)), var("x", 0x31, Some(1)), var("y", 0x32, Some(2))],
@@ -1461,5 +1482,50 @@ mod caller_frame_tests {
         // Returned and called again at another base: not the same call.
         assert!(!same_call(&then, &[fr(1, 0x52), fr(0, 0x40)], 0));
         assert!(!same_call(&then, &now, 3));
+    }
+}
+
+#[cfg(test)]
+mod watch_tests {
+    use super::watch_addr;
+    use picsim::debuginfo::{DebugInfo, Form, Func, Kind, Ty, Var};
+    use std::collections::BTreeMap;
+
+    fn var(name: &str, addr: u32, unit: usize, file_static: bool) -> Var {
+        let layout = Ty { bytes: 1, elem: 1, kind: Kind::Unsigned, array: false, name: "unsigned char".into(), form: Form::Scalar };
+        Var { name: name.into(), addr, bytes: 1, kind: Kind::Unsigned, elem: 1, array: false, ty: "unsigned char".into(), scope: None, param: false, rom: false, layout, frame: None, unit, file_static }
+    }
+
+    /// Two files, a.c (main 0x100..0x200) and b.c (bump 0x200..0x300), each with its own `static count`; `shared` is b.c's.
+    fn info() -> DebugInfo {
+        let f = |n: &str, low, high, unit| Func { name: n.into(), low, high, frame_reg: None, unit };
+        DebugInfo {
+            units: vec!["/p/a.c".into(), "/p/b.c".into()],
+            funcs: vec![f("main", 0x100, 0x200, 0), f("bump", 0x200, 0x300, 1)],
+            vars: vec![var("count", 0x21, 1, true), var("shared", 0x22, 1, false), var("count", 0x20, 0, true)],
+            ..DebugInfo::default()
+        }
+    }
+
+    #[test]
+    fn a_static_two_files_define_is_the_current_files() {
+        let dev = devdesc::Device::load(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../devices/18F27Q10.toml")).unwrap();
+        let d = info();
+        // The symbol table keeps one `count` (the first the ELF gave); Watch follows the routine the PC is in instead.
+        let syms: BTreeMap<String, u32> = [("count".to_string(), 0x21), ("shared".to_string(), 0x22), ("T_R1".to_string(), 0x40)].into();
+        let file = |f: &str| Some(f.to_string());
+        assert_eq!(watch_addr(&d, &syms, &dev, "count", 0x150), Some((0x20, false, file("a.c"))), "in main (a.c)");
+        assert_eq!(watch_addr(&d, &syms, &dev, "count", 0x250), Some((0x21, false, file("b.c"))), "in bump (b.c)");
+        // From start-up code (no routine) the first copy, still named with its file; @file picks one wherever the PC is.
+        assert_eq!(watch_addr(&d, &syms, &dev, "count", 0x10), Some((0x21, false, file("b.c"))));
+        assert_eq!(watch_addr(&d, &syms, &dev, "count@b.c", 0x150), Some((0x21, false, None)));
+        assert_eq!(watch_addr(&d, &syms, &dev, "count@a.c", 0x250), Some((0x20, false, None)));
+        assert_eq!(watch_addr(&d, &syms, &dev, "count@c.c", 0x250), None);
+        assert_eq!(watch_addr(&d, &syms, &dev, "shared", 0x150), Some((0x22, false, None)));
+        assert_eq!(watch_addr(&d, &syms, &dev, "shared@b.c", 0x150), Some((0x22, false, None)));
+        // Other names as before: a listing symbol, an SFR, nothing.
+        assert_eq!(watch_addr(&d, &syms, &dev, "T_R1", 0x150), Some((0x40, false, None)));
+        assert_eq!(watch_addr(&d, &syms, &dev, "TMR0L", 0x150), dev.find_sfr("TMR0L").map(|s| (s.addr, false, None)));
+        assert_eq!(watch_addr(&d, &syms, &dev, "nothing", 0x150), None);
     }
 }

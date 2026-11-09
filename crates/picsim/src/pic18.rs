@@ -33,15 +33,17 @@ pub struct Pic18 {
     pub depth: u32,
     pub stack: Vec<u32>,
     /// FSR1 when each live call was made, by return-stack level (the level the call's return address went to; level 0 is
-    /// the routine at the bottom, recorded when the PC reaches `entry_watch`). The debugger works out the frame of each
-    /// call on XC8's software stack from it (`DebugInfo::frames`). `None` until a call at that level, and after a Reset.
+    /// the routine at the bottom). Noted at every push, and again when the PC reaches a routine's first instruction
+    /// (`entry_watch`): a routine entered by a jump (XC8 -O3/-Os turns CALL; RETURN into GOTO, after pushing the callee's
+    /// arguments) takes over the level of the routine that jumped. The debugger works out the frame of each call on XC8's
+    /// software stack from it (`DebugInfo::frames`). `None` until a call at that level, and after a Reset.
     pub entry_sp: Vec<Option<u32>>,
     /// By the same level: true when an interrupt pushed the return address there (it is the instruction to resume, not the
     /// one after a CALL).
     pub entry_irq: Vec<bool>,
-    /// The routine at the bottom of the call stack (`main`, which start-up code enters with GOTO), for `entry_sp[0]`: noted
-    /// when the PC reaches it with the return stack empty.
-    pub entry_watch: Option<u32>,
+    /// The first instructions of the routines whose entry FSR1 is noted in `entry_sp` (`DebugInfo::entry_points`: `main`,
+    /// which start-up code enters with GOTO, and the routines with a frame on the software stack), sorted.
+    pub entry_watch: Vec<u32>,
     pub shadow: (u8, u8, u8),
     /// Configuration fields as programmed by the loaded image.
     pub cfg: crate::config::Config,
@@ -192,7 +194,7 @@ impl Pic18 {
             stk_mask: (depth + 1).next_power_of_two() as u8 - 1,
             entry_sp: vec![None; depth as usize + 2],
             entry_irq: vec![false; depth as usize + 2],
-            entry_watch: None,
+            entry_watch: Vec::new(),
             stk_fault: None,
             mclr_ev: Vec::new(),
             mclr_next: 0,
@@ -516,10 +518,23 @@ impl Pic18 {
 
     /// Execute one instruction; returns the cycles it took (also added to `self.cycles`).
     pub fn step(&mut self) -> u32 {
-        let start = self.cycles;
-        if self.entry_watch == Some(self.pc) && self.stack_level() == 0 {
-            self.entry_sp[0] = Some(self.fsr(1));
+        let n = self.step_inner();
+        self.note_entry(); // after the instruction, so a run that stops at a routine's first instruction has it noted
+        n
+    }
+
+    /// At a routine's first instruction (`entry_watch`): notes FSR1 for the current return-stack level (`entry_sp`). After
+    /// each instruction, and when the list is set (`Machine::load_debug`, a Reset).
+    pub fn note_entry(&mut self) {
+        if !self.entry_watch.is_empty() && self.entry_watch.binary_search(&self.pc).is_ok() {
+            // The level push() notes a call at (on an overflow, the top one it overwrote).
+            let level = self.stack_level() as usize;
+            self.entry_sp[level] = Some(self.fsr(1));
         }
+    }
+
+    fn step_inner(&mut self) -> u32 {
+        let start = self.cycles;
         if self.mclr_hold {
             return self.hold_step();
         }

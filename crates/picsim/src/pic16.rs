@@ -154,15 +154,17 @@ pub struct Pic16 {
     pub icount: u64,
     stack: [u16; 16],
     /// FSR1 when each live call was made, by return-stack level (the level the call's return address went to; level 0 is
-    /// the routine at the bottom, recorded when the PC reaches `entry_watch`). The debugger works out the frame of each
-    /// call on XC8's software stack from it (`DebugInfo::frames`). `None` until a call at that level, and after a Reset.
+    /// the routine at the bottom). Noted at every push, and again when the PC reaches a routine's first instruction
+    /// (`entry_watch`): a routine entered by a jump (XC8 -O3/-Os turns CALL; RETURN into GOTO, after pushing the callee's
+    /// arguments) takes over the level of the routine that jumped. The debugger works out the frame of each call on XC8's
+    /// software stack from it (`DebugInfo::frames`). `None` until a call at that level, and after a Reset.
     pub entry_sp: [Option<u32>; 17],
     /// By the same level: true when an interrupt pushed the return address there (it is the instruction to resume, not the
     /// one after a CALL).
     pub entry_irq: [bool; 17],
-    /// The routine at the bottom of the call stack (`main`, which start-up code enters with GOTO), for `entry_sp[0]`: noted
-    /// when the PC reaches it with the return stack empty.
-    pub entry_watch: Option<u32>,
+    /// The first instructions of the routines whose entry FSR1 is noted in `entry_sp` (`DebugInfo::entry_points`: `main`,
+    /// which start-up code enters with GOTO, and the routines with a frame on the software stack), sorted.
+    pub entry_watch: Vec<u32>,
     pub cfg: Config,
     cfg_regs: Vec<devdesc::ConfigRegister>,
     /// Messages about things the model does not do, deduplicated.
@@ -347,7 +349,7 @@ impl Pic16 {
             stack: [0; 16],
             entry_sp: [None; 17],
             entry_irq: [false; 17],
-            entry_watch: None,
+            entry_watch: Vec::new(),
             cfg: Config::decode_words(&dev.config, &BTreeMap::new()),
             cfg_regs: dev.config.clone(),
             notes: BTreeSet::new(),
@@ -2422,13 +2424,21 @@ impl Pic16 {
 
     /// Execute one instruction (or take one interrupt); returns the cycles it took (also added to `self.cycles`).
     pub fn step(&mut self) -> u32 {
-        if self.entry_watch == Some(self.pc) && self.depth() == 0 {
-            self.entry_sp[0] = Some(u32::from(self.fsr(1)));
-        }
         let n = self.step_core();
         self.ioc_scan();
         self.board_poll();
+        self.note_entry(); // after the instruction, so a run that stops at a routine's first instruction has it noted
         n
+    }
+
+    /// At a routine's first instruction (`entry_watch`): notes FSR1 for the current return-stack level (`entry_sp`). After
+    /// each instruction, and when the list is set (`Machine16::load_debug`, a Reset).
+    pub fn note_entry(&mut self) {
+        if !self.entry_watch.is_empty() && self.entry_watch.binary_search(&self.pc).is_ok() {
+            // The level push() notes a call at: 0 with the return stack empty, else STKPTR (its low 4 bits) plus one.
+            let level = if self.depth() == 0 { 0 } else { usize::from(self.mem[self.a_stkptr] & 15) + 1 };
+            self.entry_sp[level] = Some(u32::from(self.fsr(1)));
+        }
     }
 
     fn step_core(&mut self) -> u32 {
