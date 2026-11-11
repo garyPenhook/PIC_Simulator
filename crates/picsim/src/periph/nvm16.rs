@@ -64,6 +64,7 @@ const WREN: u8 = 0x04;
 const WR: u8 = 0x02;
 const RD: u8 = 0x01;
 
+#[derive(Clone)]
 pub(crate) struct Nvm16 {
     adr: [usize; 2],
     datl: usize,

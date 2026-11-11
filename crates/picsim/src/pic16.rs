@@ -33,6 +33,7 @@ const MEM: usize = 0x2000;
 const EMPTY: u8 = 0x1F;
 
 /// One I/O port: PORTx, LATx, TRISx and ANSELx (DS40002343F ch.16).
+#[derive(Clone)]
 struct Port16 {
     letter: u8,
     port: usize,
@@ -44,6 +45,7 @@ struct Port16 {
 /// Timer0 (DS40002343F ch.22 p.244-249; same behaviour as the PIC18 model in `periph.rs`): Fosc/4 clock only.
 /// 8-bit mode compares TMR0L with the live TMR0H and goes to 0 on the next clock; 16-bit mode rolls over at FFFFh and
 /// buffers TMR0H; prescaler and postscaler are cleared by a write to TMR0L, T0CON0 or T0CON1 `[A106]`.
+#[derive(Clone)]
 struct Timer0 {
     /// T0CKIPPS, the pin of the clock sources 000 (true) and 001 (inverted).
     cki: Option<usize>,
@@ -60,6 +62,7 @@ struct Timer0 {
 
 /// Timer1/Timer3 (DS40002343F ch.23 p.252-267): 16-bit up counter, prescaler 1:1-1:8, TMRxIF on the roll-over from FFFFh to
 /// 0000h. RD16 buffers TMRxH like Timer0; only a write to TMRxL clears the prescaler (23.6). Fosc/4 and Fosc clocks `[A107]`.
+#[derive(Clone)]
 struct Timer1 {
     n: u8,
     /// TxCKIPPS (the clock pin), TxGPPS (the gate pin) and TxGATE (the gate source, newer layout only).
@@ -82,6 +85,7 @@ struct Timer1 {
 /// Timer2/4/6 (DS40002343F ch.24 p.268-287): T2TMR counts up, matches T2PR and goes to 0 on the next clock; the postscaler
 /// counts matches and TMRxIF is set when it reaches OUTPS+1. Prescaler and postscaler are cleared by a write to T2TMR or
 /// T2CON (T2TMR is not cleared by T2CON, 24.1). Software-gate and software-start one-shot modes only `[A107]`.
+#[derive(Clone)]
 struct Timer2 {
     n: u8,
     tmr: usize,
@@ -133,6 +137,7 @@ pub enum Reset {
     WdtWindow,
 }
 
+#[derive(Clone)]
 pub struct Pic16 {
     pub mem: Vec<u8>,
     /// Bits that exist, per address.
@@ -192,6 +197,14 @@ pub struct Pic16 {
     stk_fault: Option<Reset>,
     /// A reset requested by the instruction that is executing, done at its end.
     reset_req: Option<Reset>,
+    /// The end-of-instruction sync may be skipped while no model has anything due (`tick`). Set by a run
+    /// (`Machine16::run`), which calls `settle` before it returns; with it set, the models and their registers can lag
+    /// behind `cycles` between instructions.
+    pub lazy: bool,
+    /// `tick` skips the end-of-instruction sync before this cycle (`next_due`); 0 = unknown, sync on the next one.
+    due: u64,
+    /// The cycle of the last end-of-instruction sync that was skipped; `catch_up` brings the models there.
+    owed: Option<u64>,
     extra: u64,
     /// An access through INDFn reached program flash during this instruction (one extra cycle in all, however many accesses).
     flash_cycle: bool,
@@ -304,6 +317,7 @@ pub struct Pic16 {
 }
 
 #[derive(Default)]
+#[derive(Clone)]
 struct ClbView {
     out: u32,
     outsel: [u8; 8],
@@ -312,6 +326,7 @@ struct ClbView {
 }
 
 /// The CLB and where its registers are.
+#[derive(Clone)]
 struct ClbHw {
     clb: Clb,
     con: usize,
@@ -398,6 +413,9 @@ impl Pic16 {
             irq_new_by: Vec::new(),
             stk_fault: None,
             reset_req: None,
+            lazy: crate::periph::check_lazy(),
+            due: 0,
+            owed: None,
             extra: 0,
             flash_cycle: false,
             a_status: 0,
@@ -957,6 +975,12 @@ impl Pic16 {
             }
             Tgt::Mem(a) => {
                 self.note(a);
+                if self.model_reg(a) {
+                    self.catch_up();
+                    if !self.flag_reg[a] && self.port_reg[a].is_none() {
+                        self.due = 0; // a read may have a side effect (a FIFO pop, an armed watchdog, the TMRxH buffer)
+                    }
+                }
                 if self.tmr_reg[a] {
                     return self.read_tmr(a);
                 }
@@ -1026,6 +1050,11 @@ impl Pic16 {
             }
             Tgt::Mem(a) => {
                 self.note(a);
+                if self.model_reg(a) {
+                    // the models see the old value up to now and the new one from the next sync
+                    self.catch_up();
+                    self.due = 0;
+                }
                 if a == 2 {
                     self.mem[2] = v;
                     self.pc = (u32::from(self.mem[self.a_pclath] & 0x7F) << 8 | u32::from(v)) % self.words;
@@ -2384,6 +2413,8 @@ impl Pic16 {
     /// A reset other than power-on: SFRs take their MCLR-column value (bits marked u, q, x or - are left alone), the
     /// PC is cleared and the stack is empty. Peripherals do not exist yet.
     fn do_reset(&mut self, kind: Reset) {
+        self.catch_up();
+        self.due = 0;
         self.entry_sp = [None; 17];
         self.entry_irq = [false; 17];
         self.sync_nvm(); // a write that ended before the Reset is done, not lost
@@ -2654,8 +2685,159 @@ impl Pic16 {
     // ----- execution -------------------------------------------------------------------------------------------
 
     /// Execute one instruction (or take one interrupt); returns the cycles it took (also added to `self.cycles`).
+    /// A data address a peripheral model reads or writes: an SFR outside the core registers (bank offsets 00h-0Bh, see
+    /// `phys`) and the return stack registers.
+    fn model_reg(&self, a: usize) -> bool {
+        self.is_sfr[a] && a & 0x7F >= 0x0C && a != self.a_stkptr && a != self.a_tos && a != self.a_tos + 1
+    }
+
+    /// The end-of-instruction sync of every model. With `lazy` it is skipped while the cycle is before `due`: no model can
+    /// change a register, a flag, a pin or a log sooner (`next_due`). `rd` and `wr` call `catch_up` before they touch a
+    /// model register and reset `due` after a write, so a skipped span never sees a register value it did not have.
+    /// `PICSIM_CHECK_LAZY=1` checks every skip against a full sync of a copy and panics on a difference.
+    fn tick(&mut self) {
+        if self.lazy && !self.sleeping && self.cycles < self.due {
+            if crate::periph::check_lazy() {
+                self.check_skip();
+            }
+            self.owed = Some(self.cycles);
+            return;
+        }
+        self.owed = None;
+        self.sync_timers();
+        self.wdt_tick();
+        self.due = if self.lazy { self.next_due() } else { 0 };
+    }
+
+    /// Bring the models to the last skipped end-of-instruction sync, if there is one.
+    fn catch_up(&mut self) {
+        if let Some(t) = self.owed.take() {
+            let now = self.cycles;
+            self.cycles = t;
+            self.sync_timers();
+            self.wdt_tick();
+            self.cycles = now;
+        }
+    }
+
+    /// End of a lazy run: the models are brought to the last instruction boundary.
+    pub fn settle(&mut self) {
+        self.catch_up();
+        self.lazy = crate::periph::check_lazy();
+        self.due = 0;
+    }
+
+    /// The first cycle after now at which some model may change what the CPU or the outside sees: a timer overflow,
+    /// compare or period match, the end of a PWM pulse, a stimulus pin change, the end of an EEPROM write, a watchdog
+    /// time-out. Early is always safe (it only costs a sync); the next cycle while a model is mid-way through something it
+    /// follows cycle by cycle (a serial transfer, a conversion, the CLB, a board).
+    fn next_due(&self) -> u64 {
+        let now = self.cycles;
+        let soon = now + 1;
+        if self.sleeping
+            || self.reset_req.is_some()
+            || self.stk_fault.is_some()
+            || !self.board.is_empty()
+            || self.clb.as_ref().is_some_and(|h| self.mem[h.con] & 0x80 != 0)
+            || self.uarts.iter().any(Uart::busy)
+            || self.mssps.iter().any(Mssp::busy)
+            || self.adc.as_ref().is_some_and(Adc::busy)
+        {
+            return soon;
+        }
+        let mut due = u64::MAX;
+        let mut at = |c: u64| due = due.min(c.max(soon));
+        if let Some(t) = self.drive.iter().map(|d| d.0).filter(|&t| t > now).min() {
+            at(t);
+        }
+        if let Some(d) = self.nvm.as_ref().and_then(Nvm16::deadline) {
+            at(d);
+        }
+        for c in &self.ccps {
+            if let Some(q) = c.clear_at {
+                at(q);
+            }
+        }
+        if let Some(w) = &self.wdt {
+            let (c0, c1) = self.wdt_cons();
+            if w.on(c0) {
+                at(if w.was_on { w.deadline(c0, c1) } else { soon });
+            }
+        }
+        // The cycle at which `clocks` prescaled clocks have passed after `last`, with `ticks` timer ticks a cycle.
+        let when = |last: u64, pre: u64, sh: u32, clocks: u64, ticks: u64| last + ((clocks << sh) - pre).div_ceil(ticks);
+        if let Some(t) = &self.t0 {
+            let (c0, c1) = (self.mem[t.c0], self.mem[t.c1]);
+            if c0 & 0x80 != 0 && c1 >> 5 == 2 {
+                let d = if c0 & 0x10 != 0 { 65536 - u64::from(t.cnt) } else { u64::from(self.mem[t.h].wrapping_sub(t.cnt as u8)) + 1 };
+                at(when(t.last, t.pre, u32::from(c1 & 15), d, 1));
+            }
+        }
+        for t in &self.t1 {
+            let con = self.mem[t.con];
+            let ticks = match t.clk {
+                Some(c) => match self.mem[c] & 0x1F {
+                    1 => 1,
+                    2 => 4,
+                    _ => 0,
+                },
+                None => match con >> 6 {
+                    0 => 1,
+                    1 => 4,
+                    _ => 0,
+                },
+            };
+            if con & 1 == 0 || ticks == 0 {
+                continue; // off, or on a pin (its edges are stimulus changes, counted above)
+            }
+            let mut d = 65536 - u64::from(t.cnt);
+            for c in &self.ccps {
+                if c.en(&self.mem) && matches!(c.mode(&self.mem), 1 | 2 | 8 | 9 | 10 | 11) && ccp16::timer_of(self.ccptmrs, &self.mem, c.n, false) == t.n {
+                    d = d.min(u64::from(c.ccpr(&self.mem).wrapping_sub(t.cnt)).max(1));
+                }
+            }
+            at(when(t.last, t.pre, u32::from((con >> 4) & 3), d, ticks));
+        }
+        for t in &self.t2 {
+            let con = self.mem[t.con];
+            let (on, cs, sh) = match t.clk {
+                Some(c) => (con & 0x80 != 0, self.mem[c] & 15, u32::from((con >> 4) & 7)),
+                None => (con & 4 != 0, 1, 2 * u32::from(con & 3)),
+            };
+            if on && (cs == 1 || cs == 2) {
+                // the clock that brings TMRx to PRx: a CCP PWM pulse starts there (`ccp16::period_sets`), the flag one
+                // clock later at the reset
+                let d = u64::from(self.mem[t.pr].wrapping_sub(t.cnt)).max(1);
+                at(when(t.last, t.pre, sh, d, if cs == 2 { 4 } else { 1 }));
+            }
+        }
+        due
+    }
+
+    /// `PICSIM_CHECK_LAZY`: a skipped sync must change nothing. A copy of the part is synced now and compared with the
+    /// part (the timer registers, which a read computes, are left out).
+    fn check_skip(&self) {
+        let mut c = self.clone();
+        c.catch_up();
+        let before = (c.mem.clone(), c.irq_new, c.tx.len(), c.spi_log.len(), c.i2c_log.len(), c.ccps.iter().map(|x| x.out).collect::<Vec<_>>());
+        c.sync_timers();
+        c.wdt_tick();
+        for a in 0..c.mem.len() {
+            if before.0[a] != c.mem[a] && !c.tmr_reg[a] {
+                panic!("lazy sync: skipping at cycle {} (due {}) missed a change of {} ({a:#06X}): {:#04X} -> {:#04X}", self.cycles, self.due, c.names[a].as_deref().unwrap_or("?"), before.0[a], c.mem[a]);
+            }
+        }
+        let after = (c.irq_new, c.tx.len(), c.spi_log.len(), c.i2c_log.len(), c.ccps.iter().map(|x| x.out).collect::<Vec<_>>());
+        assert!((before.1, before.2, before.3, before.4, before.5) == after && c.reset_req == self.reset_req, "lazy sync: skipping at cycle {} (due {}) missed a flag, a serial byte, a CCP output or a reset", self.cycles, self.due);
+    }
+
     pub fn step(&mut self) -> u32 {
         let n = self.step_core();
+        if crate::periph::check_lazy() {
+            // Check mode: every step predicts and checks its skip (`tick`), then syncs anyway, so a test that steps by
+            // hand sees what it always saw.
+            self.catch_up();
+        }
         self.ioc_scan();
         self.board_poll();
         self.note_entry(); // after the instruction, so a run that stops at a routine's first instruction has it noted
@@ -2731,7 +2913,9 @@ impl Pic16 {
         self.irq_new_by.clear();
         if fresh && self.mem[self.a_intcon] & 0x80 != 0 && !self.no_irq {
             self.run_one();
+            self.catch_up();
             self.sync_timers();
+            self.due = 0;
             // 2 cycles of entry after a 1-cycle instruction, 1 after a 2-cycle one (a longer one is counted as 2).
             // The instruction may have dropped the request (GIE, PIE or the flag cleared) or asked for a reset.
             let cost = if self.cycles - start >= 2 { 1 } else { 2 };
@@ -2741,8 +2925,7 @@ impl Pic16 {
         } else if !self.interrupt(2) {
             self.run_one();
         }
-        self.sync_timers();
-        self.wdt_tick();
+        self.tick();
         if let Some(k) = self.stk_fault.or(self.reset_req) {
             self.do_reset(k);
         }
@@ -3051,7 +3234,9 @@ impl Pic16 {
             }
             0x0064 => {
                 self.flags(NPD | NTO, NPD | NTO); // CLRWDT: TO = PD = 1
+                self.catch_up();
                 self.wdt_clear();
+                self.due = 0;
             }
             0x0065..=0x0067 => {
                 if let Some(a) = self.a_tris[usize::from(w - 0x65)] {

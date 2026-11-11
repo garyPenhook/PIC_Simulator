@@ -196,7 +196,7 @@ pub trait Ctx {
     fn pin_events(&self, from: u64, to: u64) -> Vec<u64>;
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Clb {
     pub family: Family,
     pub cfg: Cfg,

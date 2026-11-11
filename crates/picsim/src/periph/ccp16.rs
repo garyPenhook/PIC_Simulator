@@ -16,6 +16,7 @@
 
 use devdesc::Device;
 
+#[derive(Clone)]
 pub struct Ccp16 {
     pub n: u8,
     pub con: usize,

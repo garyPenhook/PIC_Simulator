@@ -164,6 +164,13 @@ impl Machine16 {
     /// Run until `until` (a word address), a breakpoint, SLEEP with nothing to wake it, or `max_cycles` more cycles.
     /// Reaching `until` by a CALL (the stack grew) is a call into the routine that starts there, not the end.
     pub fn run(&mut self, until: Option<u32>, max_cycles: u64) -> Stop {
+        self.cpu.lazy = true;
+        let stop = self.run_lazy(until, max_cycles);
+        self.cpu.settle();
+        stop
+    }
+
+    fn run_lazy(&mut self, until: Option<u32>, max_cycles: u64) -> Stop {
         let limit = self.cpu.cycles.saturating_add(max_cycles);
         let mut first = true;
         let mut depth = self.cpu.depth();
