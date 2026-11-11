@@ -342,6 +342,7 @@ struct Timer0 {
 
 /// What the Timer1 gate does over one window of cycles: the stretches in which the timer counts, the falling edges of the
 /// gate (TMRxGIF) and the gate state at the end.
+#[derive(Default)]
 struct GatePlan {
     /// (from, to, counts): ticks on cycles from+1 ..= to.
     segs: Vec<(u64, u64, bool)>,
@@ -509,6 +510,39 @@ pub struct Periph {
     /// Cycle of the latest flag set by `sync` since the core last looked (`take_event`).
     event: Option<u64>,
     ioc: Ioc,
+    /// Buffers `sync_core` reuses from one call to the next, so that it does not allocate on every instruction.
+    sb: SyncBufs,
+}
+
+/// The gate plan and clock edges of one Timer1-type timer for the span being synced (`t1_prepare`).
+#[derive(Default)]
+struct T1Prep {
+    /// Filled in this span.
+    on: bool,
+    /// `gp` holds a gate plan (the gate source is modelled).
+    plan: bool,
+    gp: GatePlan,
+    /// The clock, when the timer counts in this span.
+    clk: Option<Clk>,
+    /// Each stretch in which the gate lets the timer count, with its clock edges.
+    wins: Vec<(u64, Edges)>,
+}
+
+/// Scratch space of `sync_core`. Its contents mean nothing between calls; a clone starts empty.
+#[derive(Default)]
+struct SyncBufs {
+    prep: Vec<T1Prep>,
+    times: Vec<u64>,
+    ev: Vec<u64>,
+    comps: Vec<(usize, u16, u8, u8)>,
+    hits: Vec<Sched>,
+    periods: Vec<(u8, u64, u8, u32)>,
+}
+
+impl Clone for SyncBufs {
+    fn clone(&self) -> Self {
+        SyncBufs::default()
+    }
 }
 
 /// A change of a PPS output source at `tick` (Fosc ticks): `act` 0 clears, 1 sets, 2 toggles; `flag` is set with it.
@@ -566,7 +600,7 @@ impl Periph {
 
     /// Find the timers the part has and mark their registers as hooked in `m`.
     pub fn bind(dev: &Device, m: &mut DataMem) -> Periph {
-        let mut p = Periph { ports: Vec::new(), drive: Vec::new(), t0: None, t1: Vec::new(), t2: Vec::new(), uarts: Vec::new(), quarts: Vec::new(), spis: Vec::new(), mssps: Vec::new(), i2cqs: Vec::new(), adc: None, nvm: None, nvmq: None, stall: 0, fvr: None, tx: Vec::new(), spi_tx: Vec::new(), i2c_log: Vec::new(), notes: BTreeSet::new(), ccps: Vec::new(), pwms: Vec::new(), cwg: None, cmps: Vec::new(), cmout: None, clcs: Vec::new(), clcin: Vec::new(), clcdata: None, in_clc: false, clc_scan: 0, crc: None, wdt: None, reset_req: None, sleeping: false, sleep_at: 0, fosc_off: false, wdt_wake: false, analog: Vec::new(), ccptmrs: None, ppsout: Vec::new(), pps_by_port: Vec::new(), sig_src: 0, i2c_pps: Vec::new(), board: Board::default(), pullup: Vec::new(), forced: Vec::new(), sig: 0, sig_log: Vec::new(), sched: Vec::new(), pin_log: Vec::new(), event: None, ioc: Ioc::default() };
+        let mut p = Periph { ports: Vec::new(), drive: Vec::new(), t0: None, t1: Vec::new(), t2: Vec::new(), uarts: Vec::new(), quarts: Vec::new(), spis: Vec::new(), mssps: Vec::new(), i2cqs: Vec::new(), adc: None, nvm: None, nvmq: None, stall: 0, fvr: None, tx: Vec::new(), spi_tx: Vec::new(), i2c_log: Vec::new(), notes: BTreeSet::new(), ccps: Vec::new(), pwms: Vec::new(), cwg: None, cmps: Vec::new(), cmout: None, clcs: Vec::new(), clcin: Vec::new(), clcdata: None, in_clc: false, clc_scan: 0, crc: None, wdt: None, reset_req: None, sleeping: false, sleep_at: 0, fosc_off: false, wdt_wake: false, analog: Vec::new(), ccptmrs: None, ppsout: Vec::new(), pps_by_port: Vec::new(), sig_src: 0, i2c_pps: Vec::new(), board: Board::default(), pullup: Vec::new(), forced: Vec::new(), sig: 0, sig_log: Vec::new(), sched: Vec::new(), pin_log: Vec::new(), event: None, ioc: Ioc::default(), sb: SyncBufs::default() };
         let mut hook = |a: usize, k: u8| m.special[a] = Special::Hook(k);
         if let (Some(l), Some(h), Some(c0), Some(c1), Some(flag)) =
             (addr(dev, "TMR0L"), addr(dev, "TMR0H"), addr(dev, "T0CON0"), addr(dev, "T0CON1"), Flag::find(dev, "TMR0IF"))
@@ -1745,49 +1779,59 @@ impl Periph {
     }
 
     /// The timers gated by a CCP, PWM, comparator or CLC output, now that the edges of this span are known.
-    fn t1_late(&mut self, m: &mut DataMem, now: u64, asleep: bool, late: &[bool], comps: &[(usize, u16, u8, u8)], ev: &mut Vec<u64>) {
-        if !late.contains(&true) {
+    fn t1_late(&mut self, m: &mut DataMem, now: u64, asleep: bool, late: u64, sb: &mut SyncBufs) {
+        if late == 0 {
             return;
         }
-        let mut hits: Vec<Sched> = Vec::new();
+        let SyncBufs { prep, times, ev, comps, hits, .. } = sb;
+        hits.clear();
         for ti in 0..self.t1.len() {
-            if late[ti] {
-                let (plan, input) = self.t1_prepare(m, ti, now, asleep);
-                self.t1_step(m, ti, now, comps, plan, input, ev, &mut hits);
+            if late >> ti & 1 != 0 {
+                self.t1_prepare(m, ti, now, asleep, &mut prep[ti], times);
+                self.t1_step(m, ti, now, comps, &prep[ti], ev, hits);
             }
         }
-        self.sched.extend(hits);
+        self.sched.append(hits);
         self.apply_sched(m, now, ev);
     }
 
     /// Gate plan and clock edges of Timer1-type timer `i` over the span from its last look to `now`.
-    fn t1_prepare(&mut self, m: &DataMem, i: usize, now: u64, asleep: bool) -> (Option<GatePlan>, Option<(Clk, Vec<(u64, Edges)>)>) {
+    fn t1_prepare(&mut self, m: &DataMem, i: usize, now: u64, asleep: bool, p: &mut T1Prep, times: &mut Vec<u64>) {
         let last = self.t1[i].last;
-        let plan = if now > last { self.gate_plan(m, i, last, now) } else { None };
+        p.on = true;
+        p.plan = now > last && self.gate_plan(m, i, last, now, &mut p.gp, times);
         let t = &self.t1[i];
         let clk = self.t1_clock(m, i);
         let go = (!asleep || self.t1_sleep_ok(m, i)) && m.mem[t.con] & 1 != 0 && now > last;
-        // Each stretch in which the gate lets the timer count, with its clock edges.
-        let wins: Vec<(u64, u64)> = match &plan {
-            Some(p) => p.segs.iter().filter(|s| s.2).map(|s| (s.0, s.1)).collect(),
-            None => vec![(last, now)],
-        };
-        let input = go.then(|| (clk, wins.into_iter().map(|(a, b)| (a, self.clock_edges(m, clk, t.cki, a, b))).collect()));
-        (plan, input)
+        p.clk = go.then_some(clk);
+        p.wins.clear();
+        if go {
+            if p.plan {
+                for &(a, b, counts) in &p.gp.segs {
+                    if counts {
+                        p.wins.push((a, self.clock_edges(m, clk, t.cki, a, b)));
+                    }
+                }
+            } else {
+                p.wins.push((last, self.clock_edges(m, clk, t.cki, last, now)));
+            }
+        }
     }
 
     /// Bring Timer1-type timer `ti` to `now` with its gate plan and clock edges; compare matches go to `hits`.
     #[allow(clippy::too_many_arguments)]
-    fn t1_step(&mut self, m: &mut DataMem, ti: usize, now: u64, comps_all: &[(usize, u16, u8, u8)], plan: Option<GatePlan>, input: Option<(Clk, Vec<(u64, Edges)>)>, ev: &mut Vec<u64>, hits: &mut Vec<Sched>) {
+    fn t1_step(&mut self, m: &mut DataMem, ti: usize, now: u64, comps_all: &[(usize, u16, u8, u8)], p: &T1Prep, ev: &mut Vec<u64>, hits: &mut Vec<Sched>) {
         let t = &mut self.t1[ti];
-        let comps: Vec<(usize, u16, u8)> = comps_all.iter().filter(|c| c.3 == t.n).map(|&(i, r, mo, _)| (i, r, mo)).collect();
+        let tn = t.n;
+        let comps = || comps_all.iter().filter(move |c| c.3 == tn).map(|&(i, r, mo, _)| (i, r, mo));
         t.last = now;
-        if let Some(p) = plan {
-            (t.gff, t.grun, t.gb) = (p.ff, p.run, p.b);
-            if m.mem[t.gcon] & 8 != 0 && !p.ggo {
+        if p.plan {
+            let g = &p.gp;
+            (t.gff, t.grun, t.gb) = (g.ff, g.run, g.b);
+            if m.mem[t.gcon] & 8 != 0 && !g.ggo {
                 m.mem[t.gcon] &= !8; // GGO/DONE: the pulse is done
             }
-            for c in p.gif {
+            for &c in &g.gif {
                 if let Some(f) = t.gif {
                     f.set(m);
                 }
@@ -1795,8 +1839,9 @@ impl Periph {
             }
         }
         let con = m.mem[t.con];
-        let (clk, wins) = input.unwrap_or((Clk::Other, Vec::new()));
-        for (base, ed) in wins {
+        let clk = p.clk.unwrap_or(Clk::Other);
+        let wins: &[(u64, Edges)] = if p.clk.is_some() { &p.wins } else { &[] };
+        for &(base, ref ed) in wins {
             let pre0 = t.pre;
             let cs = m.mem[t.clk] & 0x1F;
             if clk == Clk::Other {
@@ -1804,7 +1849,7 @@ impl Periph {
             } else {
                 let clocks = prescale(&mut t.pre, u32::from((con >> 4) & 3), ed.n);
                 let sh = u32::from((con >> 4) & 3);
-                if comps.is_empty() {
+                if comps().next().is_none() {
                     if std::mem::take(&mut t.clr) && clocks > 0 {
                         t.cnt = 0;
                     }
@@ -1827,9 +1872,8 @@ impl Periph {
                             continue;
                         }
                         let to_wrap = 65536 - u64::from(t.cnt);
-                        let to_match = comps
-                            .iter()
-                            .map(|&(_, r, _)| {
+                        let to_match = comps()
+                            .map(|(_, r, _)| {
                                 let d = u64::from(r.wrapping_sub(t.cnt));
                                 if d == 0 { 65536 } else { d }
                             })
@@ -1846,7 +1890,7 @@ impl Periph {
                             ev.push(cyc);
                         }
                         let mut clear = false;
-                        for &(i, r, mode) in &comps {
+                        for (i, r, mode) in comps() {
                             if r == t.cnt {
                                 // [A61]
                                 let act = match mode {
@@ -1874,9 +1918,20 @@ impl Periph {
     }
 
     fn sync_core(&mut self, m: &mut DataMem, now: u64, asleep: bool) {
-        let mut ev: Vec<u64> = Vec::new();
+        // A nested call (none is expected) would find the buffers taken and simply allocate its own.
+        let mut sb = std::mem::take(&mut self.sb);
+        sb.ev.clear();
+        sb.hits.clear();
+        sb.periods.clear();
+        sb.comps.clear();
+        self.sync_with(m, now, asleep, &mut sb);
+        self.sb = sb;
+    }
+
+    fn sync_with(&mut self, m: &mut DataMem, now: u64, asleep: bool, sb: &mut SyncBufs) {
         // Compare CCPs with the timer they use: (index, CCPR, MODE, timer number).
-        let comps: Vec<(usize, u16, u8, u8)> = self
+        let mut comps = std::mem::take(&mut sb.comps);
+        comps.extend(self
             .ccps
             .iter()
             .enumerate()
@@ -1889,11 +1944,9 @@ impl Periph {
                     self.notes.insert(format!("CCP{} selects a capture/compare timer this part does not have (CCPTMRS); it is not modelled", c.n));
                     None
                 }
-            })
-            .collect();
-        let mut hits: Vec<Sched> = Vec::new();
-        // Timer2-type period matches: (timer number, cycle, PR, prescaler shift).
-        let mut periods: Vec<(u8, u64, u8, u32)> = Vec::new();
+            }));
+        sb.comps = comps;
+        // Timer2-type period matches (timer number, cycle, PR, prescaler shift) go to `sb.periods`.
         // Each running timer's clock edges are looked up first: they read the pins and the other tables of `self`.
         // In Sleep a timer is run if it was set up to count at SLEEP (`sleep_run`, the same fact `thaw` goes by); it counts
         // only while its registers still say so (a debugger can write them meanwhile).
@@ -1902,13 +1955,22 @@ impl Periph {
             (Some(t), Some(clk)) if t0_run && (!asleep || self.t0_sleep_ok(m)) && m.mem[t.c0] & 0x80 != 0 && now > t.last => Some((clk, self.clock_edges(m, clk, t.cki, t.last, now))),
             _ => None,
         };
-        let t1_run: Vec<bool> = self.t1.iter().map(|t| !asleep || t.sleep_run).collect();
-        // A timer gated by a CCP, PWM, comparator or CLC output waits until those have made their edges of this span.
-        let late: Vec<bool> = (0..self.t1.len()).map(|i| t1_run[i] && matches!(self.gate_src(m, i), GSrc::Sig(_))).collect();
-        let mut t1_prep: Vec<Option<(Option<GatePlan>, Option<(Clk, Vec<(u64, Edges)>)>)>> = Vec::new();
+        // A timer gated by a CCP, PWM, comparator or CLC output waits until those have made their edges of this span (bit i
+        // of `late`).
+        assert!(self.t1.len() <= 64);
+        let mut late = 0u64;
+        sb.prep.resize_with(self.t1.len(), T1Prep::default);
         for i in 0..self.t1.len() {
-            t1_prep.push((t1_run[i] && !late[i]).then(|| self.t1_prepare(m, i, now, asleep)));
+            sb.prep[i].on = false;
+            if !asleep || self.t1[i].sleep_run {
+                if matches!(self.gate_src(m, i), GSrc::Sig(_)) {
+                    late |= 1 << i;
+                } else {
+                    self.t1_prepare(m, i, now, asleep, &mut sb.prep[i], &mut sb.times);
+                }
+            }
         }
+        let ev = &mut sb.ev;
         if let Some(t) = self.t0.as_mut().filter(|_| t0_run) {
             let (base, pre0) = (t.last, t.pre);
             t.last = now;
@@ -1950,21 +2012,22 @@ impl Periph {
             m.mem[t.l] = t.cnt as u8;
         }
         for ti in 0..self.t1.len() {
-            if let Some((plan, input)) = t1_prep[ti].take() {
-                self.t1_step(m, ti, now, &comps, plan, input, &mut ev, &mut hits);
+            if sb.prep[ti].on {
+                self.t1_step(m, ti, now, &sb.comps, &sb.prep[ti], &mut sb.ev, &mut sb.hits);
             }
         }
         if asleep {
             // Only the timers on a clock that runs in Sleep were looked at; what they make is done here, the rest waits for `thaw`.
-            self.sched.extend(hits);
-            self.apply_sched(m, now, &mut ev);
-            self.t1_late(m, now, true, &late, &comps, &mut ev);
+            self.sched.append(&mut sb.hits);
+            self.apply_sched(m, now, &mut sb.ev);
+            self.t1_late(m, now, true, late, sb);
             self.sig_prune_to(4 * self.t1.iter().map(|t| t.last).min().unwrap_or(now));
-            for e in ev {
-                self.raised(e);
+            for k in 0..sb.ev.len() {
+                self.raised(sb.ev[k]);
             }
             return;
         }
+        let (ev, hits, periods) = (&mut sb.ev, &mut sb.hits, &mut sb.periods);
         for t in &mut self.t2 {
             let (base, pre0) = (t.last, t.pre);
             let dt = now - t.last;
@@ -2026,7 +2089,7 @@ impl Periph {
             m.mem[t.tmr] = t.cnt;
         }
         // PWM: the pin sets at each Timer2 period match and clears when the 10-bit time base reaches the duty.
-        for &(tn, c, t2_pr, t2_sh) in &periods {
+        for &(tn, c, t2_pr, t2_sh) in periods.iter() {
             for ccp in &self.ccps {
                 if !ccp.en(m) || ccp.mode(m) < 12 {
                     continue;
@@ -2051,7 +2114,7 @@ impl Periph {
                 }
             }
         }
-        for &(tn, c, t2_pr, t2_sh) in &periods {
+        for &(tn, c, t2_pr, t2_sh) in periods.iter() {
             for w in &self.pwms {
                 if !w.en(m) || ccp::timer_of(self.ccptmrs, m, w.n, true) != tn {
                     continue;
@@ -2068,31 +2131,32 @@ impl Periph {
                 }
             }
         }
-        self.sched.extend(hits);
-        self.apply_sched(m, now, &mut ev);
+        self.sched.append(hits);
+        self.apply_sched(m, now, ev);
         self.cmp_scan(m, now);
-        self.apply_sched(m, now, &mut ev); // comparator edges can schedule CWG dead-band changes
-        self.t1_late(m, now, false, &late, &comps, &mut ev);
+        self.apply_sched(m, now, ev); // comparator edges can schedule CWG dead-band changes
+        self.t1_late(m, now, false, late, sb);
+        let ev = &mut sb.ev;
         self.sig_prune_to(4 * self.t1.iter().map(|t| t.last).min().unwrap_or(now));
         if let Some(a) = &mut self.adc
-            && a.sync(&mut m.mem, now, &mut ev)
+            && a.sync(&mut m.mem, now, ev)
         {
             a.flag.set(m);
         }
         for u in &mut self.uarts {
-            u.sync(&mut m.mem, now, &mut ev, &mut self.tx, &mut self.notes);
+            u.sync(&mut m.mem, now, ev, &mut self.tx, &mut self.notes);
         }
         for q in &mut self.quarts {
-            q.sync(m, now, &mut ev, &mut self.tx, &mut self.notes);
+            q.sync(m, now, ev, &mut self.tx, &mut self.notes);
         }
         for q in &mut self.spis {
-            q.sync(m, now, &mut ev, &mut self.spi_tx, &mut self.notes);
+            q.sync(m, now, ev, &mut self.spi_tx, &mut self.notes);
         }
         for q in &mut self.mssps {
-            q.sync(&mut m.mem, now, &mut ev, &mut self.spi_tx, &mut self.i2c_log, &mut self.notes);
+            q.sync(&mut m.mem, now, ev, &mut self.spi_tx, &mut self.i2c_log, &mut self.notes);
         }
         for q in &mut self.i2cqs {
-            q.sync(m, now, &mut ev, &mut self.i2c_log, &mut self.notes);
+            q.sync(m, now, ev, &mut self.i2c_log, &mut self.notes);
         }
         if let Some(n) = &mut self.nvm
             && let Some(e) = n.sync(m, now)
@@ -2104,8 +2168,8 @@ impl Periph {
         {
             ev.push(e);
         }
-        for e in ev {
-            self.raised(e);
+        for k in 0..ev.len() {
+            self.raised(ev[k]);
         }
     }
 
@@ -2518,7 +2582,7 @@ impl Periph {
     /// which clears GGO. TMRxGIF is set on a falling edge of the gate after the toggle flip-flop (in single-pulse mode
     /// only for the pulse that was counted), also while GE = 0 (20.7.1-20.7.6, Figures 20-4 to 20-7). The prescaler holds
     /// while the gate is closed (not stated in the data sheet).
-    fn gate_plan(&mut self, m: &DataMem, i: usize, from: u64, to: u64) -> Option<GatePlan> {
+    fn gate_plan(&mut self, m: &DataMem, i: usize, from: u64, to: u64, p: &mut GatePlan, times: &mut Vec<u64>) -> bool {
         let src = self.gate_src(m, i);
         let t = &self.t1[i];
         let (tn, gcon, gff, grun, gb, gss) = (t.n, t.gcon, t.gff, t.grun, t.gb, t.gate.map_or(0, |g| m.mem[g] & 31));
@@ -2529,16 +2593,17 @@ impl Periph {
             if ge {
                 self.notes.insert(format!("Timer{tn} gate source GSS={gss} is not modelled (the T{tn}GPPS pin and the CCP, PWM, comparator and CLC outputs are); the timer counts regardless of the gate"));
             }
-            return None;
+            return false;
         }
         let active = |c: u64| self.gate_raw(m, src, c) == gpol;
         let (mut ff, mut run, mut ggo) = (gff && gtm, grun && gspm, con & 8 != 0 && gspm);
         let counts = |ff: bool, run: bool, b: bool| !ge || if gspm { run && if gtm { ff } else { b } } else if gtm { ff } else { b };
-        let mut times: Vec<u64> = match src {
-            GSrc::Pin(_) => self.drive.iter().map(|d| d.0).filter(|&c| c > from && c <= to).collect(),
-            GSrc::Sig(code) => self.sig_log.iter().filter(|e| e.1 == code).map(|e| e.0.div_ceil(4)).filter(|&c| c > from && c <= to).collect(),
-            GSrc::None => Vec::new(),
-        };
+        times.clear();
+        match src {
+            GSrc::Pin(_) => times.extend(self.drive.iter().map(|d| d.0).filter(|&c| c > from && c <= to)),
+            GSrc::Sig(code) => times.extend(self.sig_log.iter().filter(|e| e.1 == code).map(|e| e.0.div_ceil(4)).filter(|&c| c > from && c <= to)),
+            GSrc::None => {}
+        }
         let a0 = active(from);
         let mut b = gb.unwrap_or(a0);
         if a0 != b {
@@ -2546,10 +2611,12 @@ impl Periph {
         }
         times.sort_unstable();
         times.dedup();
-        let (mut segs, mut gif) = (Vec::new(), Vec::new());
+        let (segs, gif) = (&mut p.segs, &mut p.gif);
+        segs.clear();
+        gif.clear();
         let mut start = from;
         let mut cur = counts(ff, run, b);
-        for c in times {
+        for &c in times.iter() {
             let nb = active(c);
             if nb == b {
                 continue;
@@ -2578,7 +2645,8 @@ impl Periph {
             cur = counts(ff, run, b);
         }
         segs.push((start, to, cur));
-        Some(GatePlan { segs, gif, ff, run, ggo, b: Some(b) })
+        (p.ff, p.run, p.ggo, p.b) = (ff, run, ggo, Some(b));
+        true
     }
 
     /// Stimulus: the pins `mask` of port `letter` are driven to `val` from cycle `at` on.
