@@ -45,6 +45,11 @@ pub(crate) struct Uart {
 }
 
 impl Uart {
+    /// Something is under way that `sync` must follow cycle by cycle (`Periph::tick` does not skip a sync meanwhile).
+    pub fn busy(&self) -> bool {
+        self.tsr_end.is_some() || self.pending.is_some() || !self.rx_in.is_empty() || self.rx_cur.is_some()
+    }
+
     /// EUSART `n` of the device and its registers in hook order (TXREG, TXSTA, BAUDCON, RCREG, RCSTA).
     pub fn find(dev: &Device, n: u8) -> Option<(Uart, [usize; 5])> {
         let reg = addr(dev, &format!("TX{n}REG"))?;

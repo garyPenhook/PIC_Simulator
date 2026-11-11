@@ -100,6 +100,11 @@ pub fn step_word(mut acc: u32, word: u16, dlen: u32, plen: u32, xor: u16, accm: 
 }
 
 impl Crc {
+    /// Something is under way that `sync` must follow cycle by cycle (`Periph::tick` does not skip a sync meanwhile).
+    pub fn busy(&self) -> bool {
+        self.cur.is_some() || self.held.is_some() || self.was_busy || self.burst_end.is_some()
+    }
+
     pub fn find(dev: &Device) -> Option<Crc> {
         let a = |s: &str| dev.find_sfr(s).map(|x| x.addr as usize);
         let md = |bit: &str| {

@@ -43,6 +43,7 @@ pub enum Special {
     Sync,
 }
 
+#[derive(Clone)]
 pub struct DataMem {
     pub mem: Vec<u8>,
     /// Bits that exist, per address (0xFF for RAM).

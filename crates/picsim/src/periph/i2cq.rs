@@ -133,6 +133,11 @@ pub struct I2cQ {
 }
 
 impl I2cQ {
+    /// Something is under way that `sync` must follow cycle by cycle (`Periph::tick` does not skip a sync meanwhile).
+    pub fn busy(&self) -> bool {
+        !self.q.is_empty() || self.bfre_at.is_some()
+    }
+
     pub fn find(dev: &Device, n: u8) -> Option<(I2cQ, [usize; 10])> {
         let a = |s: &str| addr(dev, &format!("I2C{n}{s}"));
         let s = I2cQ {

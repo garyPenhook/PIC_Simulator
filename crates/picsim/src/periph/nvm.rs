@@ -70,6 +70,11 @@ pub struct Nvm {
 }
 
 impl Nvm {
+    /// Something is under way that `sync` must follow cycle by cycle (`Periph::tick` does not skip a sync meanwhile).
+    pub fn busy(&self) -> bool {
+        self.op.is_some()
+    }
+
     pub fn find(dev: &Device) -> Option<Nvm> {
         let r = &dev.memory.eeprom;
         Some(Nvm {

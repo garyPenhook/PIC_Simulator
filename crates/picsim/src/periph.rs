@@ -127,6 +127,12 @@ fn addr(dev: &Device, name: &str) -> Option<usize> {
 
 /// Clocks produced by `dt` input ticks through a prescaler of `1 << shift` whose counter is `pre`.
 #[inline]
+/// `PICSIM_CHECK_LAZY` is set (read once).
+pub(crate) fn check_lazy() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("PICSIM_CHECK_LAZY").is_some_and(|v| v != "0"))
+}
+
 fn prescale(pre: &mut u64, shift: u32, dt: u64) -> u64 {
     let t = *pre + dt;
     *pre = t & ((1u64 << shift) - 1);
@@ -512,6 +518,11 @@ pub struct Periph {
     ioc: Ioc,
     /// Buffers `sync_core` reuses from one call to the next, so that it does not allocate on every instruction.
     sb: SyncBufs,
+    /// `tick` skips the end-of-instruction sync before this cycle: no model can change anything the CPU sees sooner
+    /// (`next_due`). 0 = unknown, sync on the next tick.
+    due: u64,
+    /// The cycle of the last end-of-instruction sync that `tick` skipped; `catch_up` brings the models there.
+    owed: Option<u64>,
 }
 
 /// The gate plan and clock edges of one Timer1-type timer for the span being synced (`t1_prepare`).
@@ -600,7 +611,7 @@ impl Periph {
 
     /// Find the timers the part has and mark their registers as hooked in `m`.
     pub fn bind(dev: &Device, m: &mut DataMem) -> Periph {
-        let mut p = Periph { ports: Vec::new(), drive: Vec::new(), t0: None, t1: Vec::new(), t2: Vec::new(), uarts: Vec::new(), quarts: Vec::new(), spis: Vec::new(), mssps: Vec::new(), i2cqs: Vec::new(), adc: None, nvm: None, nvmq: None, stall: 0, fvr: None, tx: Vec::new(), spi_tx: Vec::new(), i2c_log: Vec::new(), notes: BTreeSet::new(), ccps: Vec::new(), pwms: Vec::new(), cwg: None, cmps: Vec::new(), cmout: None, clcs: Vec::new(), clcin: Vec::new(), clcdata: None, in_clc: false, clc_scan: 0, crc: None, wdt: None, reset_req: None, sleeping: false, sleep_at: 0, fosc_off: false, wdt_wake: false, analog: Vec::new(), ccptmrs: None, ppsout: Vec::new(), pps_by_port: Vec::new(), sig_src: 0, i2c_pps: Vec::new(), board: Board::default(), pullup: Vec::new(), forced: Vec::new(), sig: 0, sig_log: Vec::new(), sched: Vec::new(), pin_log: Vec::new(), event: None, ioc: Ioc::default(), sb: SyncBufs::default() };
+        let mut p = Periph { ports: Vec::new(), drive: Vec::new(), t0: None, t1: Vec::new(), t2: Vec::new(), uarts: Vec::new(), quarts: Vec::new(), spis: Vec::new(), mssps: Vec::new(), i2cqs: Vec::new(), adc: None, nvm: None, nvmq: None, stall: 0, fvr: None, tx: Vec::new(), spi_tx: Vec::new(), i2c_log: Vec::new(), notes: BTreeSet::new(), ccps: Vec::new(), pwms: Vec::new(), cwg: None, cmps: Vec::new(), cmout: None, clcs: Vec::new(), clcin: Vec::new(), clcdata: None, in_clc: false, clc_scan: 0, crc: None, wdt: None, reset_req: None, sleeping: false, sleep_at: 0, fosc_off: false, wdt_wake: false, analog: Vec::new(), ccptmrs: None, ppsout: Vec::new(), pps_by_port: Vec::new(), sig_src: 0, i2c_pps: Vec::new(), board: Board::default(), pullup: Vec::new(), forced: Vec::new(), sig: 0, sig_log: Vec::new(), sched: Vec::new(), pin_log: Vec::new(), event: None, ioc: Ioc::default(), sb: SyncBufs::default(), due: 0, owed: None };
         let mut hook = |a: usize, k: u8| m.special[a] = Special::Hook(k);
         if let (Some(l), Some(h), Some(c0), Some(c1), Some(flag)) =
             (addr(dev, "TMR0L"), addr(dev, "TMR0H"), addr(dev, "T0CON0"), addr(dev, "T0CON1"), Flag::find(dev, "TMR0IF"))
@@ -896,6 +907,9 @@ impl Periph {
     /// Bring every model to cycle `now`. Capture edges on the CCPx pins inside the span are handled at their own cycle
     /// so that TMR1 is read at that cycle.
     pub fn sync(&mut self, m: &mut DataMem, now: u64) {
+        // A sync to `now` covers a skipped one; what it changes may move the next due cycle.
+        self.owed = None;
+        self.due = 0;
         if self.fosc_off {
             return self.sync_asleep(m, now);
         }
@@ -928,6 +942,141 @@ impl Periph {
         for c in &mut self.ccps {
             c.scan = now;
         }
+    }
+
+    /// The end-of-instruction sync of a run (`Pic18::lazy`): skipped while `now` is before the next cycle at which a
+    /// model can change a register, a flag, a pin or a log (`next_due`). The CPU calls `catch_up` before it touches a
+    /// peripheral register and `invalidate` after it changed one, so a skipped span never sees a register value it
+    /// did not have. `PICSIM_CHECK_LAZY=1` checks every skip against a full sync of a copy and panics on a difference.
+    pub fn tick(&mut self, m: &mut DataMem, now: u64) {
+        if !self.fosc_off && now < self.due {
+            if check_lazy() {
+                self.check_skip(m, now);
+            }
+            self.owed = Some(now);
+            return;
+        }
+        self.sync(m, now);
+        self.due = self.next_due(m, now);
+    }
+
+    /// Bring the models to the last skipped end-of-instruction sync, if there is one.
+    pub fn catch_up(&mut self, m: &mut DataMem) {
+        if let Some(t) = self.owed.take() {
+            let (e, due) = (self.event, self.due);
+            self.sync(m, t);
+            (self.event, self.due) = (e, due); // flags raised up to `t` belonged to earlier instructions
+        }
+    }
+
+    /// A register the models read has changed (or a model's state was touched): sync on the next tick.
+    pub fn invalidate(&mut self) {
+        self.due = 0;
+    }
+
+    /// The first cycle after `now` at which some model may change what the CPU or the outside sees: a timer
+    /// overflow, compare or period match, a stimulus pin or analog change, a scheduled output edge, a watchdog
+    /// time-out. Early is always safe (it only costs a sync); `now + 1` when a model is mid-way through something
+    /// it follows cycle by cycle (a serial transfer, a conversion, a NVM write, the CRC, a CLC, the CWG, a board).
+    fn next_due(&self, m: &DataMem, now: u64) -> u64 {
+        let soon = now + 1;
+        if self.sleeping
+            || self.reset_req.is_some()
+            || !self.board.is_empty()
+            || self.clc_active(m)
+            || self.cwg.as_ref().is_some_and(|c| c.en(m))
+            || self.uarts.iter().any(Uart::busy)
+            || self.quarts.iter().any(QUart::busy)
+            || self.spis.iter().any(Spi::busy)
+            || self.mssps.iter().any(Mssp::busy)
+            || self.i2cqs.iter().any(I2cQ::busy)
+            || self.adc.as_ref().is_some_and(adc::Adc::busy)
+            || self.nvm.as_ref().is_some_and(Nvm::busy)
+            || self.nvmq.as_ref().is_some_and(NvmQ::busy)
+            || self.crc.as_ref().is_some_and(Crc::busy)
+        {
+            return soon;
+        }
+        let mut due = u64::MAX;
+        let mut at = |c: u64| due = due.min(c.max(soon));
+        if let Some(t) = self.next_drive(now) {
+            at(t);
+        }
+        if let Some(t) = self.next_analog(now) {
+            at(t);
+        }
+        for s in &self.sched {
+            at(s.tick / 4);
+        }
+        if let Some(w) = &self.wdt {
+            let (c0, c1) = (m.mem[w.con0], m.mem[w.con1]);
+            if w.on(c0) {
+                at(if w.was_on { w.deadline(c0, c1) } else { soon });
+            }
+        }
+        // The cycle of the `j`-th prescaled clock of a timer clocked by `clk` (a pin clock: its edges are stimulus
+        // or output changes, already counted above).
+        let clock_at = |clk: Clk, cki: Option<usize>, last: u64, pre: u64, sh: u32, j: u64| match clk {
+            Clk::Cyc(_) | Clk::Hz(_) => Some(self.clock_edges(m, clk, cki, last, last).at(last, pre, sh, j)),
+            Clk::Pin(_) | Clk::Other => None,
+        };
+        if let (Some(t), Some(clk)) = (&self.t0, self.t0_clock(m)) {
+            let (c0, c1) = (m.mem[t.c0], m.mem[t.c1]);
+            if c0 & 0x80 != 0 {
+                let d = if c0 & 0x10 != 0 { 65536 - u64::from(t.cnt) } else { u64::from(m.mem[t.h].wrapping_sub(t.cnt as u8)) + 1 };
+                if let Some(c) = clock_at(clk, t.cki, t.last, t.pre, u32::from(c1 & 15), d) {
+                    at(c);
+                }
+            }
+        }
+        for (i, t) in self.t1.iter().enumerate() {
+            let con = m.mem[t.con];
+            if con & 1 == 0 {
+                continue;
+            }
+            let mut d = 65536 - u64::from(t.cnt);
+            if t.clr {
+                d = 1;
+            }
+            for c in &self.ccps {
+                if c.en(m) && matches!(c.mode(m), 1 | 2 | 8 | 9 | 10 | 11) && ccp::timer_of(self.ccptmrs, m, c.n, false) == t.n {
+                    let k = u64::from(c.ccpr(m).wrapping_sub(t.cnt));
+                    d = d.min(if k == 0 { 65536 } else { k });
+                }
+            }
+            if let Some(c) = clock_at(self.t1_clock(m, i), t.cki, t.last, t.pre, u32::from((con >> 4) & 3), d) {
+                at(c);
+            }
+        }
+        for t in &self.t2 {
+            let con = m.mem[t.con];
+            let cs = m.mem[t.clk] & 0x1F;
+            if con & 0x80 == 0 || (cs != 1 && cs != 2) {
+                continue;
+            }
+            let d = u64::from(m.mem[t.pr].wrapping_sub(t.cnt)) + 1;
+            at(self::at(t.last, t.pre, u32::from((con >> 4) & 7), d, if cs == 2 { 4 } else { 1 }));
+        }
+        due
+    }
+
+    /// `PICSIM_CHECK_LAZY`: a skipped sync must change nothing. A copy of the part is synced to `now` and compared
+    /// with the part (registers the CPU reads through a model, which compute their value at the read, are left out).
+    fn check_skip(&self, m: &DataMem, now: u64) {
+        let (mut p, mut mc) = (self.clone(), m.clone());
+        p.catch_up(&mut mc);
+        let before = (mc.mem.clone(), p.pin_log.len(), p.tx.len(), p.spi_tx.len(), p.i2c_log.len(), p.sched.len());
+        p.event = None;
+        p.sync(&mut mc, now);
+        let live = |a: usize| matches!(mc.special[a], Special::Hook(k) if !Periph::is_stored(k));
+        for a in 0..mc.mem.len() {
+            if before.0[a] != mc.mem[a] && !live(a) {
+                panic!("lazy sync: skipping to cycle {now} (due {}) missed a change of {} ({a:#05X}): {:#04X} -> {:#04X}", self.due, mc.names[a].as_deref().unwrap_or("?"), before.0[a], mc.mem[a]);
+            }
+        }
+        let after = (p.pin_log.len(), p.tx.len(), p.spi_tx.len(), p.i2c_log.len(), p.sched.len());
+        assert_eq!((before.1, before.2, before.3, before.4, before.5), after, "lazy sync: skipping to cycle {now} (due {}) missed a pin, serial or schedule change", self.due);
+        assert!(p.event.is_none() && p.reset_req == self.reset_req, "lazy sync: skipping to cycle {now} (due {}) missed a flag event or a reset", self.due);
     }
 
     /// Edges of the pins on the interrupt-on-change registers and the INTx pins, from `ioc.scan` to `now`: the flags are set
@@ -1073,6 +1222,9 @@ impl Periph {
         self.stall += c.scan(m, prog, now, dead, trig, in_isr);
         if self.stall > 0 {
             self.flash_event(now);
+        }
+        if self.stall > 0 || self.crc.as_ref().is_some_and(Crc::busy) {
+            self.due = 0; // the scanner fed the CRC: `tick` must follow it
         }
     }
 

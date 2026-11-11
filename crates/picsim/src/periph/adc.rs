@@ -62,6 +62,11 @@ pub(crate) struct Adc {
 }
 
 impl Adc {
+    /// Something is under way that `sync` must follow cycle by cycle (`Periph::tick` does not skip a sync meanwhile).
+    pub fn busy(&self) -> bool {
+        self.end.is_some()
+    }
+
     /// The ADC of the device, or None when it has none of the sourced ones. The resolution is not in the device
     /// description (the 10-bit PIC16F13145 and the 12-bit PIC16F17146 use the same register layout), so it comes from
     /// the part: Q10 10 bits (DS40002043F ch.33), Q41 12 (DS40002214G ch.40), PIC16F131xx 10 (DS40002519D Figure 32-3

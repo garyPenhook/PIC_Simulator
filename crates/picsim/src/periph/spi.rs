@@ -90,6 +90,11 @@ pub struct Spi {
 }
 
 impl Spi {
+    /// Something is under way that `sync` must follow cycle by cycle (`Periph::tick` does not skip a sync meanwhile).
+    pub fn busy(&self) -> bool {
+        self.cur.is_some() || !self.tx.is_empty()
+    }
+
     pub fn find(dev: &Device, n: u8) -> Option<(Spi, [usize; 12])> {
         let a = |s: &str| addr(dev, &format!("SPI{n}{s}"));
         let s = Spi {

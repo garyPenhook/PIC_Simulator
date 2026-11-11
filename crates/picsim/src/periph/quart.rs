@@ -84,6 +84,11 @@ pub struct QUart {
 }
 
 impl QUart {
+    /// Something is under way that `sync` must follow cycle by cycle (`Periph::tick` does not skip a sync meanwhile).
+    pub fn busy(&self) -> bool {
+        self.cur.is_some() || self.next.is_some() || self.pending.is_some() || !self.rx_in.is_empty() || self.rx_cur.is_some()
+    }
+
     pub fn find(dev: &Device, n: u8) -> Option<(QUart, [usize; 9])> {
         let a = |s: &str| addr(dev, &format!("U{n}{s}"));
         let (con0, con1, con2, errir, errie, fifo, brgl, brgh, txb, rxb, p1l) =

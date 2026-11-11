@@ -51,6 +51,10 @@ pub struct Pic18 {
     /// SFR addresses of the registers whose reset value depends on the configuration.
     cfg_sfrs: BTreeMap<&'static str, usize>,
     pub p: Periph,
+    /// The end-of-instruction peripheral sync may be skipped while no model has anything due (`Periph::tick`). Set by a
+    /// run (`Machine::run`), which calls `settle` before it returns; with it set, `p` and the peripheral registers of `m`
+    /// can lag behind `cycles` between instructions.
+    pub lazy: bool,
     /// Interrupts being served, innermost last (`true` = high priority).
     pub in_service: Vec<bool>,
     /// Registers saved by the vectored controller's hardware context (Q41), innermost last.
@@ -207,6 +211,7 @@ impl Pic18 {
             dev: dev.clone(),
             stim: None,
             reset_p: None,
+            lazy: crate::periph::check_lazy(),
             mclr: dev
                 .sfr
                 .iter()
@@ -357,9 +362,21 @@ impl Pic18 {
             return 0;
         }
         match self.m.special[i] {
-            Special::None | Special::Core | Special::Crc(_) | Special::Sync => self.m.mem[i],
+            Special::Core => self.m.mem[i],
+            Special::None | Special::Crc(_) | Special::Sync => {
+                if self.m.is_sfr[i] || self.m.special[i] != Special::None {
+                    self.p.catch_up(&mut self.m);
+                }
+                self.m.mem[i]
+            }
             Special::Hook(k) => {
-                if Periph::is_stored(k) { self.m.mem[i] } else { self.p.read(k, &mut self.m, self.cycles) }
+                self.p.catch_up(&mut self.m);
+                if Periph::is_stored(k) {
+                    self.m.mem[i]
+                } else {
+                    self.p.invalidate(); // a read with a side effect (a FIFO pop, an armed watchdog)
+                    self.p.read(k, &mut self.m, self.cycles)
+                }
             }
             Special::Pcl => {
                 let pc = self.pc;
@@ -396,6 +413,16 @@ impl Pic18 {
         let i = a as usize;
         if i >= self.m.mem.len() {
             return;
+        }
+        let model_reg = match self.m.special[i] {
+            Special::None => self.m.is_sfr[i],
+            Special::Hook(_) | Special::Crc(_) | Special::Sync => true,
+            Special::Core | Special::Pcl | Special::Tos(_) | Special::Indirect(..) => false,
+        };
+        if model_reg {
+            // A register a model may read: the models see the old value up to now and the new one from the next sync.
+            self.p.catch_up(&mut self.m);
+            self.p.invalidate();
         }
         match self.m.special[i] {
             Special::None | Special::Core => {
@@ -522,9 +549,20 @@ impl Pic18 {
         k
     }
 
+    /// End of a lazy run: the models are brought to the last instruction boundary and `lazy` is cleared.
+    pub fn settle(&mut self) {
+        self.p.catch_up(&mut self.m);
+        self.lazy = crate::periph::check_lazy();
+    }
+
     /// Execute one instruction; returns the cycles it took (also added to `self.cycles`).
     pub fn step(&mut self) -> u32 {
         let n = self.step_inner();
+        if crate::periph::check_lazy() {
+            // Check mode: every step predicts and checks its skip (`Periph::tick`), then syncs anyway, so a test that
+            // steps by hand sees what it always saw.
+            self.p.catch_up(&mut self.m);
+        }
         self.note_entry(); // after the instruction, so a run that stops at a routine's first instruction has it noted
         n
     }
@@ -761,7 +799,11 @@ impl Pic18 {
         }
         let _ = at;
         let now = self.cycles;
-        self.p.sync(&mut self.m, now);
+        if self.lazy {
+            self.p.tick(&mut self.m, now);
+        } else {
+            self.p.sync(&mut self.m, now);
+        }
         let dead = (now - start).saturating_sub(1);
         self.p.crc_scan(&mut self.m, &self.prog, now, dead, !self.in_service.is_empty());
         self.cycles += self.p.take_stall();
@@ -1115,7 +1157,9 @@ impl Pic18 {
                     let st = self.m.regs.status as usize;
                     self.m.mem[st] |= self.status_ro;
                     let now = self.cycles;
+                    self.p.catch_up(&mut self.m);
                     self.p.clrwdt(&self.m, now);
+                    self.p.invalidate();
                 }
                 0x05 => {
                     let pc = self.pc;

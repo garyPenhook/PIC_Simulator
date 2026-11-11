@@ -116,6 +116,11 @@ pub struct Mssp {
 }
 
 impl Mssp {
+    /// Something is under way that `sync` must follow cycle by cycle (`Periph::tick` does not skip a sync meanwhile).
+    pub fn busy(&self) -> bool {
+        !self.steps.is_empty()
+    }
+
     pub fn find(dev: &Device, n: u8) -> Option<(Mssp, [usize; 6])> {
         let a = |s: &str| addr(dev, &format!("SSP{n}{s}"));
         let s = Mssp {

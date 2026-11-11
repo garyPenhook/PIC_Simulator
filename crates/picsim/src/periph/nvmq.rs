@@ -67,6 +67,11 @@ pub struct NvmQ {
 }
 
 impl NvmQ {
+    /// Something is under way that `sync` must follow cycle by cycle (`Periph::tick` does not skip a sync meanwhile).
+    pub fn busy(&self) -> bool {
+        self.op.is_some()
+    }
+
     pub fn find(dev: &Device) -> Option<NvmQ> {
         let r = &dev.memory.eeprom;
         let con0 = addr(dev, "NVMCON0")?;
@@ -97,10 +102,6 @@ impl NvmQ {
 
     fn post_increment(&self, m: &mut DataMem) {
         self.post_increment_by(m, 1);
-    }
-
-    fn busy(&self) -> bool {
-        self.op.is_some()
     }
 
     /// Complete the write that is due by cycle `now`; returns the cycle it finished on.
