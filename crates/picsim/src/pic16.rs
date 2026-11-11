@@ -2885,16 +2885,20 @@ impl Pic16 {
                 }
                 self.no_irq = true; // the instruction after SLEEP runs first
             } else {
-                // With the watchdog counting, jump to its time-out or the next change the stimulus makes (a UART still receiving
-                // is stepped cycle by cycle) instead of stepping every cycle of a long Sleep.
+                // Jump to the next thing that can wake the part instead of stepping every cycle of a long Sleep: the watchdog
+                // time-out, the next change the stimulus makes (an interrupt-on-change or INT edge, and the only clock of a
+                // Timer0/Timer1 counting in Sleep, `park_timers`), the end of a data EEPROM write (NVMIF). Fosc/4 is stopped,
+                // so nothing else moves. A UART still receiving is stepped cycle by cycle; with nothing pending
+                // (`sleep_dead`) the step stays one cycle and the run stops.
                 let mut adv = 1;
-                if let Some(d) = self.wdt_sleep_deadline()
-                    && !self.uarts.iter().any(|u| !u.rx_in.is_empty() || u.rx_cur.is_some())
-                {
+                if !self.uarts.iter().any(|u| !u.rx_in.is_empty() || u.rx_cur.is_some()) {
+                    let wdt = self.wdt_sleep_deadline().unwrap_or(u64::MAX);
                     let next = self.drive.next_after(self.cycles).unwrap_or(u64::MAX);
-                    // a data EEPROM write ends on its own timer and raises NVMIF: the jump stops there too
                     let nvm = self.nvm.as_ref().and_then(Nvm16::deadline).unwrap_or(u64::MAX);
-                    adv = d.min(next).min(nvm).saturating_sub(self.cycles).max(1);
+                    let d = wdt.min(next).min(nvm);
+                    if d != u64::MAX {
+                        adv = d.saturating_sub(self.cycles).max(1);
+                    }
                 }
                 self.cycles += adv;
                 self.park_timers(); // Fosc/4 does not run in Sleep

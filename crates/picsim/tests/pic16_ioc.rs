@@ -187,3 +187,28 @@ fn a_pending_pin_change_keeps_a_sleeping_part_from_being_declared_dead() {
     run_to(&mut m, 300);
     assert!(m.cpu.sleep_dead());
 }
+
+#[test]
+fn a_sleep_without_watchdog_jumps_to_the_wake_up_edge() {
+    // review P6: with the watchdog off, a Sleep waiting for a pin edge far away is not stepped cycle by cycle
+    for part in PARTS {
+        let mut m = machine(part, &SLEEP_BRA);
+        // added to UP_DOWN, whose RA2 edges are not watched here: RA4 rises at cycle 10 M
+        m.load_stimulus("[[pin]]\nport = \"A\"\nbit = 4\nlevel = 1\nat = 10000000\n").unwrap();
+        let (pr, pm) = bit(&m, "PIE", "IOCIE");
+        w(&mut m, "IOCAP", 0x10);
+        m.cpu.write(pr, pm);
+        m.cpu.step(); // SLEEP
+        let mut steps = 0;
+        while m.cpu.cycles < 10_000_000 {
+            m.cpu.step();
+            steps += 1;
+        }
+        assert!(steps < 10, "{part}: {steps} steps to the edge");
+        assert_eq!(m.cpu.cycles, 10_000_000, "{part}: stopped at the edge");
+        assert_eq!(r(&mut m, "IOCAF"), 0x10, "{part}: the edge is seen");
+        m.cpu.step();
+        m.cpu.step();
+        assert!(m.cpu.cycles < 10_000_010, "{part}: woke at the edge, cycle {}", m.cpu.cycles);
+    }
+}
