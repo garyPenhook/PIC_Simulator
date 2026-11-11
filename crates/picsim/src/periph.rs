@@ -337,7 +337,6 @@ struct Timer0 {
     c1: usize,
     flag: Flag,
     cnt: u16,
-    cmp: u8,
     pre: u64,
     post: u8,
     last: u64,
@@ -620,7 +619,7 @@ impl Periph {
             for (a, k) in [(l, T0L), (h, T0H), (c0, T0C0), (c1, T0C1)] {
                 hook(a, k);
             }
-            p.t0 = Some(Timer0 { l, h, c0, c1, flag, cnt: 0, cmp: 0xFF, pre: 0, post: 0, last: 0, cki: addr(dev, "T0CKIPPS"), sleep_run: false });
+            p.t0 = Some(Timer0 { l, h, c0, c1, flag, cnt: 0, pre: 0, post: 0, last: 0, cki: addr(dev, "T0CKIPPS"), sleep_run: false });
         }
         for (i, n) in [1u8, 3, 5].into_iter().enumerate() {
             if let (Some(l), Some(h), Some(con), Some(clk), Some(gcon), Some(flag)) = (
@@ -2147,7 +2146,6 @@ impl Periph {
                             t.cnt == 0
                         } else if t.cnt as u8 == m.mem[t.h] {
                             t.cnt = 0;
-                            t.cmp = m.mem[t.h];
                             true
                         } else {
                             // 8-bit mode counts in TMR0L only; a high byte left from 16-bit mode is dropped (B4)
@@ -2508,20 +2506,13 @@ impl Periph {
             T0H => {
                 let t = self.t0.as_mut().unwrap();
                 m.mem[t.h] = v;
-                if m.mem[t.c0] & 0x80 == 0 {
-                    t.cmp = v;
-                }
             }
             T0C0 => {
                 let t = self.t0.as_mut().unwrap();
-                let was_on = m.mem[t.c0] & 0x80 != 0;
                 let out = m.mem[t.c0] & 0x20; // T0OUT is read only
                 m.mem[t.c0] = v & !0x20 | out;
                 t.pre = 0;
                 t.post = 0;
-                if !was_on && v & 0x80 != 0 {
-                    t.cmp = m.mem[t.h];
-                }
             }
             T0C1 => {
                 let t = self.t0.as_mut().unwrap();

@@ -217,7 +217,7 @@ impl Pic18 {
             mclr_next: 0,
             mclr_low: false,
             mclr_hold: false,
-            pc_mask: (dev.memory.program.size - 1) | 1,
+            pc_mask: (dev.memory.program.size.next_power_of_two() - 1) & !1,
             dev: dev.clone(),
             stim: None,
             reset_p: None,
@@ -252,7 +252,6 @@ impl Pic18 {
         // The pack gives the PIC18F16Q41's STATUS as `-xxxxxxx`; the data sheet has TO = PD = 1 at POR/BOR (DS40002214G 7.7.7 p.40).
         let st = p.m.regs.status as usize;
         p.m.mem[st] |= p.status_ro;
-        p.pc_mask = (dev.memory.program.size.next_power_of_two() - 1) & !1;
         Ok(p)
     }
 
@@ -820,7 +819,6 @@ impl Pic18 {
             0xE => self.groupe(w),
             _ => {} // 0xFxxx executed alone is a NOP
         }
-        let _ = at;
         let now = self.cycles;
         if self.lazy {
             self.p.tick(&mut self.m, now);

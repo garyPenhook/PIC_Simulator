@@ -396,7 +396,6 @@ impl Crc {
 
     /// Burst scan: the whole range now; the CPU stalls for as long as it takes. Returns the stall in cycles.
     fn burst(&mut self, now: u64, m: &mut DataMem, prog: &[u8], notes: &mut std::collections::BTreeSet<String>) -> u64 {
-        let (dlen, ..) = self.params(m);
         if m.mem[self.scon] & 8 != 0 {
             notes.insert("scanner Burst mode with INTM = 1: interrupts do not pause the burst".into());
         }
@@ -425,7 +424,6 @@ impl Crc {
                 break;
             }
         }
-        let _ = dlen;
         self.finish_scan(m, true);
         let stall = t - now;
         self.burst_end = None;
@@ -497,7 +495,6 @@ impl Crc {
             }
         }
         let c = m.mem[self.scon];
-        let _ = self.strig;
         m.mem[self.scon] = c & !0x20 | if c & 0x40 != 0 && self.ready() { 0x20 } else { 0 };
         stall
     }

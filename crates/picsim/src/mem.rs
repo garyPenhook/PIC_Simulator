@@ -174,6 +174,10 @@ impl DataMem {
 
     #[inline]
     pub fn note_access(&mut self, a: u32) {
+        // u32::MAX is the core's "INDF through INDF" target (reads 0, ignores writes), not an address the program used.
+        if a == u32::MAX {
+            return;
+        }
         let i = a as usize;
         if i >= self.mem.len() || self.implemented[i] == 0 && !self.is_sfr[i] {
             self.stray.insert(a);
