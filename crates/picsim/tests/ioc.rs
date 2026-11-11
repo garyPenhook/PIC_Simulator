@@ -147,3 +147,14 @@ fn a_sleep_with_an_interrupt_enabled_jumps_to_the_wake_up_edge() {
     m.cpu.step();
     assert!(m.cpu.cycles < 1_000_010, "woke at the edge, cycle {}", m.cpu.cycles);
 }
+
+#[test]
+fn a_line_step_into_a_sleep_nothing_can_wake_stops_with_sleep() {
+    // SLEEP (0003) with no interrupt and no watchdog: the step would never reach another line
+    let dev = Device::load(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../../devices/18F27Q10.toml")).unwrap();
+    let mut m = Machine::new(dev).unwrap();
+    // CONFIG3L (0x300004) WDTE<6:5> = 00: watchdog off
+    m.load_hex(&(rec(0, 0, &[0x03, 0x00, 0xFF, 0xD7]) + &rec(0, 4, &[0x00, 0x30]) + &rec(4, 0, &[0x9F]) + &rec(0, 1, &[]))).unwrap();
+    assert_eq!(m.step_line(false, false, 1_000_000), Some(picsim::Stop::Sleep));
+    assert!(m.cpu.cycles < 10, "{}", m.cpu.cycles);
+}

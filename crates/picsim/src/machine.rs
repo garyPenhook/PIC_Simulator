@@ -152,13 +152,17 @@ impl Machine {
     }
 
     /// Runs a source-line step for at most `budget` instructions. `None`: not finished, call again. `Some(None)`: stopped on
-    /// a new line (or, for `out`, after the routine returned). `Some(Some(stop))`: a breakpoint or `__halt` came first.
+    /// a new line (or, for `out`, after the routine returned). `Some(Some(stop))`: a breakpoint or `__halt` came first, or
+    /// SLEEP with nothing to wake the part (`Stop::Sleep`).
     /// `over` runs calls and interrupts to completion; `out` runs until the current routine returns.
     pub fn line_step(&mut self, s: &LineStep, budget: u32) -> Option<Option<Stop>> {
         let halt = self.syms.get("__halt").copied();
         for _ in 0..budget {
             let before = self.stack_depth();
             self.cpu.step();
+            if self.cpu.sleep_dead() {
+                return Some(Some(Stop::Sleep)); // nothing can wake the part: the step would never finish
+            }
             let pc = self.cpu.pc;
             // Arriving at `__halt` by a CALL is a call into the routine that starts there, not the end of the program.
             if Some(pc) == halt && self.stack_depth() <= before {
