@@ -1276,6 +1276,13 @@ impl Pic16 {
 
     /// Is the OLED `o` on MSSP `num` wired as the code expects: the input selections name its pins and its pins' output
     /// selections are SCL1 and SDA1? The reason when not.
+    /// The register values `hw_wiring` reads for the OLED `o` on MSSP `num` (0 where it reads none).
+    fn hw_key(&self, o: &crate::periph::Oled, num: u8) -> [u8; 4] {
+        let Some(&(_, scl_in, sda_in, _)) = self.i2c_pps.iter().find(|p| p.0 == num) else { return [0; 4] };
+        let out = |pin: Pin| self.pps_out.iter().find(|&&(_, pi, bit)| self.ports[pi].letter == pin.0 && bit == pin.1).map_or(0, |&(reg, ..)| self.mem[reg]);
+        [self.mem[scl_in], self.mem[sda_in], out(o.scl), out(o.sda)]
+    }
+
     fn hw_wiring(&self, o: &crate::periph::Oled, num: u8) -> Result<(), String> {
         let Some(&(_, scl_in, sda_in, codes)) = self.i2c_pps.iter().find(|p| p.0 == num) else {
             return Err(format!("the part has no I2C host {num}"));
@@ -1309,26 +1316,28 @@ impl Pic16 {
         let mut b = std::mem::take(&mut self.board);
         let mut notes = BTreeSet::new();
         let held = b.poll_pins(&*self, now, &mut notes);
-        let mut hw = Vec::new();
-        for (k, o) in b.oleds.iter_mut().enumerate() {
+        for o in &mut b.oleds {
             if let Bus::I2c(n) = o.bus {
-                let w = self.hw_wiring(o, n);
-                o.status = w.clone().err().unwrap_or_default();
-                hw.push((k, n, w.is_ok()));
+                let key = (n, o.scl, o.sda, self.hw_key(o, n));
+                if o.wiring.is_none_or(|(k, _)| k != key) {
+                    let w = self.hw_wiring(o, n);
+                    o.wiring = Some((key, w.is_ok()));
+                    o.status = w.err().unwrap_or_default();
+                }
             }
         }
         if !b.oleds.is_empty() {
-            let mut forced = vec![0u8; self.ports.len()];
+            self.forced.clear();
+            self.forced.resize(self.ports.len(), 0);
             for pin in held {
                 if let Some(i) = self.ports.iter().position(|q| q.letter == pin.0) {
-                    forced[i] |= 1 << pin.1;
+                    self.forced[i] |= 1 << pin.1;
                 }
             }
-            self.forced = forced;
         }
         for s in &mut self.mssps {
             for c in s.i2c.iter_mut().filter(|c| c.tag != 0) {
-                c.absent = !hw.iter().any(|&(k, n, ok)| k + 1 == usize::from(c.tag) && n == s.num && ok);
+                c.absent = !b.hw_wired(c.tag, s.num);
             }
         }
         b.feed_log(&self.i2c_log, &mut notes);

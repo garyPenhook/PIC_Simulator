@@ -39,7 +39,7 @@
 
 use super::{I2cClient, I2cEv, Periph};
 use crate::mem::DataMem;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, VecDeque};
 
 const READ_NOTE: &str = "SSD1306 read: the data sheet provides no data or status read in serial mode (I2C); the OLED does not drive SDA, the host reads 0xFF";
 
@@ -68,7 +68,9 @@ pub struct Led {
     pub active_high: bool,
     pub on: bool,
     /// (cycle, on) for every change, the last `MAX_CHANGES` of them.
-    pub changes: Vec<(u64, bool)>,
+    pub changes: VecDeque<(u64, bool)>,
+    /// Changes since the start, including those dropped from `changes`.
+    pub total_changes: u64,
     /// Instruction cycles on since the start.
     pub on_cycles: u64,
     /// Cycles on / total since the last `Board::take_window`.
@@ -81,7 +83,7 @@ const MAX_CHANGES: usize = 20_000;
 
 impl Led {
     pub fn new(name: &str, pin: Pin, active_high: bool) -> Led {
-        Led { name: name.to_string(), pin, active_high, on: false, changes: Vec::new(), on_cycles: 0, win_on: 0, win_total: 0, last: 0 }
+        Led { name: name.to_string(), pin, active_high, on: false, changes: VecDeque::new(), total_changes: 0, on_cycles: 0, win_on: 0, win_total: 0, last: 0 }
     }
 }
 
@@ -157,7 +159,14 @@ pub struct Oled {
     /// The ninth clock of a read byte: the host acknowledges (as opposed to the OLED acknowledging the address).
     host_ack: bool,
     pub pull_low: bool,
+    /// The inputs of the last hardware-bus wiring check (bus, pins, the PPS register values) and its outcome, so the
+    /// check (and its message) is rebuilt only when one of them changes.
+    pub(crate) wiring: Option<(WiringKey, bool)>,
 }
+
+/// What a hardware-bus wiring check depends on: the bus number, the OLED's pins, the SCL/SDA input selections and the
+/// two pins' output selections.
+pub(crate) type WiringKey = (u8, Pin, Pin, [u8; 4]);
 
 /// What 26h/27h/29h/2Ah set up.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -236,6 +245,7 @@ impl Oled {
             ack_seen: false,
             host_ack: false,
             pull_low: false,
+            wiring: None,
         }
     }
 
@@ -634,9 +644,10 @@ impl Board {
             if on != l.on {
                 l.on = on;
                 if l.changes.len() >= MAX_CHANGES {
-                    l.changes.remove(0);
+                    l.changes.pop_front();
                 }
-                l.changes.push((now, on));
+                l.changes.push_back((now, on));
+                l.total_changes += 1;
             }
         }
         let cycle_ns = self.cycle_ns();
@@ -653,6 +664,11 @@ impl Board {
             }
         }
         held
+    }
+
+    /// Is the OLED with client tag `tag` on hardware host `num` and wired as the code expects (as of the last poll)?
+    pub(crate) fn hw_wired(&self, tag: u8, num: u8) -> bool {
+        usize::from(tag).checked_sub(1).and_then(|k| self.oleds.get(k)).is_some_and(|o| o.bus == Bus::I2c(num) && o.wiring.is_some_and(|(_, ok)| ok))
     }
 
     /// Marks the bus log as read up to `n` entries (a new wiring starts after what is already there).
@@ -755,6 +771,13 @@ impl Periph {
         PeriphPins { p: self, m, now }
     }
 
+    /// The register values `hw_wiring` reads for the OLED `o` on host `num` (0 where it reads none).
+    fn hw_key(&self, m: &DataMem, o: &Oled, num: u8) -> [u8; 4] {
+        let Some(pp) = self.i2c_pps.iter().find(|p| p.num == num) else { return [0; 4] };
+        let out = |pin: Pin| self.ppsout.iter().find(|&&(_, pi, bit)| self.ports[pi].letter == pin.0 && bit == pin.1).map_or(0, |&(reg, ..)| m.mem[reg]);
+        [m.mem[pp.scl_in], m.mem[pp.sda_in], out(o.scl), out(o.sda)]
+    }
+
     fn hw_wiring(&self, m: &DataMem, o: &Oled, num: u8) -> Result<(), String> {
         let Some(pp) = self.i2c_pps.iter().find(|p| p.num == num) else {
             return Err(format!("the part has no I2C host {num}"));
@@ -785,32 +808,34 @@ impl Periph {
         let mut b = std::mem::take(&mut self.board);
         let mut notes = BTreeSet::new();
         let held = b.poll_pins(&self.view(m, now), now, &mut notes);
-        let mut hw = Vec::new();
-        for (k, o) in b.oleds.iter_mut().enumerate() {
+        for o in &mut b.oleds {
             if let Bus::I2c(n) = o.bus {
-                let w = self.hw_wiring(m, o, n);
-                o.status = w.clone().err().unwrap_or_default();
-                hw.push((k, n, w.is_ok()));
+                let key = (n, o.scl, o.sda, self.hw_key(m, o, n));
+                if o.wiring.is_none_or(|(k, _)| k != key) {
+                    let w = self.hw_wiring(m, o, n);
+                    o.wiring = Some((key, w.is_ok()));
+                    o.status = w.err().unwrap_or_default();
+                }
             }
         }
         if !b.oleds.is_empty() {
-            let mut forced = vec![0u8; self.ports.len()];
+            self.forced.clear();
+            self.forced.resize(self.ports.len(), 0);
             for pin in held {
                 if let Some(i) = self.ports.iter().position(|q| q.letter == pin.0) {
-                    forced[i] |= 1 << pin.1;
+                    self.forced[i] |= 1 << pin.1;
                 }
             }
-            self.forced = forced;
         }
         // Hardware I2C: the OLED answers only when wired; bytes come from the bus log.
         for s in &mut self.mssps {
             for c in s.i2c.iter_mut().filter(|c| c.tag != 0) {
-                c.absent = !hw.iter().any(|&(k, n, ok)| k + 1 == usize::from(c.tag) && n == s.num && ok);
+                c.absent = !b.hw_wired(c.tag, s.num);
             }
         }
         for s in &mut self.i2cqs {
             for c in s.i2c.iter_mut().filter(|c| c.tag != 0) {
-                c.absent = !hw.iter().any(|&(k, n, ok)| k + 1 == usize::from(c.tag) && n == s.num && ok);
+                c.absent = !b.hw_wired(c.tag, s.num);
             }
         }
         b.feed_log(&self.i2c_log, &mut notes);
@@ -822,6 +847,31 @@ impl Periph {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct Toggle(bool);
+    impl PinView for Toggle {
+        fn pin(&self, _: Pin) -> Option<(bool, bool)> {
+            Some((true, self.0))
+        }
+        fn open_drain(&self, _: Pin) -> bool {
+            true
+        }
+    }
+
+    #[test]
+    fn led_keeps_the_last_changes_and_counts_them_all() {
+        let mut b = Board { leds: vec![Led::new("L", (b'A', 0), true)], ..Default::default() };
+        let mut n = BTreeSet::new();
+        let total = MAX_CHANGES as u64 + 5;
+        for c in 1..=total {
+            b.poll_pins(&Toggle(c % 2 == 1), c, &mut n);
+        }
+        let l = &b.leds[0];
+        assert_eq!(l.total_changes, total);
+        assert_eq!(l.changes.len(), MAX_CHANGES);
+        assert_eq!(l.changes.front(), Some(&(6, false)));
+        assert_eq!(l.changes.back(), Some(&(total, true)));
+    }
 
     fn oled() -> (Oled, BTreeSet<String>) {
         let mut o = Oled::new(Bus::Gpio, (b'C', 0), (b'C', 1), 0x3C, 64);

@@ -196,7 +196,7 @@ fn run() -> Result<ExitCode, String> {
             if l.on { "ON" } else { "off" },
             l.on_cycles,
             m.cpu.cycles,
-            l.changes.len(),
+            l.total_changes,
             if ev.is_empty() { "" } else { ": " },
             ev.join(" ")
         );
