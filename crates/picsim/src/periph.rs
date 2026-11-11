@@ -2201,6 +2201,16 @@ impl Periph {
                         self.notes.insert(format!("Timer{} MODE={mode:#04x} needs an external reset/gate source (S4); run as the software mode", t.n));
                     }
                     let one_shot = mode >> 3 == 1;
+                    if cs == 2 {
+                        // The PWM edges below are placed from period ends on Fosc/4 cycles; on Fosc the period ends
+                        // are not collected, so a CCP in PWM mode or a PWM module on this timer drives nothing.
+                        let tn = t.n;
+                        let ccp = self.ccps.iter().find(|c| c.en(m) && c.mode(m) >= 12 && ccp::timer_of(self.ccptmrs, m, c.n, true) == tn).map(|c| ("CCP", c.n));
+                        let pwm = || self.pwms.iter().find(|w| w.en(m) && ccp::timer_of(self.ccptmrs, m, w.n, true) == tn).map(|w| ("PWM", w.n));
+                        if let Some((kind, n)) = ccp.or_else(pwm) {
+                            self.notes.insert(format!("{kind}{n} PWM on Timer{tn} clocked by FOSC (T{tn}CLK CS=2) is not modelled: it gives no output edges (Timer{tn} counts and sets its flag)"));
+                        }
+                    }
                     let ticks = if cs == 2 { dt * 4 } else { dt };
                     let clocks = prescale(&mut t.pre, u32::from((con >> 4) & 7), ticks);
                     let outps = con & 15;

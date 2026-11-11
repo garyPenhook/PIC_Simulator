@@ -371,3 +371,19 @@ fn compare_set_on_match_with_a_small_count() {
     assert_eq!(r(&mut m, "PIR6") & 0x01, 1, "CCP1IF");
     assert_eq!(r(&mut m, "CCP1CON") & 0x20, 0x20, "OUT set");
 }
+
+#[test]
+fn pwm_on_a_fosc_clocked_timer2_gives_a_note() {
+    let mut m = machine("");
+    w(&mut m, "RC2PPS", 0x05);
+    w(&mut m, "TRISC", 0xFB);
+    w(&mut m, "T2PR", 0x3F);
+    w(&mut m, "T2CLKCON", 2); // Fosc
+    w(&mut m, "CCPR1L", 0x20);
+    w(&mut m, "CCP1CON", 0x8C);
+    w(&mut m, "T2CON", 0x80);
+    let start = m.cpu.cycles;
+    run_to(&mut m, start + 400);
+    assert!(m.cpu.p.pin_log.is_empty());
+    assert!(m.cpu.notes.iter().any(|n| n.contains("CCP1 PWM on Timer2 clocked by FOSC")), "{:?}", m.cpu.notes);
+}

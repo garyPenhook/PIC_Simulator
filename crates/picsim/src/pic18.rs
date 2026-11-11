@@ -75,6 +75,11 @@ pub struct Pic18 {
     /// Messages about things the model does not do (undefined opcode, stray address), deduplicated.
     pub notes: BTreeSet<String>,
     wide_fsr: bool,
+    /// ADDFSR/SUBFSR are standard instructions (Q41, DS40002214G 45.2 p.864) rather than extended ones that need
+    /// XINST (Q10, DS40002043F 38.2 p.681).
+    std_addfsr: bool,
+    /// XINST = 0 in the configuration words: the extended instruction set is on.
+    xinst: bool,
     stk_mask: u8,
     /// A stack over- or underflow with STVREN = 1 during this step: the reset happens at its end `[A99]`.
     stk_fault: Option<ResetKind>,
@@ -201,6 +206,8 @@ impl Pic18 {
             intcon1: dev.find_sfr("INTCON1").map_or(0, |s| s.addr as usize),
             notes: BTreeSet::new(),
             wide_fsr,
+            std_addfsr: dev.find_sfr("SHADCON").is_some(),
+            xinst: false,
             stk_mask: (depth + 1).next_power_of_two() as u8 - 1,
             entry_sp: vec![None; depth as usize + 2],
             entry_irq: vec![false; depth as usize + 2],
@@ -281,6 +288,13 @@ impl Pic18 {
         let (wdte, cps, cws, ccs) = (self.cfg.get("WDTE"), self.cfg.get("WDTCPS"), self.cfg.get("WDTCWS"), self.cfg.get("WDTCCS"));
         let modelled = self.p.wdt_config(wdte.unwrap_or(0) as u8, cps.unwrap_or(0x1F) as u8, cws.unwrap_or(7) as u8, ccs.unwrap_or(7) as u8);
         self.p.scan_config(self.cfg.get("SCANE").is_none_or(|v| v != 0));
+        self.xinst = self.cfg.get("XINST") == Some(0);
+        if self.xinst {
+            self.notes.insert(format!(
+                "XINST set: of the extended instruction set only {} modelled; ADDULNK, SUBULNK, CALLW, MOVSF, MOVSFL, MOVSS, PUSHL and Indexed Literal Offset addressing are not (they run as undefined opcodes or as the standard instructions)",
+                if self.std_addfsr { "nothing is" } else { "ADDFSR and SUBFSR are" }
+            ));
+        }
         if !modelled && self.cfg.get("WDTE").is_some_and(|w| w != 0) {
             self.notes.insert("watchdog enabled by WDTE: a timeout reset is not modelled (CLRWDT does nothing)".into());
         }
@@ -1258,6 +1272,7 @@ impl Pic18 {
                     self.cycles += 1;
                 }
             }
+            8 | 9 if !self.std_addfsr && !self.xinst => self.undefined(w, self.pc.wrapping_sub(2)),
             8 | 9 => {
                 let n = ((w >> 6) & 3) as usize;
                 let k = u32::from(w & 0x3F);
