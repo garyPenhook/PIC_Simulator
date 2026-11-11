@@ -58,6 +58,7 @@ pub struct SpiClient {
     pub fill: u8,
 }
 
+#[derive(Clone)]
 pub struct Spi {
     pub num: u8,
     rxb: usize,

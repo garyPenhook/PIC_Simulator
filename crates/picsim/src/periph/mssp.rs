@@ -94,6 +94,7 @@ enum Step {
     Finish(u8),
 }
 
+#[derive(Clone)]
 pub struct Mssp {
     pub num: u8,
     buf: usize,

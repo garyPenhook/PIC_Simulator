@@ -81,6 +81,9 @@ pub struct Pic18 {
     dev: Device,
     /// Stimulus text applied again to the rebuilt peripherals after such a reset (set by `Machine::load_stimulus`).
     pub stim: Option<String>,
+    /// The peripherals as a warm reset rebuilds them (bound, stimulus applied), for the stimulus text they were built
+    /// from. `bind` writes only `special`, the same for every call, so a clone stands in for a new bind (P2).
+    reset_p: Option<(Option<String>, Box<Periph>)>,
     /// MCLR-column reset values (Table 9-3): register address, bits set, bits cleared; `u`, `q`, `x` bits are left alone.
     mclr: Vec<(usize, u8, u8)>,
     pcon0: Option<usize>,
@@ -203,6 +206,7 @@ impl Pic18 {
             pc_mask: (dev.memory.program.size - 1) | 1,
             dev: dev.clone(),
             stim: None,
+            reset_p: None,
             mclr: dev
                 .sfr
                 .iter()
@@ -1365,12 +1369,17 @@ impl Pic18 {
         self.in_service.clear();
         self.ctx.clear();
         self.shadow = (0, 0, 0);
-        let mut np = Periph::bind(&self.dev, &mut self.m);
-        if let Some(t) = &self.stim
-            && let Ok(st) = crate::stimulus::Stimulus::parse(t)
-        {
-            let _ = st.apply(&self.dev, &mut np);
+        if self.reset_p.as_ref().is_none_or(|(t, _)| *t != self.stim) {
+            let mut np = Periph::bind(&self.dev, &mut self.m);
+            if let Some(t) = &self.stim
+                && let Ok(st) = crate::stimulus::Stimulus::parse(t)
+            {
+                let _ = st.apply(&self.dev, &mut np);
+            }
+            self.reset_p = Some((self.stim.clone(), Box::new(np)));
         }
+        let np = (*self.reset_p.as_ref().unwrap().1).clone();
+        np.init_mem(&mut self.m);
         let old = std::mem::replace(&mut self.p, np);
         self.p.carry_over(old);
         self.apply_config(); // the new peripherals need the watchdog configuration

@@ -48,6 +48,7 @@ const SECRD: u8 = 0x02;
 const SECWR: u8 = 0x20;
 const SECER: u8 = 0x40;
 
+#[derive(Clone)]
 pub struct Nvm {
     adr: [usize; 3],
     datl: usize,

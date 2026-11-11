@@ -31,6 +31,7 @@ use devdesc::Device;
 /// Hook number: only CCPxCON needs one (the other registers are plain stored bytes).
 pub const HOOKS: u8 = 1;
 
+#[derive(Clone)]
 pub struct Ccp {
     pub n: u8,
     pub con: usize,
@@ -100,6 +101,7 @@ pub fn timer_of(tmrs: Option<usize>, m: &DataMem, n: u8, pwm: bool) -> u8 {
 /// Assumptions: `[A64]` POL inverts the pin and the OUT bit alike (Figure 23-1 shows the polarity mux before the pin; the
 /// "to other peripherals" tap is not placed). `[A65]` a disabled module (EN = 0) drives its output low, whatever POL is.
 /// `[A66]` the double buffering of the duty changes nothing here: the duty is read when the period match is scheduled.
+#[derive(Clone)]
 pub struct Pwm {
     pub n: u8,
     pub con: usize,

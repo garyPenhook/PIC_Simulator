@@ -97,3 +97,17 @@ fn the_board_survives_a_warm_reset() {
     assert!(m.cpu.p.board.leds[0].changes.len() >= n, "history kept");
     assert!(m.cpu.p.board.leds[0].on_cycles >= on, "on-time kept");
 }
+
+#[test]
+fn a_reset_from_the_cached_peripherals_matches_a_fresh_bind() {
+    for part in ["18F27Q10", "18F16Q41"] {
+        let mut m = machine(part);
+        m.load_stimulus("[[led]]\npin = \"RB0\"\n").unwrap();
+        m.cpu.reset_cond(ResetKind::Instruction); // binds and caches
+        let (mem, special) = (m.cpu.m.mem.clone(), m.cpu.m.special.clone());
+        m.cpu.reset_cond(ResetKind::Instruction); // from the cache
+        assert_eq!(m.cpu.m.mem, mem, "{part}");
+        assert_eq!(m.cpu.m.special, special, "{part}");
+        assert_eq!(m.cpu.p.board.leds.len(), 1, "{part}: stimulus board kept");
+    }
+}

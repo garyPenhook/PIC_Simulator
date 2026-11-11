@@ -80,7 +80,7 @@ pub enum ResetKind {
 }
 
 /// Interrupt-on-change and the INT0-INT2 pins `[A101]`.
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct Ioc {
     /// (index into `ports`, IOCxF, IOCxN, IOCxP)
     ports: Vec<(usize, usize, usize, usize)>,
@@ -322,6 +322,7 @@ pub struct RxStream {
     pub bad_stop: bool,
 }
 
+#[derive(Clone)]
 struct Timer0 {
     l: usize,
     h: usize,
@@ -361,6 +362,7 @@ enum GSrc {
     None,
 }
 
+#[derive(Clone)]
 struct Timer1 {
     /// Data sheet number: 1, 3 or 5.
     n: u8,
@@ -390,6 +392,7 @@ struct Timer1 {
     sleep_run: bool,
 }
 
+#[derive(Clone)]
 struct Timer2 {
     /// Data sheet number: 2, 4 or 6.
     n: u8,
@@ -407,6 +410,7 @@ struct Timer2 {
 
 /// A port with pins: PORTx reads the pins, a write goes to LATx (DS40002043F 17.1: the pin level is read, the
 /// latch is written). Input pins with their ANSELx bit set read 0 (the digital input buffer is off, 17.2).
+#[derive(Clone)]
 struct Port {
     letter: u8,
     port: usize,
@@ -415,6 +419,7 @@ struct Port {
     ansel: Option<usize>,
 }
 
+#[derive(Clone)]
 struct I2cPps {
     num: u8,
     scl_in: usize,
@@ -425,6 +430,7 @@ struct I2cPps {
     sda_code: u8,
 }
 
+#[derive(Clone)]
 pub struct Periph {
     ports: Vec<Port>,
     /// What the outside world drives on the input pins: (from cycle, port index, pin mask, levels), stable-sorted by cycle.
@@ -479,6 +485,10 @@ pub struct Periph {
     ccptmrs: Option<usize>,
     /// RxyPPS registers: (register, index into `ports`, pin).
     ppsout: Vec<(usize, usize, u8)>,
+    /// `ppsout` per port index: (RxyPPS address, bit). Built once at the end of `bind`, like `ppsout`.
+    pps_by_port: Vec<Vec<(usize, u8)>>,
+    /// Bit n set: signal code n has a CCP, PWM, comparator or CLC source (those lists are fixed after `bind`).
+    sig_src: u32,
     /// Hardware I2C hosts: the PPS input registers and the output codes of SCL and SDA.
     i2c_pps: Vec<I2cPps>,
     /// The parts on the board (LEDs, OLED).
@@ -503,6 +513,7 @@ pub struct Periph {
 
 /// A change of a PPS output source at `tick` (Fosc ticks): `act` 0 clears, 1 sets, 2 toggles; `flag` is set with it.
 /// `pwm` marks edges that stop when Timer2 is switched off.
+#[derive(Clone)]
 struct Sched {
     tick: u64,
     code: u8,
@@ -555,7 +566,7 @@ impl Periph {
 
     /// Find the timers the part has and mark their registers as hooked in `m`.
     pub fn bind(dev: &Device, m: &mut DataMem) -> Periph {
-        let mut p = Periph { ports: Vec::new(), drive: Vec::new(), t0: None, t1: Vec::new(), t2: Vec::new(), uarts: Vec::new(), quarts: Vec::new(), spis: Vec::new(), mssps: Vec::new(), i2cqs: Vec::new(), adc: None, nvm: None, nvmq: None, stall: 0, fvr: None, tx: Vec::new(), spi_tx: Vec::new(), i2c_log: Vec::new(), notes: BTreeSet::new(), ccps: Vec::new(), pwms: Vec::new(), cwg: None, cmps: Vec::new(), cmout: None, clcs: Vec::new(), clcin: Vec::new(), clcdata: None, in_clc: false, clc_scan: 0, crc: None, wdt: None, reset_req: None, sleeping: false, sleep_at: 0, fosc_off: false, wdt_wake: false, analog: Vec::new(), ccptmrs: None, ppsout: Vec::new(), i2c_pps: Vec::new(), board: Board::default(), pullup: Vec::new(), forced: Vec::new(), sig: 0, sig_log: Vec::new(), sched: Vec::new(), pin_log: Vec::new(), event: None, ioc: Ioc::default() };
+        let mut p = Periph { ports: Vec::new(), drive: Vec::new(), t0: None, t1: Vec::new(), t2: Vec::new(), uarts: Vec::new(), quarts: Vec::new(), spis: Vec::new(), mssps: Vec::new(), i2cqs: Vec::new(), adc: None, nvm: None, nvmq: None, stall: 0, fvr: None, tx: Vec::new(), spi_tx: Vec::new(), i2c_log: Vec::new(), notes: BTreeSet::new(), ccps: Vec::new(), pwms: Vec::new(), cwg: None, cmps: Vec::new(), cmout: None, clcs: Vec::new(), clcin: Vec::new(), clcdata: None, in_clc: false, clc_scan: 0, crc: None, wdt: None, reset_req: None, sleeping: false, sleep_at: 0, fosc_off: false, wdt_wake: false, analog: Vec::new(), ccptmrs: None, ppsout: Vec::new(), pps_by_port: Vec::new(), sig_src: 0, i2c_pps: Vec::new(), board: Board::default(), pullup: Vec::new(), forced: Vec::new(), sig: 0, sig_log: Vec::new(), sched: Vec::new(), pin_log: Vec::new(), event: None, ioc: Ioc::default() };
         let mut hook = |a: usize, k: u8| m.special[a] = Special::Hook(k);
         if let (Some(l), Some(h), Some(c0), Some(c1), Some(flag)) =
             (addr(dev, "TMR0L"), addr(dev, "TMR0H"), addr(dev, "T0CON0"), addr(dev, "T0CON1"), Flag::find(dev, "TMR0IF"))
@@ -751,9 +762,9 @@ impl Periph {
             for (reg, sub) in c.regs() {
                 m.special[reg] = Special::Crc(sub);
             }
-            c.init(m);
             p.crc = Some(c);
         }
+        p.init_mem(m);
         for port in 0..p.ports.len() {
             let l = p.ports[port].letter as char;
             if let (Some(f), Some(n), Some(pp)) = (addr(dev, &format!("IOC{l}F")), addr(dev, &format!("IOC{l}N")), addr(dev, &format!("IOC{l}P"))) {
@@ -782,6 +793,12 @@ impl Periph {
                 m.special[a] = Special::Sync;
             }
         }
+        p.pps_by_port = vec![Vec::new(); p.ports.len()];
+        for &(reg, pi, bit) in &p.ppsout {
+            p.pps_by_port[pi].push((reg, bit));
+        }
+        let sigs = p.ccps.iter().map(|c| c.sig).chain(p.pwms.iter().map(|c| c.sig)).chain(p.cmps.iter().map(|c| c.sig)).chain(p.clcs.iter().map(|c| c.sig));
+        p.sig_src = sigs.fold(0, |a, c| a | 1u32.checked_shl(u32::from(c)).unwrap_or(0));
         p
     }
 
@@ -1050,6 +1067,13 @@ impl Periph {
         self.board = old.board;
         self.board_wiring();
         self.board.log_pos = pos;
+    }
+
+    /// The register bits `bind` sets in data memory (beyond `special`); a warm reset that reuses a bound copy calls it.
+    pub fn init_mem(&self, m: &mut DataMem) {
+        if let Some(c) = &self.crc {
+            c.init(m);
+        }
     }
 
     /// The data EEPROM array, if the part has one modelled.
@@ -2376,10 +2400,10 @@ impl Periph {
         let tris = m.mem[p.tris];
         let ana = p.ansel.map_or(0, |a| m.mem[a]);
         let mut v = m.mem[p.lat] & !tris | ext & tris & !ana;
-        for &(reg, pi, bit) in &self.ppsout {
+        for &(reg, bit) in &self.pps_by_port[i] {
             // A pin driven by a modelled peripheral source (RxyPPS, TRIS clear) shows the source level, not the latch.
             let code = m.mem[reg] & 31;
-            if pi == i && tris >> bit & 1 == 0 && (self.ccps.iter().any(|c| c.sig == code) || self.pwms.iter().any(|c| c.sig == code) || self.cmps.iter().any(|c| c.sig == code) || self.clcs.iter().any(|c| c.sig == code) || ((1..=4).contains(&code) && self.cwg.as_ref().is_some_and(|c| c.hiz >> (code - 1) & 1 == 0))) {
+            if tris >> bit & 1 == 0 && (self.sig_src >> code & 1 != 0 || ((1..=4).contains(&code) && self.cwg.as_ref().is_some_and(|c| c.hiz >> (code - 1) & 1 == 0))) {
                 v = v & !(1 << bit) | u8::from(self.sig >> code & 1 != 0) << bit;
             }
         }
@@ -2515,8 +2539,9 @@ impl Periph {
             GSrc::Sig(code) => self.sig_log.iter().filter(|e| e.1 == code).map(|e| e.0.div_ceil(4)).filter(|&c| c > from && c <= to).collect(),
             GSrc::None => Vec::new(),
         };
-        let mut b = gb.unwrap_or_else(|| active(from));
-        if active(from) != b {
+        let a0 = active(from);
+        let mut b = gb.unwrap_or(a0);
+        if a0 != b {
             times.push(from + 1);
         }
         times.sort_unstable();

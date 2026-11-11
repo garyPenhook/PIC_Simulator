@@ -31,6 +31,7 @@ use super::{addr, Flag};
 use devdesc::Device;
 use std::collections::BTreeSet;
 
+#[derive(Clone)]
 pub(crate) struct Adc {
     pub con: usize,
     pub clk: usize,

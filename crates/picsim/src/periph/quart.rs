@@ -51,6 +51,7 @@ pub const HOOKS: u8 = 9;
 /// A character received: (data, framing error, parity error or address flag).
 type Rx = (u8, bool, bool);
 
+#[derive(Clone)]
 pub struct QUart {
     pub num: u8,
     con0: usize,

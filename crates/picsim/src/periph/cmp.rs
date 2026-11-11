@@ -29,6 +29,7 @@ pub const NCH: u8 = 1;
 pub const PCH: u8 = 2;
 pub const HOOKS: u8 = 3;
 
+#[derive(Clone)]
 pub struct Cmp {
     pub n: u8,
     pub con0: usize,

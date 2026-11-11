@@ -47,6 +47,7 @@ pub const LOCK: u8 = 2;
 const GO: u8 = 1;
 const WRERR: u8 = 0x80;
 
+#[derive(Clone)]
 pub struct NvmQ {
     pub con0: usize,
     pub con1: usize,

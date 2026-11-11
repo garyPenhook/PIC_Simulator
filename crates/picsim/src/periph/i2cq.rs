@@ -84,6 +84,7 @@ enum St {
     Stopping,
 }
 
+#[derive(Clone)]
 pub struct I2cQ {
     pub num: u8,
     con0: usize,

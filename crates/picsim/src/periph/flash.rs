@@ -15,6 +15,7 @@ use std::collections::BTreeSet;
 
 pub const SECTOR: usize = 256;
 
+#[derive(Clone)]
 pub struct Flash {
     /// Data memory address of the first holding register / buffer RAM byte.
     pub hold: usize,

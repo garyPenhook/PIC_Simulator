@@ -226,6 +226,7 @@ impl App {
             self.load16(dev_note);
             return;
         }
+        let mut stim_fosc = None;
         let res = (|| -> Result<(Machine, String), String> {
             let dev = devdesc::Device::load(&self.devices_dir.join(format!("{}.toml", self.device))).map_err(|e| e.to_string())?;
             let mut m = Machine::new(dev)?;
@@ -240,7 +241,10 @@ impl App {
             }
             if !self.stim_path.trim().is_empty() {
                 let f = PathBuf::from(self.stim_path.trim());
-                m.load_stimulus(&std::fs::read_to_string(&f).map_err(|e| format!("{}: {e}", f.display()))?).map_err(|e| format!("{}: {e}", f.display()))?;
+                let text = std::fs::read_to_string(&f).map_err(|e| format!("{}: {e}", f.display()))?;
+                m.load_stimulus(&text).map_err(|e| format!("{}: {e}", f.display()))?;
+                // The file's clock goes into the Fosc box, which sets the board's clock every frame (G1).
+                stim_fosc = picsim::stimulus::Stimulus::parse(&text).ok().map(|s| s.board.fosc_mhz).filter(|f| *f > 0.0);
             }
             // Routines, variables and source lines from the ELF: <stem>.elf beside the hex, or one folder up (basil writes the hex into dist/).
             let note = match picsim::debuginfo::elf_for(std::path::Path::new(self.hex_path.trim())) {
@@ -281,6 +285,9 @@ impl App {
                 if !m.debug.vars.is_empty() {
                     self.tab = 4; // the Variables tab
                 }
+                if let Some(f) = stim_fosc {
+                    self.fosc_mhz = f as f32;
+                }
                 self.msg = format!("loaded {} ({} symbols, {} variables){note}", self.hex_path, m.syms.len(), m.debug.vars.len());
                 self.m = Some(m);
             }
@@ -294,6 +301,7 @@ impl App {
     /// Loads a program for a PIC16 part: the hex, the assembly listing's labels, the stimulus file and the ELF beside the hex
     /// (routines, variables and source lines; its addresses are words, like the PC).
     fn load16(&mut self, dev_note: String) {
+        let mut stim_fosc = None;
         let res = (|| -> Result<(Machine16, BTreeMap<u32, String>, String), String> {
             let dev = devdesc::Device::load(&self.devices_dir.join(format!("{}.toml", self.device))).map_err(|e| e.to_string())?;
             let mut m = Machine16::new(dev)?;
@@ -312,7 +320,10 @@ impl App {
             }
             if !self.stim_path.trim().is_empty() {
                 let f = PathBuf::from(self.stim_path.trim());
-                m.load_stimulus(&std::fs::read_to_string(&f).map_err(|e| format!("{}: {e}", f.display()))?).map_err(|e| format!("{}: {e}", f.display()))?;
+                let text = std::fs::read_to_string(&f).map_err(|e| format!("{}: {e}", f.display()))?;
+                m.load_stimulus(&text).map_err(|e| format!("{}: {e}", f.display()))?;
+                // The file's clock goes into the Fosc box, which sets the board's clock every frame (G1).
+                stim_fosc = picsim::stimulus::Stimulus::parse(&text).ok().map(|s| s.board.fosc_mhz).filter(|f| *f > 0.0);
             }
             let note = match picsim::debuginfo::elf_for(std::path::Path::new(self.hex_path.trim())) {
                 Some(e) => match m.load_elf(&e) {
@@ -347,7 +358,7 @@ impl App {
                 self.tab = if m.debug.vars.is_empty() { 0 } else { 4 }; // the Variables tab
                 self.msg = format!("loaded {} ({} labels, {} variables){dev_note}{note}", self.hex_path, labels.len(), m.debug.vars.len());
                 self.labels = labels;
-                self.fosc_mhz = self.fosc_mhz.min(32.0);
+                self.fosc_mhz = stim_fosc.map_or(self.fosc_mhz.min(32.0), |f| f as f32);
                 self.m16 = Some(m);
             }
             Err(e) => {

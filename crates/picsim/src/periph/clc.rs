@@ -25,6 +25,7 @@
 use super::Flag;
 use devdesc::Device;
 
+#[derive(Clone)]
 pub struct Clc {
     pub n: u8,
     pub con: usize,

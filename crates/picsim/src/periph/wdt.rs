@@ -23,6 +23,7 @@ pub const PSL: u8 = 2;
 pub const PSH: u8 = 3;
 pub const TMR: u8 = 4;
 
+#[derive(Clone)]
 pub struct Wdt {
     pub con0: usize,
     pub con1: usize,

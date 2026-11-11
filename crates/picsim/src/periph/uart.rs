@@ -18,6 +18,7 @@ use std::collections::{BTreeSet, VecDeque};
 pub(crate) const HOOKS: u8 = 5;
 pub(crate) const RCREG: u8 = 3;
 
+#[derive(Clone)]
 pub(crate) struct Uart {
     pub num: u8,
     pub reg: usize,

@@ -45,6 +45,7 @@ pub const DBR: u8 = 5;
 pub const DBF: u8 = 6;
 pub const HOOKS: u8 = 7;
 
+#[derive(Clone)]
 pub struct Cwg {
     pub con0: usize,
     pub con1: usize,

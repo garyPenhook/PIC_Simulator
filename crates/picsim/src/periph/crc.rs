@@ -42,6 +42,7 @@ struct Cur {
     bits: u32,
 }
 
+#[derive(Clone)]
 pub struct Crc {
     datl: usize,
     dath: usize,
