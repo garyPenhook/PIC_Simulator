@@ -12,6 +12,7 @@
 use crate::config::Config;
 use crate::periph::adc::Adc;
 use crate::periph::ccp16::{self, Ccp16};
+use crate::periph::clb::{self, Clb};
 use crate::periph::nvm16::Nvm16;
 use crate::periph::uart::{self, Uart};
 use crate::periph::wdt::{self, Wdt};
@@ -289,6 +290,39 @@ pub struct Pic16 {
     ccp_con: Vec<Option<u8>>,
     /// CCPRxL/H and CCPxCAP: a write first brings the timers to the writing cycle, as a timer register write does.
     ccp_data: Vec<bool>,
+    /// The CLB (`periph/clb.rs`, `[A133]`-`[A140]`), the pins CLBIN0-3PPS and CLBCLKPPS, and which addresses are its registers.
+    clb: Option<ClbHw>,
+    clb_pins: [Option<usize>; 5],
+    clb_reg: Vec<bool>,
+    /// First RxyPPS code of CLBPPSOUT0 (24h on the PIC16F131xx, 36h on the PIC16F132xx) and the code of CLBDEBUG0.
+    clb_code0: u8,
+    /// PIC16F132xx: TRISxyPPS per pin: (index into `ports`, bit, register).
+    clb_oe: Vec<(usize, u8, usize)>,
+    /// What the pin logic needs of the CLB, kept apart so it is there while the engine is running (`sync_clb`): the BLE outputs,
+    /// CLBPPSOUTn selections, the CLBDEBUG0 selection (None without that register) and the CLBPPSCONn addresses.
+    clb_view: ClbView,
+}
+
+#[derive(Default)]
+struct ClbView {
+    out: u32,
+    outsel: [u8; 8],
+    dbg: Option<u8>,
+    ppscon: Vec<usize>,
+}
+
+/// The CLB and where its registers are.
+struct ClbHw {
+    clb: Clb,
+    con: usize,
+    /// CLBSWINU, H, M, L.
+    swin: [usize; 4],
+    clk: usize,
+    /// CLBSWOUTH, L and CLBDEBUG0 (PIC16F132xx).
+    swout: Option<[usize; 2]>,
+    dbg: Option<usize>,
+    md: Option<(usize, u8)>,
+    irq: [Option<(usize, u8)>; 4],
 }
 
 fn por_bits(s: &str) -> u8 {
@@ -423,6 +457,12 @@ impl Pic16 {
             ccptmrs: None,
             ccp_con: vec![None; MEM],
             ccp_data: vec![false; MEM],
+            clb: None,
+            clb_pins: [None; 5],
+            clb_reg: vec![false; MEM],
+            clb_code0: 0,
+            clb_oe: Vec::new(),
+            clb_view: ClbView::default(),
         };
         for g in &d.gpr {
             for a in g.start..g.end {
@@ -755,6 +795,36 @@ impl Pic16 {
         if let Some(a) = p.ccptmrs.filter(|_| !p.ccps.is_empty()) {
             p.core[a] = true;
         }
+        // The CLB: PIC16F131xx (CLBPPSCON1-4) or PIC16F132xx (CLBSWOUTH/L, CLBDEBUG0, TRISxyPPS).
+        if let (Some(con), Some(sl), Some(sm), Some(sh), Some(su), Some(clk)) =
+            (addr("CLBCON"), addr("CLBSWINL"), addr("CLBSWINM"), addr("CLBSWINH"), addr("CLBSWINU"), addr("CLBCLK"))
+            && [con, sl, sm, sh, su, clk].iter().all(|&a| a < MEM)
+        {
+            let swout = addr("CLBSWOUTH").zip(addr("CLBSWOUTL")).map(|(h, l)| [h, l]);
+            let family = if swout.is_some() { clb::Family::F132 } else { clb::Family::F131 };
+            let dbg = addr("CLBDEBUG0");
+            let ppscon: Vec<usize> = (1..=4).filter_map(|n| addr(&format!("CLBPPSCON{n}"))).collect();
+            let md = dev.sfr.iter().find_map(|s| s.fields.iter().find(|f| f.name == "CLBMD").map(|f| (s.addr as usize, 1u8 << f.pos)));
+            let irq = std::array::from_fn(|k| flag_of(&format!("CLB1IF{k}")));
+            for a in [con, sl, sm, sh, su, clk].into_iter().chain(swout.into_iter().flatten()).chain(dbg).chain(ppscon.iter().copied()) {
+                p.core[a] = true;
+                p.clb_reg[a] = true;
+            }
+            p.clb_pins = [addr("CLBIN0PPS"), addr("CLBIN1PPS"), addr("CLBIN2PPS"), addr("CLBIN3PPS"), addr("CLBCLKPPS")];
+            p.clb_code0 = if family == clb::Family::F132 { 0x36 } else { 0x24 };
+            if family == clb::Family::F132 {
+                for (i, q) in p.ports.iter().enumerate() {
+                    for b in 0..8u8 {
+                        if let Some(r) = addr(&format!("TRIS{}{b}PPS", q.letter as char)) {
+                            p.clb_oe.push((i, b, r));
+                            p.core[r] = true;
+                        }
+                    }
+                }
+            }
+            p.clb_view.ppscon = ppscon.clone();
+            p.clb = Some(ClbHw { clb: Clb::new(family, 0), con, swin: [su, sh, sm, sl], clk, swout, dbg, md, irq });
+        }
         p.mclr = dev
             .sfr
             .iter()
@@ -897,6 +967,9 @@ impl Pic16 {
                 if self.nvm_reg[a].is_some() {
                     self.sync_nvm();
                 }
+                if self.clb_reg[a] {
+                    self.sync_clb();
+                }
                 if let Some((i, true)) = self.port_reg[a] {
                     let v = self.port_levels(usize::from(i));
                     self.mem[a] = v;
@@ -994,6 +1067,8 @@ impl Pic16 {
                     if let Some(x) = self.adc.as_mut() {
                         x.write_con(&mut self.mem, v, now, &mut self.notes);
                     }
+                } else if self.clb_reg[a] {
+                    self.clb_write(a, v);
                 } else if let Some(k) = self.nvm_reg[a] {
                     self.sync_nvm();
                     let (now, v) = (self.cycles, v & self.implemented[a]);
@@ -1076,14 +1151,62 @@ impl Pic16 {
                 _ => v,
             }
         });
+        // a pin whose RxyPPS selects a CLB output shows it while the pin is an output `[A137]`
+        let v = self.pps_out.iter().filter(|o| o.1 == i).fold(v, |v, &(reg, _, bit)| {
+            match self.clb_pin_level(self.mem[reg] & self.implemented[reg]) {
+                Some(l) if tris >> bit & 1 == 0 => v & !(1 << bit) | u8::from(l) << bit,
+                _ => v,
+            }
+        });
         (v & !self.forced.get(i).copied().unwrap_or(0)) & self.implemented[p.port]
+    }
+
+    /// What the CLB drives on a pin whose RxyPPS holds `code`: CLBPPSOUT0-7 or CLBDEBUG0 (DB0); `None` for any other code.
+    fn clb_pin_level(&self, code: u8) -> Option<bool> {
+        if self.clb_code0 == 0 {
+            return None;
+        }
+        let v = &self.clb_view;
+        if code >= self.clb_code0 && code < self.clb_code0 + 8 {
+            let n = usize::from(code - self.clb_code0);
+            return Some(v.out >> (4 * n + usize::from(v.outsel[n] % 4)) & 1 != 0);
+        }
+        v.dbg.filter(|_| code == 0x3E).map(|d| v.out >> (d % 32) & 1 != 0)
+    }
+
+    /// The output enable the CLB gives a pin (`Some`) instead of its TRISx bit: TRISxyPPS on the PIC16F132xx (Register 18.9.3
+    /// p.213), OESELn of CLBPPSCONn on the PIC16F131xx (DS40002519D 29.5.1 p.326), `[A137]`.
+    fn clb_oe_of(&self, i: usize, bit: u8) -> Option<bool> {
+        let v = &self.clb_view;
+        if let Some(&(_, _, r)) = self.clb_oe.iter().find(|o| o.0 == i && o.1 == bit) {
+            return match self.mem[r] & 15 {
+                s @ 1..=8 => Some(v.out >> (4 * (s - 1) + 3) & 1 != 0),
+                _ => None,
+            };
+        }
+        if v.ppscon.is_empty() {
+            return None;
+        }
+        let reg = self.pps_out.iter().find(|o| o.1 == i && o.2 == bit)?.0;
+        let n = self.mem[reg].checked_sub(self.clb_code0).filter(|&n| n < 8)?;
+        let sel = self.mem[*v.ppscon.get(usize::from(n / 2))?] >> (4 * (n % 2)) & 15;
+        (sel >= 8).then(|| v.out >> (4 * (sel - 8) + 3) & 1 != 0)
     }
 
     /// TRISx of port `i` as the pins see it: a pin without a TRISx bit and the MCLR pin are always inputs.
     fn tris_of(&self, i: usize) -> u8 {
         let p = &self.ports[i];
         let m = self.mclr_pin.filter(|&(k, _)| k == i).map_or(0, |(_, m)| m);
-        self.mem[p.tris] | self.implemented[p.port] & !self.implemented[p.tris] | m
+        let t = self.mem[p.tris] | self.implemented[p.port] & !self.implemented[p.tris] | m;
+        // only a pin whose output enable the CLB took over (TRISxyPPS or OESELn written) needs the search
+        let any = self.clb_oe.iter().any(|o| self.mem[o.2] & 15 != 0) || self.clb_view.ppscon.iter().any(|&r| self.mem[r] != 0);
+        if !any {
+            return t;
+        }
+        (0..8u8).fold(t, |t, b| match self.clb_oe_of(i, b) {
+            Some(oe) => t & !(1 << b) | u8::from(!oe) << b,
+            None => t,
+        })
     }
 
     /// Every pin of the part, for a pin chooser.
@@ -1272,7 +1395,7 @@ impl Pic16 {
         }
         let v = v & self.implemented[a];
         self.mem[a] = v;
-        if v != 0 && self.pps_out.iter().any(|o| o.0 == a) && !self.ccps.iter().any(|c| c.code == v) {
+        if v != 0 && self.pps_out.iter().any(|o| o.0 == a) && !self.ccps.iter().any(|c| c.code == v) && self.clb_pin_level(v).is_none() {
             self.notes.insert("a RxyPPS output source other than LATxy is not modelled on PIC16 parts; the pin shows its latch".into());
         }
     }
@@ -1357,6 +1480,7 @@ impl Pic16 {
         self.sync_mssps();
         self.sync_adc();
         self.sync_nvm();
+        self.sync_clb();
         self.sync_t0();
         for i in 0..self.t1.len() {
             self.sync_t1(i);
@@ -1374,6 +1498,7 @@ impl Pic16 {
         self.sync_mssps();
         self.sync_adc();
         self.sync_nvm();
+        self.sync_clb();
         for i in 0..self.t1.len() {
             self.sync_t1(i);
         }
@@ -1400,6 +1525,101 @@ impl Pic16 {
                 self.mem[r] &= !b;
                 self.raise_flag((r, b));
             }
+        }
+    }
+
+    /// Bring the CLB to the current cycle: the interrupts it raised, CLBCON's BUSY and DB0, CLBSWOUT.
+    fn sync_clb(&mut self) {
+        let Some(mut h) = self.clb.take() else { return };
+        let regs = clb::Regs {
+            en: self.mem[h.con] & 0x80 != 0,
+            md: h.md.is_some_and(|(a, m)| self.mem[a] & m != 0),
+            clk: self.mem[h.clk] & 0x1F,
+        };
+        let mut notes = BTreeSet::new();
+        let raised = h.clb.advance(&*self, regs, self.cycles * 4, &mut notes);
+        self.notes.extend(notes);
+        self.clb = Some(h);
+        self.clb_regs_out();
+        for k in raised {
+            if let Some(f) = self.clb.as_ref().and_then(|h| h.irq[usize::from(k)]) {
+                self.raise_flag(f);
+            }
+        }
+    }
+
+    /// The read-only registers of the CLB as the engine has them now.
+    fn clb_regs_out(&mut self) {
+        let Some(h) = self.clb.as_ref() else { return };
+        self.clb_view.out = h.clb.out_bits();
+        self.clb_view.outsel = h.clb.cfg.outsel;
+        self.clb_view.dbg = h.dbg.map(|_| h.clb.debug);
+        let keep = if h.dbg.is_some() { 0x05 } else { 0x01 };
+        let bits = u8::from(h.clb.busy) | if h.dbg.is_some() { u8::from(h.clb.out[usize::from(h.clb.debug % 32)]) << 2 } else { 0 };
+        let (con, swout, sw) = (h.con, h.swout, h.clb.swout());
+        self.mem[con] = self.mem[con] & !keep | bits;
+        if let Some([hi, lo]) = swout {
+            (self.mem[hi], self.mem[lo]) = ((sw >> 8) as u8, sw as u8);
+        }
+    }
+
+    /// A write to a CLB register `[A138]`: CLBCON (EN, RDHOLD; BUSY and DB0 are read only), CLBSWINU/H/M/L (locked while BUSY;
+    /// the write of CLBSWINL starts the synchronisation), CLBCLK, CLBDEBUG0, CLBPPSCONn; CLBSWOUTH/L are read only.
+    fn clb_write(&mut self, a: usize, v: u8) {
+        self.sync_clb();
+        let v = v & self.implemented[a];
+        let now = self.cycles * 4;
+        let Some(h) = self.clb.as_mut() else { return };
+        if a == h.con {
+            let old = self.mem[a];
+            if v & 0x80 != 0 && old & 0x80 == 0 {
+                if !h.clb.cfg.given {
+                    self.notes.insert("the CLB is enabled but the stimulus file has no [clb] netlist: the bitstream the NVM scanner loads from program memory is not interpreted (its format is not published), so every BLE output reads low".into());
+                }
+                h.clb.park(now);
+            }
+            if v & 0x80 == 0 && old & 0x80 != 0 {
+                h.clb.reset(now); // held in Reset from now on: the outputs are zero at once
+            }
+            if h.dbg.is_some() {
+                h.clb.set_rdhold(v & 2 != 0);
+            }
+            let keep = if h.dbg.is_some() { 0x05 } else { 0x01 };
+            self.mem[a] = v & !keep | old & keep;
+        } else if h.swin.contains(&a) {
+            if h.clb.busy {
+                self.notes.insert("a write to CLBSWINx while BUSY = 1 is ignored (the registers are locked until the next BLE_clk)".into());
+                return;
+            }
+            self.mem[a] = v;
+            if a == h.swin[3] {
+                let r = h.swin.map(|x| self.mem[x]);
+                h.clb.swin_written(r);
+            }
+        } else if h.swout.is_some_and(|s| s.contains(&a)) {
+            // read only
+        } else if h.dbg == Some(a) {
+            self.mem[a] = v;
+            h.clb.debug = v & 0x1F;
+        } else {
+            self.mem[a] = v;
+        }
+        self.clb_regs_out();
+    }
+
+    pub fn has_clb(&self) -> bool {
+        self.clb.is_some()
+    }
+
+    /// Stimulus: the CLB netlist. `false` for a part without a CLB.
+    pub fn clb_set(&mut self, cfg: clb::Cfg) -> bool {
+        match self.clb.as_mut() {
+            Some(h) => {
+                h.clb.set_cfg(cfg);
+                self.clb_regs_out();
+                true
+            }
+            None => false,
         }
     }
 
@@ -1525,6 +1745,9 @@ impl Pic16 {
     /// Sleep: Fosc/4 and Fosc stop, so no timer counts and none owes ticks when the part wakes.
     fn park_timers(&mut self) {
         let now = self.cycles;
+        if let Some(h) = self.clb.as_mut() {
+            h.clb.park(now * 4); // FOSC does not run in Sleep (29.8)
+        }
         // Timer0 with ASYNC = 1 and Timer1 with SYNC = 1 on their clock pins go on in Sleep and wake the part (DS40002343F 22.4
         // p.246, 23.5 p.255, `[A127]`); the others have no clock
         if self.t0_pin_async() {
@@ -2219,6 +2442,11 @@ impl Pic16 {
             u.bits(&mut self.mem);
         }
         self.mssps.iter_mut().for_each(Mssp::abort);
+        if let Some(h) = self.clb.as_mut() {
+            let (cfg, family) = (h.clb.cfg.clone(), h.clb.family);
+            h.clb = Clb::new(family, self.cycles * 4);
+            h.clb.cfg = cfg;
+        }
         self.pps_seq = 0;
         self.ioc_at = self.cycles; // the pins are not watched during a Reset
         self.pc = self.reset_vector;
@@ -2942,5 +3170,25 @@ impl PinView for Pic16 {
             Some(i) => !(self.tris_of(i) >> p.1 & 1 == 0 && self.mem[self.ports[i].lat] >> p.1 & 1 == 0),
             None => true,
         }
+    }
+}
+
+impl clb::Ctx for Pic16 {
+    fn pin(&self, n: u8, cycle: u64) -> bool {
+        self.clb_pins.get(usize::from(n)).copied().flatten().and_then(|r| self.pps_input_at(r, cycle)).unwrap_or(false)
+    }
+
+    fn ccp(&self, n: u8) -> bool {
+        self.ccps.iter().find(|c| c.n == n).is_some_and(|c| c.out)
+    }
+
+    fn iocif(&self) -> bool {
+        self.iocif.is_some_and(|(r, b)| self.mem[r] & b != 0)
+    }
+
+    fn pin_events(&self, from: u64, to: u64) -> Vec<u64> {
+        let mut v: Vec<u64> = self.drive.iter().map(|d| d.0).filter(|&t| t > from && t <= to).collect();
+        v.dedup();
+        v
     }
 }

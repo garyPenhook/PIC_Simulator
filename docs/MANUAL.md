@@ -1,6 +1,6 @@
 # pic-sim Manual
 
-Revision for **pic-sim 0.2.8** and **basil-sim 0.2.8** (one workspace version). Simulated families: **PIC18** (PIC18F27Q10 and the PIC18F04/05/06/14/15/16Q41) and **PIC16 enhanced mid-range** (PIC16F131xx, 132xx, 152xx, 171xx, 180x6 and 183xx).
+Revision for **pic-sim 0.2.9** and **basil-sim 0.2.9** (one workspace version). Simulated families: **PIC18** (PIC18F27Q10 and the PIC18F04/05/06/14/15/16Q41) and **PIC16 enhanced mid-range** (PIC16F131xx, 132xx, 152xx, 171xx, 180x6 and 183xx).
 
 This manual describes what the simulator does today. It is organised in the order you meet the tools: what the simulator is, how to build and start it, how to prepare a program for it, the graphical front end `pic-sim`, the command-line front end `basil-sim`, the stimulus file that describes the outside world, the simulated board (LEDs and OLED), and finally what is and is not modelled. Anything not listed here is not supported.
 
@@ -586,6 +586,35 @@ data = [0xEF, 0x40]    # the byte returned for each byte the host exchanges, in 
 fill = 0               # after data is used up, default 0
 ```
 
+## CLB netlist: `[clb]`
+
+The PIC16F131xx and PIC16F132xx have a Configurable Logic Block. On the part its logic is set by a bitstream from the Microchip CLB Synthesizer that the NVM scanner loads from program memory; the layout of that bitstream is not published, so the simulator takes the netlist from the stimulus file. The numbers are the data sheet's (DS40002686B ch.29, DS40002519D ch.29). A part without a CLB rejects the section; a program that enables the CLB without one gets a note and every BLE output stays low.
+
+```toml
+[clb]
+divider = 8                 # BLE_clk = CLBCLK / divider (default 1)
+output = [0, 2]             # CLBPPSOUTn is BLE[4n + this], 0..3 (default 0)
+irq = [0, -1, 5]            # CLB1IF0 on a rising edge of BLE[0]; -1 for none; up to 4 entries
+[clb.counter]               # the 3-bit counter (default: off)
+enable = true
+stop = 3                    # BLE whose output, high, holds the count
+reset = 4                   # BLE whose output, high, clears it
+a1 = 3                      # Counter[A1] is high while the count is 3 (a1 a2 b1 b2 c1 c2 d1 d2)
+[[clb.input]]               # one of the 16 input selections
+n = 0
+source = 0                  # Table 29-1 value: 0..3 = CLBIN0-3PPS pins
+edge = "pos"                # "none" (default), "pos" or "neg"
+sync = true                 # synchronised to BLE_clk
+[[clb.ble]]                 # one of the 32 BLEs
+n = 1
+a = 8                       # LUT inputs A..D: 5-bit selections (BLE 0-7 of the group, 8-11 synchronised
+b = 31                      #   input, 12-19 CLBSWIN bit, 20-21 counter); default 31, nothing (reads 0)
+lut = 0xAAAA                # bit A + 2B + 4C + 8D is the output
+flop = true                 # the output is the flop, not the LUT
+```
+
+Pins read as the `[[pin]]` entries drive them (set `CLBINnPPS` and clear `ANSELx`). The model takes CLBCLK = FOSC and the CLBIN/CLBCLK pins; the other clock sources and Table 29-1 inputs are not modelled and a note names them. Assumptions: `docs/FACTS-SIM.md` `[A133]`-`[A140]`.
+
 ## Reset pin: `[[mclr]]`
 
 Hold the part in reset from a given time (PIC18 only).
@@ -624,6 +653,7 @@ See section 8.
 | `[[i2c]]`, `[[spi]]` | yes | yes | **no** |
 | `[[analog]]` (comparators) | yes | — | **no** |
 | `[[mclr]]` | yes | yes | **no** |
+| `[clb]` | **no** | **no** | PIC16F131xx and PIC16F132xx only (an error on any other part) |
 
 On a PIC16 part a section marked *no* is an **error** (`[[spi]] is not modelled on PIC16 parts yet…`) rather than being ignored. A PIC16 stimulus is also an error if it names a pin or port the part lacks, an EUSART it does not have, or an OLED on an I2C module the simulator does not model for that part (use `bus = "gpio"` instead).
 
@@ -716,6 +746,7 @@ Models exist for the following; a register of anything else is plain storage tha
 | CWG1 | yes | — | — |
 | Comparators C1/C2 | yes | — | — |
 | CLC1–CLC8 | yes | — | — |
+| CLB (PIC16F131xx, 132xx) | — | — | yes: 32 BLEs, input edge detectors, 3-bit counter, software inputs and outputs, PPS outputs and interrupts, driven by a `[clb]` netlist in the stimulus file (section 10); the Synthesizer's bitstream is not read; no clock, gate or trigger connections to other peripherals |
 | Watchdog (windowed on the Q10) and the resets it causes | yes | — | yes: windowed WWDT (PIC16F131xx, PIC16F132xx, PIC16F171xx) or single-register WDT (PIC16F152xx, PIC16F183xx, PIC16F180x6) |
 | CRC and memory scanner | yes | — | — |
 | External interrupts INT0–2, interrupt-on-change | yes | — | the INT pin and interrupt-on-change |
@@ -794,7 +825,7 @@ The simulator follows the data sheet. Where it differs from MDB it says so in `d
 
 ## Stimulus sections
 
-`[[pin]]`, `[[port]]`, `[[uart]]`, `[[adc]]`, `[[analog]]`, `[[i2c]]`, `[[spi]]`, `[[mclr]]`, `[[led]]`, `[[oled]]`, and the top-level `fosc_mhz`.
+`[[pin]]`, `[[port]]`, `[[uart]]`, `[[adc]]`, `[[analog]]`, `[[i2c]]`, `[[spi]]`, `[[mclr]]`, `[[led]]`, `[[oled]]`, `[clb]`, and the top-level `fosc_mhz`.
 
 ## Pin names
 

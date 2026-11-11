@@ -28,6 +28,7 @@ pub(crate) mod adc;
 mod board;
 mod ccp;
 pub(crate) mod ccp16;
+pub(crate) mod clb;
 mod clc;
 mod crc;
 pub(crate) mod wdt;

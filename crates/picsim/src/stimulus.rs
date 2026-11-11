@@ -31,6 +31,11 @@
 //! data = [0x12, 0x34] # bytes the client sends back, in order
 //! fill = 0            # sent after `data` is used up, default 0
 //!
+//! [clb]              # the CLB netlist of a PIC16F131xx / PIC16F132xx (see docs/MANUAL.md "CLB netlist")
+//! divider = 8         # BLE_clk = CLBCLK / divider
+//! [[clb.ble]]         # one of the 32 BLEs: n, a, b, c, d (input selections), lut (16 bits), flop
+//! [[clb.input]]       # one of the 16 input selections: n, source, edge ("none", "pos", "neg"), sync
+//!
 //! [[pin]]             # one input pin of a port
 //! port = "B"          # port letter
 //! bit = 5             # 0-7
@@ -87,6 +92,8 @@ pub struct Stimulus {
     pub mclr: Vec<(u64, u8)>,
     /// LEDs and OLEDs on the board.
     pub board: crate::periph::Board,
+    /// The CLB netlist (`[clb]`, PIC16F131xx and PIC16F132xx).
+    pub clb: Option<crate::periph::clb::Cfg>,
 }
 
 impl Stimulus {
@@ -148,6 +155,10 @@ impl Stimulus {
                     st.mclr.push((at, level));
                 }
                 st.mclr.sort_by_key(|e| e.0);
+                continue;
+            }
+            if k == "clb" {
+                st.clb = Some(parse_clb(v.as_table().ok_or("clb must be a [clb] table")?)?);
                 continue;
             }
             if k == "fosc_mhz" {
@@ -357,6 +368,9 @@ impl Stimulus {
             ("analog", !self.analog.is_empty()),
             ("mclr", !self.mclr.is_empty()),
         ];
+        if self.clb.is_some() && !cpu.has_clb() {
+            return Err(format!("{}: the part has no CLB", dev.device.name));
+        }
         if let Some((n, _)) = other.iter().find(|(_, used)| *used) {
             return Err(format!("{}: [[{n}]] is not modelled on PIC16 parts yet; only [[uart]], [[adc]], [[pin]]/[[port]], [[led]] and [[oled]] are", dev.device.name));
         }
@@ -385,6 +399,9 @@ impl Stimulus {
         if !self.board.is_empty() {
             cpu.set_board(self.board);
         }
+        if let Some(c) = self.clb {
+            cpu.clb_set(c);
+        }
         for (letter, at, mask, val) in self.pins {
             cpu.pin_feed(letter, at, mask, val);
         }
@@ -399,6 +416,9 @@ impl Stimulus {
 
     /// Hand the characters to the receivers of `cpu`. An EUSART the part does not have is an error.
     pub fn apply(self, dev: &Device, p: &mut crate::periph::Periph) -> Result<(), String> {
+        if self.clb.is_some() {
+            return Err(format!("{}: the part has no CLB", dev.device.name));
+        }
         for (port, s) in self.uart {
             if !p.rx_send(port, s) {
                 return Err(format!("{}: no EUSART{port} receiver in the simulator", dev.device.name));
@@ -438,4 +458,75 @@ impl Stimulus {
         }
         Ok(())
     }
+}
+
+/// The `[clb]` netlist: the latches of DS40002686B Fig. 29-1 to 29-13, which the CLB Synthesizer would load from program memory.
+fn parse_clb(t: &toml::Table) -> Result<crate::periph::clb::Cfg, String> {
+    use crate::periph::clb::{BleCfg, Cfg, CounterCfg, Edge};
+    let num = |v: &toml::Value, what: &str, max: i64| -> Result<i64, String> {
+        v.as_integer().filter(|i| (0..=max).contains(i)).ok_or(format!("clb.{what} must be an integer 0..{max}"))
+    };
+    let known = |t: &toml::Table, keys: &[&str], what: &str| -> Result<(), String> {
+        t.keys().find(|k| !keys.contains(&k.as_str())).map_or(Ok(()), |k| Err(format!("{what}: unknown key {k}")))
+    };
+    known(t, &["divider", "output", "irq", "counter", "input", "ble"], "clb")?;
+    let mut c = Cfg { given: true, ..Cfg::default() };
+    if let Some(v) = t.get("divider") {
+        c.divider = u32::try_from(num(v, "divider", 1 << 16)?).map_err(|_| "clb.divider")?.max(1);
+    }
+    if let Some(v) = t.get("output") {
+        let a = v.as_array().filter(|a| a.len() <= 8).ok_or("clb.output must be an array of up to 8 selections 0..3")?;
+        for (n, x) in a.iter().enumerate() {
+            c.outsel[n] = num(x, "output", 3)? as u8;
+        }
+    }
+    if let Some(v) = t.get("irq") {
+        let a = v.as_array().filter(|a| a.len() <= 4).ok_or("clb.irq must be an array of up to 4 BLE numbers (-1 for none)")?;
+        for (n, x) in a.iter().enumerate() {
+            c.irq[n] = match x.as_integer() {
+                Some(-1) => None,
+                _ => Some(num(x, "irq", 31)? as u8),
+            };
+        }
+    }
+    if let Some(v) = t.get("counter") {
+        let k = v.as_table().ok_or("clb.counter must be a table")?;
+        known(k, &["enable", "stop", "reset", "a1", "a2", "b1", "b2", "c1", "c2", "d1", "d2"], "clb.counter")?;
+        let mut n = CounterCfg { enable: k.get("enable").map_or(Ok(true), |x| x.as_bool().ok_or("clb.counter.enable must be true or false"))?, ..CounterCfg::default() };
+        n.stop = k.get("stop").map(|x| num(x, "counter.stop", 31).map(|i| i as u8)).transpose()?;
+        n.reset = k.get("reset").map(|x| num(x, "counter.reset", 31).map(|i| i as u8)).transpose()?;
+        for (i, name) in ["a1", "a2", "b1", "b2", "c1", "c2", "d1", "d2"].iter().enumerate() {
+            n.sel[i] = k.get(*name).map(|x| num(x, "counter.select", 7).map(|i| i as u8)).transpose()?;
+        }
+        c.counter = n;
+    }
+    for e in t.get("input").map_or(Ok(&[][..]), |v| v.as_array().map(Vec::as_slice).ok_or("clb.input must be [[clb.input]] entries"))? {
+        let k = e.as_table().ok_or("clb.input entry must be a table")?;
+        known(k, &["n", "source", "edge", "sync"], "clb.input")?;
+        let n = num(k.get("n").ok_or("clb.input needs n")?, "input.n", 15)? as usize;
+        let i = &mut c.inputs[n];
+        i.source = num(k.get("source").ok_or("clb.input needs source (the Table 29-1 value)")?, "input.source", 63)? as u8;
+        i.edge = match k.get("edge").map(|x| x.as_str()) {
+            None | Some(Some("none")) => Edge::None,
+            Some(Some("pos")) => Edge::Pos,
+            Some(Some("neg")) => Edge::Neg,
+            _ => return Err("clb.input.edge must be \"none\", \"pos\" or \"neg\"".into()),
+        };
+        i.sync = k.get("sync").map_or(Ok(false), |x| x.as_bool().ok_or("clb.input.sync must be true or false"))?;
+    }
+    for e in t.get("ble").map_or(Ok(&[][..]), |v| v.as_array().map(Vec::as_slice).ok_or("clb.ble must be [[clb.ble]] entries"))? {
+        let k = e.as_table().ok_or("clb.ble entry must be a table")?;
+        known(k, &["n", "a", "b", "c", "d", "lut", "flop"], "clb.ble")?;
+        let n = num(k.get("n").ok_or("clb.ble needs n")?, "ble.n", 31)? as usize;
+        let mut b = BleCfg { sel: [31; 4], lut: 0, flop: false };
+        for (x, name) in ["a", "b", "c", "d"].iter().enumerate() {
+            if let Some(v) = k.get(*name) {
+                b.sel[x] = num(v, "ble.input", 31)? as u8;
+            }
+        }
+        b.lut = num(k.get("lut").ok_or("clb.ble needs lut (16 bits)")?, "ble.lut", 0xFFFF)? as u16;
+        b.flop = k.get("flop").map_or(Ok(false), |x| x.as_bool().ok_or("clb.ble.flop must be true or false"))?;
+        c.ble[n] = b;
+    }
+    Ok(c)
 }
