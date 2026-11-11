@@ -1,6 +1,6 @@
 # pic-sim Manual
 
-Revision for **pic-sim 0.2.4** and **basil-sim 0.2.4** (one workspace version). Simulated families: **PIC18** (PIC18F27Q10 and the PIC18F04/05/06/14/15/16Q41) and **PIC16 enhanced mid-range** (PIC16F131xx, 132xx, 152xx, 171xx, 180x6 and 183xx).
+Revision for **pic-sim 0.2.8** and **basil-sim 0.2.8** (one workspace version). Simulated families: **PIC18** (PIC18F27Q10 and the PIC18F04/05/06/14/15/16Q41) and **PIC16 enhanced mid-range** (PIC16F131xx, 132xx, 152xx, 171xx, 180x6 and 183xx).
 
 This manual describes what the simulator does today. It is organised in the order you meet the tools: what the simulator is, how to build and start it, how to prepare a program for it, the graphical front end `pic-sim`, the command-line front end `basil-sim`, the stimulus file that describes the outside world, the simulated board (LEDs and OLED), and finally what is and is not modelled. Anything not listed here is not supported.
 
