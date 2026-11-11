@@ -128,3 +128,22 @@ fn int0_wakes_the_part_from_sleep() {
     m.cpu.step();
     assert!(m.cpu.cycles < 110, "woke at the edge, cycle {}", m.cpu.cycles);
 }
+
+#[test]
+fn a_sleep_with_an_interrupt_enabled_jumps_to_the_wake_up_edge() {
+    // review P4: with IOCIE set and no timer counting in Sleep, a pin edge far away is not waited for cycle by cycle
+    let mut m = machine(&SLEEP_BRA, "[[pin]]\nport = \"B\"\nbit = 0\nlevel = 1\nat = 1000000\n");
+    w(&mut m, "IOCBP", 0x01);
+    w(&mut m, "PIE0", 0x10);
+    m.cpu.step(); // SLEEP
+    let mut steps = 0;
+    while m.cpu.cycles < 1_000_000 {
+        m.cpu.step();
+        steps += 1;
+    }
+    assert!(steps < 10, "{steps} steps to the edge");
+    assert_eq!(m.cpu.cycles, 1_000_000, "stopped at the edge");
+    assert_eq!(r(&mut m, "IOCBF"), 0x01);
+    m.cpu.step();
+    assert!(m.cpu.cycles < 1_000_010, "woke at the edge, cycle {}", m.cpu.cycles);
+}

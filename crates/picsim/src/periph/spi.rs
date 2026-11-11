@@ -30,6 +30,7 @@
 //!   The client answers a whole byte at once, so LSBF and CKP/CKE/SMP do not change the data.
 //! * `[A44]` A TXB write with EN = 0 is dropped.
 
+use crate::log::Log;
 use super::{addr, Flag};
 use crate::mem::DataMem;
 use devdesc::Device;
@@ -178,7 +179,7 @@ impl Spi {
     }
 
     /// Start and finish transfers up to cycle `now`; `log` collects (SPI number, start cycle, byte sent).
-    pub fn sync(&mut self, m: &mut DataMem, now: u64, ev: &mut Vec<u64>, log: &mut Vec<(u8, u64, u8)>, notes: &mut BTreeSet<String>) {
+    pub fn sync(&mut self, m: &mut DataMem, now: u64, ev: &mut Vec<u64>, log: &mut Log<(u8, u64, u8)>, notes: &mut BTreeSet<String>) {
         if !self.en(m) {
             self.bits(m);
             return;

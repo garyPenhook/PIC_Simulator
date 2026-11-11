@@ -38,6 +38,7 @@
 //!   writes while scrolling (10.2.4 prohibits them) get a note. The time comes from the PIC clock, `Board::fosc_mhz`.
 
 use super::{I2cClient, I2cEv, Periph};
+use crate::log::Log;
 use crate::mem::DataMem;
 use std::collections::{BTreeSet, VecDeque};
 
@@ -595,7 +596,7 @@ pub struct Board {
     pub leds: Vec<Led>,
     pub oleds: Vec<Oled>,
     /// How much of `Periph::i2c_log` has been read.
-    pub(crate) log_pos: usize,
+    pub(crate) log_pos: u64,
     /// The PIC clock in MHz (0 = 64 MHz): the OLED's scrolling runs on real time.
     pub fosc_mhz: f64,
 }
@@ -672,15 +673,15 @@ impl Board {
     }
 
     /// Marks the bus log as read up to `n` entries (a new wiring starts after what is already there).
-    pub fn set_log_pos(&mut self, n: usize) {
+    pub fn set_log_pos(&mut self, n: u64) {
         self.log_pos = n;
     }
 
-    /// Hands the OLEDs on hardware I2C buses the bytes the hosts put on the bus since the last call (`log` only grows).
-    pub fn feed_log(&mut self, log: &[(u8, u64, I2cEv)], notes: &mut BTreeSet<String>) {
-        while self.log_pos < log.len() {
-            let (num, _, ev) = log[self.log_pos];
-            self.log_pos += 1;
+    /// Hands the OLEDs on hardware I2C buses the bytes the hosts put on the bus since the last call (positions in `log` are absolute).
+    pub fn feed_log(&mut self, log: &Log<(u8, u64, I2cEv)>, notes: &mut BTreeSet<String>) {
+        let new = log.since(self.log_pos);
+        self.log_pos = log.total();
+        for &(num, _, ev) in new {
             for o in self.oleds.iter_mut().filter(|o| o.bus == Bus::I2c(num)) {
                 match ev {
                     I2cEv::Start | I2cEv::Restart | I2cEv::Stop => o.in_session = false,
@@ -749,7 +750,7 @@ impl Periph {
                 }
             }
         }
-        self.board.log_pos = self.i2c_log.len();
+        self.board.log_pos = self.i2c_log.total();
     }
 
     pub fn has_port(&self, letter: u8) -> bool {

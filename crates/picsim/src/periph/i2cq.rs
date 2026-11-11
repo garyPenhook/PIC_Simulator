@@ -38,6 +38,7 @@
 //!   NACKIF and gives the old byte.
 //! * `[A60]` A TXB write with EN = 0 or MODE != 100 only fills TXB.
 
+use crate::log::Log;
 use super::mssp::{I2cClient, I2cEv};
 use super::{addr, Flag};
 use crate::mem::DataMem;
@@ -129,7 +130,7 @@ pub struct I2cQ {
     bfre_at: Option<u64>,
     sel: Option<(usize, bool)>,
     expect_addr: bool,
-    read_idx: Option<usize>,
+    read_idx: Option<u64>,
 }
 
 impl I2cQ {
@@ -260,7 +261,7 @@ impl I2cQ {
         self.read_idx = None;
     }
 
-    pub fn sync(&mut self, m: &mut DataMem, now: u64, ev: &mut Vec<u64>, i2c_log: &mut Vec<(u8, u64, I2cEv)>, notes: &mut BTreeSet<String>) {
+    pub fn sync(&mut self, m: &mut DataMem, now: u64, ev: &mut Vec<u64>, i2c_log: &mut Log<(u8, u64, I2cEv)>, notes: &mut BTreeSet<String>) {
         if self.en(m) {
             let mode = m.mem[self.con0] & 7;
             if mode != 4 {
@@ -283,7 +284,7 @@ impl I2cQ {
         }
     }
 
-    fn step(&mut self, m: &mut DataMem, t: u64, e: Ev, log: &mut Vec<(u8, u64, I2cEv)>) {
+    fn step(&mut self, m: &mut DataMem, t: u64, e: Ev, log: &mut Log<(u8, u64, I2cEv)>) {
         let tt = self.t(m);
         match e {
             Ev::Spurious => self.pirv |= 0x05, // SCIF, PCIF
@@ -378,16 +379,17 @@ impl I2cQ {
                 };
                 self.rxbf = true;
                 self.cnt_v = self.cnt_v.saturating_sub(1);
-                self.read_idx = Some(log.len());
+                self.read_idx = Some(log.total());
                 log.push((self.num, t, I2cEv::Read(self.rxb, true)));
                 self.sched(t + tt, Ev::Rx9);
             }
             Ev::Rx9 => {
                 let nack = if self.cnt_v == 0 { m.mem[self.con1] & 0x80 != 0 } else { m.mem[self.con1] & 0x40 != 0 };
                 if let Some(i) = self.read_idx.take()
-                    && let I2cEv::Read(b, _) = log[i].2
+                    && let Some(e) = log.get_abs_mut(i)
+                    && let I2cEv::Read(b, _) = e.2
                 {
-                    log[i].2 = I2cEv::Read(b, !nack);
+                    e.2 = I2cEv::Read(b, !nack);
                 }
                 if nack {
                     self.errv |= 0x10;
@@ -426,7 +428,7 @@ impl I2cQ {
     }
 
     /// A byte the host writes: the address after a Start or Restart, otherwise data. Returns the client's acknowledge.
-    fn client_write(&mut self, b: u8, t: u64, log: &mut Vec<(u8, u64, I2cEv)>) -> bool {
+    fn client_write(&mut self, b: u8, t: u64, log: &mut Log<(u8, u64, I2cEv)>) -> bool {
         if self.expect_addr {
             self.expect_addr = false;
             self.sel = self.i2c.iter().position(|c| c.address == b >> 1 && !c.absent).map(|i| (i, b & 1 != 0));
@@ -457,7 +459,7 @@ impl I2cQ {
         self.rxb
     }
 
-    fn do_restart(&mut self, m: &mut DataMem, now: u64, log: &mut Vec<(u8, u64, I2cEv)>) {
+    fn do_restart(&mut self, m: &mut DataMem, now: u64, log: &mut Log<(u8, u64, I2cEv)>) {
         let tt = self.t(m);
         self.mdr = false;
         self.s = true;
@@ -470,7 +472,7 @@ impl I2cQ {
         self.sched(now + 2 * tt, Ev::LoadShift);
     }
 
-    pub fn write(&mut self, sub: u8, v: u8, now: u64, m: &mut DataMem, log: &mut Vec<(u8, u64, I2cEv)>) {
+    pub fn write(&mut self, sub: u8, v: u8, now: u64, m: &mut DataMem, log: &mut Log<(u8, u64, I2cEv)>) {
         let tt = self.t(m);
         match sub {
             CON0 => {

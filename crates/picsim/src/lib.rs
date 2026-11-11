@@ -6,6 +6,7 @@ pub mod disasm;
 pub mod drive;
 pub mod hex;
 pub mod lines;
+pub mod log;
 pub mod machine;
 pub mod machine16;
 pub mod mem;

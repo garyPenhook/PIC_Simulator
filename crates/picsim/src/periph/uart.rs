@@ -10,6 +10,7 @@
 //! * `[A7]` clearing TXEN abandons the shift register and a held byte. A write to TXREG while TXEN = 0 is dropped.
 //! * `[A8]` TXIF does not dip for the instruction cycle after a write that goes straight to the shift register.
 
+use crate::log::Log;
 use super::{addr, Flag, RxStream};
 use devdesc::Device;
 use std::collections::{BTreeSet, VecDeque};
@@ -150,7 +151,7 @@ impl Uart {
     }
 
     /// Bring the transmitter and the receiver to cycle `now` and refresh the flag bits.
-    pub fn sync(&mut self, mem: &mut [u8], now: u64, ev: &mut Vec<u64>, tx: &mut Vec<(u8, u64, u8)>, notes: &mut BTreeSet<String>) {
+    pub fn sync(&mut self, mem: &mut [u8], now: u64, ev: &mut Vec<u64>, tx: &mut Log<(u8, u64, u8)>, notes: &mut BTreeSet<String>) {
         if mem[self.sta] & 0x10 != 0 {
             notes.insert(format!("EUSART{} synchronous mode is not modelled; nothing is sent", self.num));
         }
@@ -176,7 +177,7 @@ impl Uart {
     }
 
     /// Write hook `sub` (0 TXREG, 1 TXSTA, 2 BAUDCON, 3 RCREG, 4 RCSTA) at cycle `now`.
-    pub fn write(&mut self, sub: u8, v: u8, now: u64, mem: &mut [u8], tx: &mut Vec<(u8, u64, u8)>) {
+    pub fn write(&mut self, sub: u8, v: u8, now: u64, mem: &mut [u8], tx: &mut Log<(u8, u64, u8)>) {
         match sub {
             0 => {
                 mem[self.reg] = v;

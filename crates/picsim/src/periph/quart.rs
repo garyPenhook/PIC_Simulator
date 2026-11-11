@@ -30,6 +30,7 @@
 //!   (address matching with UxP2/UxP3 is not modelled; the errata DS80000901H 1.5.2 says not to use the mode anyway).
 //! * `[A23]` UxTXB writes are dropped when the buffer is full (only TXWRE shows it). In MODE 0001 the top bit is not sent.
 
+use crate::log::Log;
 use super::{addr, Flag, RxStream};
 use crate::mem::DataMem;
 use devdesc::Device;
@@ -165,7 +166,7 @@ impl QUart {
     }
 
     /// The character is complete when the TSR moved it out: put the TSR's character on the line at cycle `t`.
-    fn start_next(&mut self, m: &DataMem, t: u64, tx: &mut Vec<(u8, u64, u8)>) {
+    fn start_next(&mut self, m: &DataMem, t: u64, tx: &mut Log<(u8, u64, u8)>) {
         let Some(w) = self.next.take() else { return };
         let mask = if self.mode(m) == 1 { 0x7F } else { 0xFF };
         tx.push((self.num, t, w as u8 & mask));
@@ -174,7 +175,7 @@ impl QUart {
         self.cur = Some((end - self.span(m, stop), end));
     }
 
-    fn send(&mut self, m: &mut DataMem, w: u16, now: u64, tx: &mut Vec<(u8, u64, u8)>) {
+    fn send(&mut self, m: &mut DataMem, w: u16, now: u64, tx: &mut Log<(u8, u64, u8)>) {
         if !self.on(m) {
             return;
         }
@@ -256,7 +257,7 @@ impl QUart {
         }
     }
 
-    pub fn sync(&mut self, m: &mut DataMem, now: u64, ev: &mut Vec<u64>, tx: &mut Vec<(u8, u64, u8)>, notes: &mut BTreeSet<String>) {
+    pub fn sync(&mut self, m: &mut DataMem, now: u64, ev: &mut Vec<u64>, tx: &mut Log<(u8, u64, u8)>, notes: &mut BTreeSet<String>) {
         let n = self.num;
         if self.on(m) {
             if self.mode(m) > 4 {
@@ -376,7 +377,7 @@ impl QUart {
         m.mem[self.rxb]
     }
 
-    pub fn write(&mut self, sub: u8, v: u8, now: u64, m: &mut DataMem, tx: &mut Vec<(u8, u64, u8)>) {
+    pub fn write(&mut self, sub: u8, v: u8, now: u64, m: &mut DataMem, tx: &mut Log<(u8, u64, u8)>) {
         match sub {
             TXB => {
                 m.mem[self.txb] = v;

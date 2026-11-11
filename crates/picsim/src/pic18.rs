@@ -8,6 +8,9 @@ use crate::periph::{Periph, ResetKind};
 use devdesc::Device;
 use std::collections::{BTreeMap, BTreeSet};
 
+/// Cycles a Sleep with an interrupt enabled but nothing scheduled that could set a flag moves on per step (`sleep_step`).
+const IDLE_SLEEP_STEP: u64 = 1 << 16;
+
 pub const C: u8 = 1;
 pub const DC: u8 = 2;
 pub const Z: u8 = 4;
@@ -911,13 +914,16 @@ impl Pic18 {
         if !irq_on && let Some(d) = self.p.wdt_sleep_deadline(&self.m) {
             next = d.max(next);
         }
-        // A timer on LFINTOSC or SOSC may set the flag that wakes the part: look at each of its edges, and at the other
-        // things that can happen meanwhile, rather than at every cycle `[A102]`.
-        if irq_on && self.p.timer_in_sleep() {
+        // With an interrupt enabled, look at the next thing that can set a flag rather than at every cycle: an edge of the
+        // oscillator of a timer that counts in Sleep (LFINTOSC, SOSC `[A102]`), the watchdog, an analog level, a scheduled
+        // pin change or the end of an EEPROM write; pin and MCLR changes are added below. Nothing else runs without Fosc
+        // (`Periph::sync_asleep`). With none to come, only a write from outside (a debugger) can set a flag, which happens
+        // between steps: time moves on by `IDLE_SLEEP_STEP` cycles a step.
+        // In Idle (IDLEN = 1) the peripherals keep Fosc and are looked at every cycle, as before.
+        if irq_on && (self.p.timer_in_sleep() || self.p.fosc_stopped()) {
             let ev = [self.p.next_osc_edge(&self.m, start), self.p.wdt_sleep_deadline(&self.m), self.p.next_analog(start), self.p.next_pending(start)];
-            if let Some(e) = ev.into_iter().flatten().min() {
-                next = e.max(next);
-            }
+            let none = if self.p.fosc_stopped() { start + IDLE_SLEEP_STEP } else { next };
+            next = ev.into_iter().flatten().min().unwrap_or(none).max(next);
         }
         if let Some(&(at, _)) = self.mclr_ev.get(self.mclr_next) {
             next = next.min(at.max(start + 1));

@@ -9,6 +9,7 @@
 //! Of the peripherals only the timers (0, 1/3, 2/4/6; milestone S3/S4) exist: the other registers are plain storage and `unmodelled` lists
 //! the ones a program touched. The facts the core relies on, with their pages, are in `docs/FACTS-SIM.md` (PIC16 core).
 
+use crate::log::Log;
 use crate::config::Config;
 use crate::periph::adc::Adc;
 use crate::periph::ccp16::{self, Ccp16};
@@ -241,13 +242,13 @@ pub struct Pic16 {
     /// (index, hook sub-code 0 TXREG .. 4 RCSTA). `tx` logs the bytes they start to send: (EUSART number, cycle, byte).
     uarts: Vec<Uart>,
     uart_reg: Vec<Option<(u8, u8)>>,
-    pub tx: Vec<(u8, u64, u8)>,
+    pub tx: Log<(u8, u64, u8)>,
     /// MSSPs (`periph/mssp.rs`, the module of the Q10; I2C host mode drives the OLED on a hardware bus) and, per address,
     /// which register of which one it is (index, sub-code `mssp::BUF` ..). `i2c_log` is what the hosts put on the bus.
     mssps: Vec<Mssp>,
     mssp_reg: Vec<Option<(u8, u8)>>,
-    i2c_log: Vec<(u8, u64, I2cEv)>,
-    spi_log: Vec<(u8, u64, u8)>,
+    i2c_log: Log<(u8, u64, I2cEv)>,
+    spi_log: Log<(u8, u64, u8)>,
     /// Per MSSP: (number, SSPxCLKPPS, SSPxDATPPS, SCL1 and SDA1 output codes of RxyPPS); `None` codes when the family's
     /// table is not known to the simulator.
     i2c_pps: Vec<(u8, usize, usize, Option<(u8, u8)>)>,
@@ -439,11 +440,11 @@ impl Pic16 {
             flag_reg: vec![false; MEM],
             uarts: Vec::new(),
             uart_reg: vec![None; MEM],
-            tx: Vec::new(),
+            tx: Log::new(),
             mssps: Vec::new(),
             mssp_reg: vec![None; MEM],
-            i2c_log: Vec::new(),
-            spi_log: Vec::new(),
+            i2c_log: Log::new(),
+            spi_log: Log::new(),
             i2c_pps: Vec::new(),
             sleep_at: 0,
             adc: None,
@@ -1271,7 +1272,7 @@ impl Pic16 {
                 }
             }
         }
-        self.board.set_log_pos(self.i2c_log.len());
+        self.board.set_log_pos(self.i2c_log.total());
     }
 
     /// Is the OLED `o` on MSSP `num` wired as the code expects: the input selections name its pins and its pins' output
@@ -2822,7 +2823,7 @@ impl Pic16 {
     fn check_skip(&self) {
         let mut c = self.clone();
         c.catch_up();
-        let before = (c.mem.clone(), c.irq_new, c.tx.len(), c.spi_log.len(), c.i2c_log.len(), c.ccps.iter().map(|x| x.out).collect::<Vec<_>>());
+        let before = (c.mem.clone(), c.irq_new, c.tx.total(), c.spi_log.total(), c.i2c_log.total(), c.ccps.iter().map(|x| x.out).collect::<Vec<_>>());
         c.sync_timers();
         c.wdt_tick();
         for a in 0..c.mem.len() {
@@ -2830,7 +2831,7 @@ impl Pic16 {
                 panic!("lazy sync: skipping at cycle {} (due {}) missed a change of {} ({a:#06X}): {:#04X} -> {:#04X}", self.cycles, self.due, c.names[a].as_deref().unwrap_or("?"), before.0[a], c.mem[a]);
             }
         }
-        let after = (c.irq_new, c.tx.len(), c.spi_log.len(), c.i2c_log.len(), c.ccps.iter().map(|x| x.out).collect::<Vec<_>>());
+        let after = (c.irq_new, c.tx.total(), c.spi_log.total(), c.i2c_log.total(), c.ccps.iter().map(|x| x.out).collect::<Vec<_>>());
         assert!((before.1, before.2, before.3, before.4, before.5) == after && c.reset_req == self.reset_req, "lazy sync: skipping at cycle {} (due {}) missed a flag, a serial byte, a CCP output or a reset", self.cycles, self.due);
     }
 

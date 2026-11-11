@@ -40,6 +40,7 @@
 //!   Clearing SSPEN or changing SSPM aborts a running operation and clears BF, S, P and R/W; WCOL and SSPOV stay.
 //! * `[A50]` An SSPxBUF write with SSPEN = 0 only fills SSPxBUF.
 
+use crate::log::Log;
 use super::{addr, Flag};
 use devdesc::Device;
 use std::collections::{BTreeSet, VecDeque};
@@ -112,7 +113,7 @@ pub struct Mssp {
     /// Client addressed (index into `i2c`) and whether the host reads from it.
     sel: Option<(usize, bool)>,
     /// Index in the I2C log of the byte just read, to put the host's acknowledge in.
-    read_idx: Option<usize>,
+    read_idx: Option<u64>,
 }
 
 impl Mssp {
@@ -176,7 +177,7 @@ impl Mssp {
     }
 
     /// Apply the steps due up to cycle `now`.
-    pub fn sync(&mut self, m: &mut [u8], now: u64, ev: &mut Vec<u64>, spi_log: &mut Vec<(u8, u64, u8)>, i2c_log: &mut Vec<(u8, u64, I2cEv)>, notes: &mut BTreeSet<String>) {
+    pub fn sync(&mut self, m: &mut [u8], now: u64, ev: &mut Vec<u64>, spi_log: &mut Log<(u8, u64, u8)>, i2c_log: &mut Log<(u8, u64, I2cEv)>, notes: &mut BTreeSet<String>) {
         if !self.en(m) {
             return;
         }
@@ -240,14 +241,15 @@ impl Mssp {
                     m[self.con2] &= !8;
                     self.sspif.set_in(m);
                     ev.push(t);
-                    self.read_idx = Some(i2c_log.len());
+                    self.read_idx = Some(i2c_log.total());
                     i2c_log.push((self.num, t, I2cEv::Read(b, true)));
                 }
                 Step::AckDone(nack) => {
                     if let Some(i) = self.read_idx.take()
-                        && let I2cEv::Read(b, _) = i2c_log[i].2
+                        && let Some(e) = i2c_log.get_abs_mut(i)
+                        && let I2cEv::Read(b, _) = e.2
                     {
-                        i2c_log[i].2 = I2cEv::Read(b, !nack);
+                        e.2 = I2cEv::Read(b, !nack);
                     }
                     m[self.con2] &= !0x10;
                     self.sspif.set_in(m);
@@ -263,7 +265,7 @@ impl Mssp {
     }
 
     /// A byte the host writes: the address after a Start, otherwise data. Returns the client's acknowledge.
-    fn client_write(&mut self, b: u8, t: u64, log: &mut Vec<(u8, u64, I2cEv)>) -> bool {
+    fn client_write(&mut self, b: u8, t: u64, log: &mut Log<(u8, u64, I2cEv)>) -> bool {
         if self.expect_addr {
             self.expect_addr = false;
             self.sel = self.i2c.iter().position(|c| c.address == b >> 1 && !c.absent).map(|i| (i, b & 1 != 0));

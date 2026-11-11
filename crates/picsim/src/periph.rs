@@ -20,6 +20,7 @@
 //!   is the one after a one-cycle writing instruction.
 //! * `[A3]` Timer0 keeps its count when T0EN is cleared; Timer1/Timer2 keep it when ON is cleared.
 
+use crate::log::Log;
 use crate::mem::{DataMem, Special};
 use devdesc::Device;
 use std::collections::{BTreeSet, VecDeque};
@@ -457,11 +458,11 @@ pub struct Periph {
     stall: u64,
     fvr: Option<usize>,
     /// Bytes the transmitters started to send: (EUSART number 1-based, cycle it started, byte).
-    pub tx: Vec<(u8, u64, u8)>,
+    pub tx: Log<(u8, u64, u8)>,
     /// Bytes the SPI hosts sent: (SPI number, cycle the byte started, byte).
-    pub spi_tx: Vec<(u8, u64, u8)>,
+    pub spi_tx: Log<(u8, u64, u8)>,
     /// What the I2C hosts put on the bus: (MSSP number, cycle, event).
-    pub i2c_log: Vec<(u8, u64, I2cEv)>,
+    pub i2c_log: Log<(u8, u64, I2cEv)>,
     pub notes: BTreeSet<String>,
     ccps: Vec<Ccp>,
     pwms: Vec<Pwm>,
@@ -512,7 +513,7 @@ pub struct Periph {
     sched: Vec<Sched>,
     /// Changes of the pins driven by a peripheral through RxyPPS: (time in Fosc ticks = 4 * cycle + quarter,
     /// port letter, pin, level). Only pins whose TRIS bit is clear at the time of the change are logged.
-    pub pin_log: Vec<(u64, u8, u8, bool)>,
+    pub pin_log: Log<(u64, u8, u8, bool)>,
     /// Cycle of the latest flag set by `sync` since the core last looked (`take_event`).
     event: Option<u64>,
     ioc: Ioc,
@@ -611,7 +612,7 @@ impl Periph {
 
     /// Find the timers the part has and mark their registers as hooked in `m`.
     pub fn bind(dev: &Device, m: &mut DataMem) -> Periph {
-        let mut p = Periph { ports: Vec::new(), drive: Default::default(), t0: None, t1: Vec::new(), t2: Vec::new(), uarts: Vec::new(), quarts: Vec::new(), spis: Vec::new(), mssps: Vec::new(), i2cqs: Vec::new(), adc: None, nvm: None, nvmq: None, stall: 0, fvr: None, tx: Vec::new(), spi_tx: Vec::new(), i2c_log: Vec::new(), notes: BTreeSet::new(), ccps: Vec::new(), pwms: Vec::new(), cwg: None, cmps: Vec::new(), cmout: None, clcs: Vec::new(), clcin: Vec::new(), clcdata: None, in_clc: false, clc_scan: 0, crc: None, wdt: None, reset_req: None, sleeping: false, sleep_at: 0, fosc_off: false, wdt_wake: false, analog: Vec::new(), ccptmrs: None, ppsout: Vec::new(), pps_by_port: Vec::new(), sig_src: 0, i2c_pps: Vec::new(), board: Board::default(), pullup: Vec::new(), forced: Vec::new(), sig: 0, sig_log: Vec::new(), sched: Vec::new(), pin_log: Vec::new(), event: None, ioc: Ioc::default(), sb: SyncBufs::default(), due: 0, owed: None };
+        let mut p = Periph { ports: Vec::new(), drive: Default::default(), t0: None, t1: Vec::new(), t2: Vec::new(), uarts: Vec::new(), quarts: Vec::new(), spis: Vec::new(), mssps: Vec::new(), i2cqs: Vec::new(), adc: None, nvm: None, nvmq: None, stall: 0, fvr: None, tx: Log::new(), spi_tx: Log::new(), i2c_log: Log::new(), notes: BTreeSet::new(), ccps: Vec::new(), pwms: Vec::new(), cwg: None, cmps: Vec::new(), cmout: None, clcs: Vec::new(), clcin: Vec::new(), clcdata: None, in_clc: false, clc_scan: 0, crc: None, wdt: None, reset_req: None, sleeping: false, sleep_at: 0, fosc_off: false, wdt_wake: false, analog: Vec::new(), ccptmrs: None, ppsout: Vec::new(), pps_by_port: Vec::new(), sig_src: 0, i2c_pps: Vec::new(), board: Board::default(), pullup: Vec::new(), forced: Vec::new(), sig: 0, sig_log: Vec::new(), sched: Vec::new(), pin_log: Log::new(), event: None, ioc: Ioc::default(), sb: SyncBufs::default(), due: 0, owed: None };
         let mut hook = |a: usize, k: u8| m.special[a] = Special::Hook(k);
         if let (Some(l), Some(h), Some(c0), Some(c1), Some(flag)) =
             (addr(dev, "TMR0L"), addr(dev, "TMR0H"), addr(dev, "T0CON0"), addr(dev, "T0CON1"), Flag::find(dev, "TMR0IF"))
@@ -1065,7 +1066,7 @@ impl Periph {
     fn check_skip(&self, m: &DataMem, now: u64) {
         let (mut p, mut mc) = (self.clone(), m.clone());
         p.catch_up(&mut mc);
-        let before = (mc.mem.clone(), p.pin_log.len(), p.tx.len(), p.spi_tx.len(), p.i2c_log.len(), p.sched.len());
+        let before = (mc.mem.clone(), p.pin_log.total(), p.tx.total(), p.spi_tx.total(), p.i2c_log.total(), p.sched.len());
         p.event = None;
         p.sync(&mut mc, now);
         let live = |a: usize| matches!(mc.special[a], Special::Hook(k) if !Periph::is_stored(k));
@@ -1074,7 +1075,7 @@ impl Periph {
                 panic!("lazy sync: skipping to cycle {now} (due {}) missed a change of {} ({a:#05X}): {:#04X} -> {:#04X}", self.due, mc.names[a].as_deref().unwrap_or("?"), before.0[a], mc.mem[a]);
             }
         }
-        let after = (p.pin_log.len(), p.tx.len(), p.spi_tx.len(), p.i2c_log.len(), p.sched.len());
+        let after = (p.pin_log.total(), p.tx.total(), p.spi_tx.total(), p.i2c_log.total(), p.sched.len());
         assert_eq!((before.1, before.2, before.3, before.4, before.5), after, "lazy sync: skipping to cycle {now} (due {}) missed a pin, serial or schedule change", self.due);
         assert!(p.event.is_none() && p.reset_req == self.reset_req, "lazy sync: skipping to cycle {now} (due {}) missed a flag event or a reset", self.due);
     }
@@ -1890,6 +1891,11 @@ impl Periph {
             }
             Clk::Other => Edges { n: 0, how: How::Ratio(0) },
         }
+    }
+
+    /// The part is in Sleep with Fosc and Fosc/4 off (not Idle): only the models of `sync_asleep` move.
+    pub fn fosc_stopped(&self) -> bool {
+        self.fosc_off
     }
 
     /// Some timer counts in this Sleep (a pin, LFINTOSC or SOSC clock).
