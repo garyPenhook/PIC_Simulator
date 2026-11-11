@@ -3,6 +3,7 @@
 pub mod config;
 pub mod debuginfo;
 pub mod disasm;
+pub mod drive;
 pub mod hex;
 pub mod lines;
 pub mod machine;

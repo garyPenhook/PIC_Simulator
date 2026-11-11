@@ -271,7 +271,7 @@ pub struct Pic16 {
     ports: Vec<Port16>,
     port_reg: Vec<Option<(u8, bool)>>,
     /// What the outside world drives on the input pins: (from cycle, port index, pin mask, levels), stable-sorted by cycle.
-    drive: Vec<(u64, usize, u8, u8)>,
+    drive: crate::drive::Drive,
     /// PPSLOCK, how far the 55h, AAh sequence has got (0 none, 1 after 55h, 2 after AAh), and which addresses are PPS
     /// selection registers (xxxPPS, RxyPPS): writes to them are ignored while PPSLOCKED is set.
     pps_lock: Option<usize>,
@@ -455,7 +455,7 @@ impl Pic16 {
             ones: vec![0; MEM],
             ports: Vec::new(),
             port_reg: vec![None; MEM],
-            drive: Vec::new(),
+            drive: Default::default(),
             pps_lock: None,
             pps_seq: 0,
             pps_reg: vec![false; MEM],
@@ -1160,12 +1160,7 @@ impl Pic16 {
     /// `port_levels` with the outside world as it was driving at cycle `t` (the registers are the current ones).
     fn port_levels_at(&self, i: usize, t: u64) -> u8 {
         let p = &self.ports[i];
-        let mut ext = 0u8;
-        for &(at, pi, mask, val) in &self.drive {
-            if at <= t && pi == i {
-                ext = ext & !mask | val & mask;
-            }
-        }
+        let ext = self.drive.level(i, t);
         // the MCLR pin has no analog function
         let m = self.mclr_pin.filter(|&(k, _)| k == i).map_or(0, |(_, m)| m);
         let tris = self.tris_of(i);
@@ -1362,7 +1357,7 @@ impl Pic16 {
         if self.ioc.is_empty() && self.int_pin.is_none() {
             return;
         }
-        let mut times: Vec<u64> = self.drive.iter().map(|d| d.0).filter(|&t| t > from && t <= now).collect();
+        let mut times: Vec<u64> = self.drive.times(from, now).collect();
         times.sort_unstable();
         times.dedup();
         // With MCLRE = 1 or LVP = 1 the MCLR pin has no port function and no IOC (Register 17.7.1 Important)
@@ -1439,8 +1434,7 @@ impl Pic16 {
     pub fn pin_feed(&mut self, letter: u8, at: u64, mask: u8, val: u8) -> bool {
         match self.ports.iter().position(|p| p.letter == letter) {
             Some(i) => {
-                self.drive.push((at, i, mask, val));
-                self.drive.sort_by_key(|d| d.0);
+                self.drive.push(at, i, mask, val);
                 true
             }
             None => false,
@@ -2072,7 +2066,7 @@ impl Pic16 {
     /// Changes of the level of the pin the input selection register `reg` selects that the stimulus makes in cycles `from+1 ..= to`:
     /// (cycle, new level). A pin change made by the program or a peripheral is not seen (`[A125]`).
     fn pin_changes(&self, reg: usize, from: u64, to: u64) -> Vec<(u64, bool)> {
-        let mut times: Vec<u64> = self.drive.iter().map(|d| d.0).filter(|&t| t > from && t <= to).collect();
+        let mut times: Vec<u64> = self.drive.times(from, to).collect();
         times.sort_unstable();
         times.dedup();
         times
@@ -2669,7 +2663,7 @@ impl Pic16 {
     /// Asleep with nothing that can wake the part (no watchdog or peripheral is modelled yet).
     pub fn sleep_dead(&self) -> bool {
         // a pin the stimulus has yet to change can raise an IOC or INT flag
-        self.sleeping && !self.enabled_flag_any() && !self.drive.iter().any(|d| d.0 > self.cycles) && !self.wdt_counts_in_sleep()
+        self.sleeping && !self.enabled_flag_any() && self.drive.next_after(self.cycles).is_none() && !self.wdt_counts_in_sleep()
     }
 
     /// The watchdog is on in Sleep (WDTE = 3, or 1 with SEN): it will wake the part.
@@ -2747,7 +2741,7 @@ impl Pic16 {
         }
         let mut due = u64::MAX;
         let mut at = |c: u64| due = due.min(c.max(soon));
-        if let Some(t) = self.drive.iter().map(|d| d.0).filter(|&t| t > now).min() {
+        if let Some(t) = self.drive.next_after(now) {
             at(t);
         }
         if let Some(d) = self.nvm.as_ref().and_then(Nvm16::deadline) {
@@ -2888,7 +2882,7 @@ impl Pic16 {
                 if let Some(d) = self.wdt_sleep_deadline()
                     && !self.uarts.iter().any(|u| !u.rx_in.is_empty() || u.rx_cur.is_some())
                 {
-                    let next = self.drive.iter().map(|x| x.0).filter(|&t| t > self.cycles).min().unwrap_or(u64::MAX);
+                    let next = self.drive.next_after(self.cycles).unwrap_or(u64::MAX);
                     // a data EEPROM write ends on its own timer and raises NVMIF: the jump stops there too
                     let nvm = self.nvm.as_ref().and_then(Nvm16::deadline).unwrap_or(u64::MAX);
                     adv = d.min(next).min(nvm).saturating_sub(self.cycles).max(1);
@@ -3375,7 +3369,7 @@ impl clb::Ctx for Pic16 {
     }
 
     fn pin_events(&self, from: u64, to: u64) -> Vec<u64> {
-        let mut v: Vec<u64> = self.drive.iter().map(|d| d.0).filter(|&t| t > from && t <= to).collect();
+        let mut v: Vec<u64> = self.drive.times(from, to).collect();
         v.dedup();
         v
     }

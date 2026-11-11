@@ -441,7 +441,7 @@ struct I2cPps {
 pub struct Periph {
     ports: Vec<Port>,
     /// What the outside world drives on the input pins: (from cycle, port index, pin mask, levels), stable-sorted by cycle.
-    drive: Vec<(u64, usize, u8, u8)>,
+    drive: crate::drive::Drive,
     t0: Option<Timer0>,
     t1: Vec<Timer1>,
     t2: Vec<Timer2>,
@@ -611,7 +611,7 @@ impl Periph {
 
     /// Find the timers the part has and mark their registers as hooked in `m`.
     pub fn bind(dev: &Device, m: &mut DataMem) -> Periph {
-        let mut p = Periph { ports: Vec::new(), drive: Vec::new(), t0: None, t1: Vec::new(), t2: Vec::new(), uarts: Vec::new(), quarts: Vec::new(), spis: Vec::new(), mssps: Vec::new(), i2cqs: Vec::new(), adc: None, nvm: None, nvmq: None, stall: 0, fvr: None, tx: Vec::new(), spi_tx: Vec::new(), i2c_log: Vec::new(), notes: BTreeSet::new(), ccps: Vec::new(), pwms: Vec::new(), cwg: None, cmps: Vec::new(), cmout: None, clcs: Vec::new(), clcin: Vec::new(), clcdata: None, in_clc: false, clc_scan: 0, crc: None, wdt: None, reset_req: None, sleeping: false, sleep_at: 0, fosc_off: false, wdt_wake: false, analog: Vec::new(), ccptmrs: None, ppsout: Vec::new(), pps_by_port: Vec::new(), sig_src: 0, i2c_pps: Vec::new(), board: Board::default(), pullup: Vec::new(), forced: Vec::new(), sig: 0, sig_log: Vec::new(), sched: Vec::new(), pin_log: Vec::new(), event: None, ioc: Ioc::default(), sb: SyncBufs::default(), due: 0, owed: None };
+        let mut p = Periph { ports: Vec::new(), drive: Default::default(), t0: None, t1: Vec::new(), t2: Vec::new(), uarts: Vec::new(), quarts: Vec::new(), spis: Vec::new(), mssps: Vec::new(), i2cqs: Vec::new(), adc: None, nvm: None, nvmq: None, stall: 0, fvr: None, tx: Vec::new(), spi_tx: Vec::new(), i2c_log: Vec::new(), notes: BTreeSet::new(), ccps: Vec::new(), pwms: Vec::new(), cwg: None, cmps: Vec::new(), cmout: None, clcs: Vec::new(), clcin: Vec::new(), clcdata: None, in_clc: false, clc_scan: 0, crc: None, wdt: None, reset_req: None, sleeping: false, sleep_at: 0, fosc_off: false, wdt_wake: false, analog: Vec::new(), ccptmrs: None, ppsout: Vec::new(), pps_by_port: Vec::new(), sig_src: 0, i2c_pps: Vec::new(), board: Board::default(), pullup: Vec::new(), forced: Vec::new(), sig: 0, sig_log: Vec::new(), sched: Vec::new(), pin_log: Vec::new(), event: None, ioc: Ioc::default(), sb: SyncBufs::default(), due: 0, owed: None };
         let mut hook = |a: usize, k: u8| m.special[a] = Special::Hook(k);
         if let (Some(l), Some(h), Some(c0), Some(c1), Some(flag)) =
             (addr(dev, "TMR0L"), addr(dev, "TMR0H"), addr(dev, "T0CON0"), addr(dev, "T0CON1"), Flag::find(dev, "TMR0IF"))
@@ -920,8 +920,8 @@ impl Periph {
                 if !c.en(m) || !(3..=7).contains(&c.mode(m)) || !self.t1.iter().any(|t| t.n == ccp::timer_of(self.ccptmrs, m, c.n, false)) || m.mem[c.cap] & 15 != 0 {
                     continue;
                 }
-                for &(at, ..) in &self.drive {
-                    if at > c.scan && at <= now && best.is_none_or(|b| (at, i) < b) && self.pps_pin(m, reg, at) != self.pps_pin(m, reg, at - 1) {
+                for at in self.drive.times(c.scan, now) {
+                    if best.is_none_or(|b| (at, i) < b) && self.pps_pin(m, reg, at) != self.pps_pin(m, reg, at - 1) {
                         best = Some((at, i));
                         break;
                     }
@@ -1087,7 +1087,7 @@ impl Periph {
         }
         let from = self.ioc.scan;
         self.ioc.scan = now;
-        let mut times: Vec<u64> = self.drive.iter().map(|d| d.0).filter(|&t| t > from && t <= now).collect();
+        let mut times: Vec<u64> = self.drive.times(from, now).collect();
         times.sort_unstable();
         times.dedup();
         for t in times {
@@ -1125,7 +1125,7 @@ impl Periph {
 
     /// The next time after `after` that the stimulus changes a pin.
     pub fn next_drive(&self, after: u64) -> Option<u64> {
-        self.drive.iter().map(|d| d.0).filter(|&t| t > after).min()
+        self.drive.next_after(after)
     }
 
     /// Capture event of CCP `i` at the input edge on cycle `e` (the capture timer is already at cycle `e`).
@@ -1594,7 +1594,7 @@ impl Periph {
             self.clc_scan = now;
             return;
         }
-        let mut at: Vec<u64> = self.drive.iter().map(|e| e.0).filter(|&t| t > from && t < now).collect();
+        let mut at: Vec<u64> = self.drive.times(from, now.saturating_sub(1)).collect();
         at.dedup();
         for t in at {
             self.clc_eval(m, 4 * t);
@@ -1605,7 +1605,7 @@ impl Periph {
     /// Voltage of a comparator input source at cycle `now`.
     fn cmp_volts(&self, m: &DataMem, src: cmp::Src, now: u64) -> f64 {
         match src {
-            cmp::Src::Pin(l, b) => self.analog.iter().filter(|e| e.0 <= now && e.1 == l && e.2 == b).last().map_or(0.0, |e| e.3),
+            cmp::Src::Pin(l, b) => self.analog[..self.analog.partition_point(|e| e.0 <= now)].iter().rev().find(|e| e.1 == l && e.2 == b).map_or(0.0, |e| e.3),
             cmp::Src::Fvr => self.fvr.map_or(0.0, |a| cmp::fvr_volts(m.mem[a])),
             _ => 0.0,
         }
@@ -1660,7 +1660,8 @@ impl Periph {
     fn cmp_scan(&mut self, m: &mut DataMem, now: u64) {
         for i in 0..self.cmps.len() {
             let from = self.cmps[i].scan;
-            let mut at: Vec<u64> = self.analog.iter().map(|e| e.0).filter(|&t| t > from && t <= now).collect();
+            let (a, b) = (self.analog.partition_point(|e| e.0 <= from), self.analog.partition_point(|e| e.0 <= now));
+            let mut at: Vec<u64> = self.analog[a..b.max(a)].iter().map(|e| e.0).collect();
             at.dedup();
             for t in at {
                 self.cmp_update(m, i, t);
@@ -1674,8 +1675,7 @@ impl Periph {
         if !self.ports.iter().any(|p| p.letter == letter) {
             return false;
         }
-        self.analog.push((at, letter, bit, volts));
-        self.analog.sort_by_key(|e| e.0);
+        crate::drive::insert_sorted(&mut self.analog, (at, letter, bit, volts), |e| e.0);
         true
     }
 
@@ -1876,7 +1876,7 @@ impl Periph {
             Clk::Pin(inv) => {
                 let mut l: Vec<u64> = Vec::new();
                 if let Some(reg) = cki {
-                    let mut times: Vec<u64> = self.drive.iter().map(|d| d.0).filter(|&t| t > from && t <= to).collect();
+                    let mut times: Vec<u64> = self.drive.times(from, to).collect();
                     times.sort_unstable();
                     times.dedup();
                     for t in times {
@@ -2607,12 +2607,7 @@ impl Periph {
     /// drives (0 until a stimulus says otherwise `[A16]`: no pull-up is modelled), and 0 when ANSELx makes it analog.
     fn port_levels(&self, i: usize, m: &DataMem, now: u64) -> u8 {
         let p = &self.ports[i];
-        let mut ext = 0u8;
-        for &(at, pi, mask, val) in &self.drive {
-            if at <= now && pi == i {
-                ext = ext & !mask | val & mask;
-            }
-        }
+        let ext = self.drive.level(i, now);
         let tris = m.mem[p.tris];
         let ana = p.ansel.map_or(0, |a| m.mem[a]);
         let mut v = m.mem[p.lat] & !tris | ext & tris & !ana;
@@ -2752,7 +2747,7 @@ impl Periph {
         let counts = |ff: bool, run: bool, b: bool| !ge || if gspm { run && if gtm { ff } else { b } } else if gtm { ff } else { b };
         times.clear();
         match src {
-            GSrc::Pin(_) => times.extend(self.drive.iter().map(|d| d.0).filter(|&c| c > from && c <= to)),
+            GSrc::Pin(_) => times.extend(self.drive.times(from, to)),
             GSrc::Sig(code) => times.extend(self.sig_log.iter().filter(|e| e.1 == code).map(|e| e.0.div_ceil(4)).filter(|&c| c > from && c <= to)),
             GSrc::None => {}
         }
@@ -2805,8 +2800,7 @@ impl Periph {
     pub fn pin_feed(&mut self, letter: u8, at: u64, mask: u8, val: u8) -> bool {
         match self.ports.iter().position(|p| p.letter == letter) {
             Some(i) => {
-                self.drive.push((at, i, mask, val));
-                self.drive.sort_by_key(|d| d.0);
+                self.drive.push(at, i, mask, val);
                 true
             }
             None => false,
