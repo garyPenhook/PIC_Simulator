@@ -263,7 +263,13 @@ impl Pic18 {
     /// Decode the configuration words and set the SFR reset values that depend on them. Called on every load, and
     /// a reset builds a fresh core and loads again, so it runs after every power-on reset.
     fn apply_config(&mut self) {
-        self.cfg = crate::config::Config::decode(&self.cfg_regs, &self.aux);
+        self.cfg.redecode(&self.cfg_regs, &self.aux);
+        self.apply_decoded_config();
+    }
+
+    /// `apply_config` without the decoding: the configuration words do not change across a warm reset, and
+    /// decoding them allocates a string per field (REVIEW-2026-11-11 P2).
+    fn apply_decoded_config(&mut self) {
         for (name, v) in crate::config::reset_sfrs(&self.cfg, self.vic) {
             if let Some(&a) = self.cfg_sfrs.get(name) {
                 self.m.mem[a] = v & self.m.implemented[a];
@@ -1426,7 +1432,7 @@ impl Pic18 {
         np.init_mem(&mut self.m);
         let old = std::mem::replace(&mut self.p, np);
         self.p.carry_over(old);
-        self.apply_config(); // the new peripherals need the watchdog configuration
+        self.apply_decoded_config(); // the new peripherals need the watchdog configuration
         self.p.ioc_rebase(self.cycles);
     }
 

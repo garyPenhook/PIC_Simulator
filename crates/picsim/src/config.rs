@@ -26,6 +26,28 @@ impl Config {
         Config { fields }
     }
 
+    /// `decode` into an existing `Config`, reusing its field names: no allocation once every field is present
+    /// (a warm reset decodes again; REVIEW-2026-11-11 P2). Fields not in `regs` are removed.
+    pub fn redecode(&mut self, regs: &[ConfigRegister], image: &BTreeMap<u32, u8>) {
+        let mut n = 0;
+        for r in regs {
+            let v = image.get(&r.addr).map_or(r.default, |&b| u32::from(b));
+            for f in &r.fields {
+                let x = (v >> f.pos) & ((1u32 << f.width) - 1);
+                match self.fields.get_mut(&f.name) {
+                    Some(e) => *e = x,
+                    None => {
+                        self.fields.insert(f.name.clone(), x);
+                    }
+                }
+                n += 1;
+            }
+        }
+        if self.fields.len() != n {
+            *self = Config::decode(regs, image); // a name repeated or a stale field: start again
+        }
+    }
+
     /// The same for a part whose configuration words are 14-bit words at word addresses (PIC16 enhanced mid-range):
     /// the hex file holds word `a` in the bytes at `2a` (low) and `2a + 1` (high); a word the image does not
     /// contain keeps the unprogrammed `default`.
@@ -100,6 +122,30 @@ mod tests {
 
     fn cfg(pairs: &[(&str, u32)]) -> Config {
         Config { fields: pairs.iter().map(|(k, v)| (k.to_string(), *v)).collect() }
+    }
+
+    #[test]
+    fn redecode_matches_decode() {
+        use devdesc::{ConfigField, ConfigRegister};
+        let f = |name: &str, pos, width| ConfigField { name: name.into(), pos, width, settings: vec![] };
+        let regs = vec![
+            ConfigRegister { name: "C1".into(), addr: 0x300000, default: 0xFF, implemented: 0xFF, fields: vec![f("A", 0, 3), f("B", 4, 2)] },
+            ConfigRegister { name: "C2".into(), addr: 0x300001, default: 0x0F, implemented: 0xFF, fields: vec![f("C", 0, 8)] },
+        ];
+        let mut img = BTreeMap::new();
+        let mut c = Config::default();
+        for v in [None, Some(0x25u8), Some(0x00), Some(0xFF)] {
+            match v {
+                Some(b) => img.insert(0x300000, b),
+                None => img.remove(&0x300000),
+            };
+            c.redecode(&regs, &img);
+            assert_eq!(c.fields, Config::decode(&regs, &img).fields, "{v:?}");
+        }
+        // a stale field from other registers is dropped
+        c.fields.insert("OLD".into(), 1);
+        c.redecode(&regs, &img);
+        assert_eq!(c.fields, Config::decode(&regs, &img).fields);
     }
 
     #[test]
