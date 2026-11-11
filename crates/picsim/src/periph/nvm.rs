@@ -11,8 +11,8 @@
 //! * Byte erase and write time MEM24: 10 ms typical, 11 ms maximum (39.3.5 p.697).
 //!
 //! Assumptions `[A#]`, to be measured on hardware:
-//! * `[A30]` The write takes the typical 10 ms. The model does not know Fosc, so the time is `write_cycles`
-//!   instruction cycles (default 10 000, i.e. Fosc = 4 MHz); set it for another clock.
+//! * `[A30]` The write takes the typical 10 ms, counted in instruction cycles at the board's Fosc when the write starts
+//!   (`fosc_mhz`; a clock change during the write does not change its end).
 //! * `[A31]` The unlock sequence is tracked as 55h then AAh written to NVMCON2 and the next NVMCON1 write; instructions
 //!   between those writes are not checked. Any other NVMCON2 value, or an NVMCON1 write, restarts it.
 //! * `[A32]` Not modelled: write protection (WRTD/WRTn), User ID and Configuration space, NVMERR after a Reset during
@@ -28,7 +28,7 @@
 //! * Invalid address (beyond program memory) for SECER, SECWR or WR: the bit is cleared without effect and NVMERR is
 //!   set (12.1.3.1 p.149, 12.1.4 p.151).
 //! * Times, typical (39.3.5 p.697): word write 50 us (MEM37), sector write 6 ms (MEM35), sector erase 10 ms (MEM36).
-//!   `[A37]` the sector read takes no time (the data sheet gives none). Times scale with `write_cycles` (A30).
+//!   `[A37]` the sector read takes no time (the data sheet gives none). Times are converted at Fosc as in A30.
 
 use super::flash::Flash as Pfm;
 use super::{Flag, addr};
@@ -66,7 +66,8 @@ pub struct Nvm {
     datah: usize,
     /// A write in progress: (completion cycle, byte offset, data).
     op: Option<(u64, usize, u8)>,
-    pub write_cycles: u64,
+    /// Fosc in MHz, set by `Periph` before each write (operation times are taken at their start).
+    pub fosc_mhz: f64,
 }
 
 impl Nvm {
@@ -91,7 +92,7 @@ impl Nvm {
             pfm: Pfm::find(dev),
             datah: addr(dev, "NVMDATH")?,
             op: None,
-            write_cycles: 10_000,
+            fosc_mhz: 64.0,
         })
     }
 
@@ -123,9 +124,9 @@ impl Nvm {
         self.pfm.as_ref().map(|f| f.hold)
     }
 
-    /// Scale a time in microseconds to instruction cycles (`write_cycles` is the 10 ms of A30).
+    /// A time in microseconds as instruction cycles at the current Fosc (Fosc/4 per cycle).
     fn us(&self, t: u64) -> u64 {
-        t * self.write_cycles / 10_000
+        (t as f64 * self.fosc_mhz / 4.0).round() as u64
     }
 
     /// A write to NVMCON1 or NVMCON2. Returns the cycles the CPU stalls (a program flash operation).
@@ -165,7 +166,7 @@ impl Nvm {
         let bit = [WR, SECWR, SECER, SECRD].into_iter().find(|b| v & b != 0 && armed == Some(*b));
         if bit == Some(WR) && in_dfm {
             if enabled && self.op.is_none() {
-                self.op = Some((now + self.write_cycles, self.offset(m).unwrap(), m.mem[self.datl]));
+                self.op = Some((now + self.us(10_000), self.offset(m).unwrap(), m.mem[self.datl]));
                 m.mem[self.con1] |= WR;
             }
             return 0;

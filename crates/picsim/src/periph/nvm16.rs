@@ -30,8 +30,8 @@
 //!   p.161-162). A latch not loaded stays 3FFFh, which leaves its word as it is. Program memory programs to 0 and erases to 1.
 //!
 //! Assumptions `[A#]`, to be measured on hardware:
-//! * `[A115]` Times in instruction cycles at 1 000 cycles per millisecond (Fosc = 4 MHz, as `nvm.rs` `[A30]`; the models do not
-//!   know Fosc): 4 000 for the 183xx (the typical value), 11 000 for the 171xx (the maximum). `write_cycles` changes it.
+//! * `[A115]` The data EEPROM write takes 4 ms on the 183xx (the typical value) and 11 ms on the 171xx (the maximum), counted in
+//!   instruction cycles at the board's Fosc when the write starts (`fosc_mhz`, as `nvm.rs` `[A30]`).
 //!   The 171xx stall applies the general sentence of 15.2.2.2 to the DFM; the DFM text itself does not say.
 //! * `[A116]` The unlock is tracked as 55h then AAh written to NVMCON2 and the next NVMCON1 write; instructions between those
 //!   writes are not checked, any other NVMCON2 value or an NVMCON1 write restarts it. A WR written without it, or with
@@ -41,8 +41,8 @@
 //! * `[A118]` Not modelled: program flash, User ID, configuration and device ID access (a read of them leaves NVMDAT alone
 //!   on the 171xx, a write is ignored; both with a note), NVMIF for a write blocked by WRTD (the data sheet says only that WR is cleared and the write does not happen, 15.2.2.4 p.172; the model sets WRERR as 15.2.2.5 says and no flag), write protection other than WRTD, NVMERR-like errata behaviour
 //!   (WRERR set again by every later Reset until a write succeeds: DS80000666H 4.2).
-//! * `[A119]` Flash row erase and row write take 2 000 cycles each (2 ms typical for the erase, Figure 15-3 p.160; the row write
-//!   time is taken as the same; `flash_cycles`), the CPU stalls for that time, and the array changes at the start of the
+//! * `[A119]` Flash row erase and row write take 2 ms each (2 ms typical for the erase, Figure 15-3 p.160; the row write
+//!   time is taken as the same; converted at Fosc as in A115), the CPU stalls for that time, and the array changes at the start of the
 //!   stall (a Reset inside the stall finds the operation done). A latch load (LWLO = 1) takes no time and sets no NVMIF. An erase
 //!   does not clear the latches (15.1.2.3 p.159; the Important box on p.162 says every write or erase does; the library loads the
 //!   latches after the erase, so both read the same). A 0 -> 1 change in a row write ANDs with what is there, with a note.
@@ -81,15 +81,20 @@ pub(crate) struct Nvm16 {
     datah: Option<usize>,
     /// A write in progress: (completion cycle, byte offset, data).
     op: Option<(u64, usize, u8)>,
-    pub write_cycles: u64,
     /// The 32 program flash write latches (14 bits each, 3FFFh when blank).
     latch: [u16; 32],
     /// A flash erase or write ended: NVMIF is to be raised (taken by `sync`).
     done: bool,
-    pub flash_cycles: u64,
+    /// Fosc in MHz, set by the core before each NVMCON1 write (operation times are taken at their start).
+    pub fosc_mhz: f64,
 }
 
 impl Nvm16 {
+    /// A time in microseconds as instruction cycles at the current Fosc (Fosc/4 per cycle).
+    fn us(&self, t: u64) -> u64 {
+        (t as f64 * self.fosc_mhz / 4.0).round() as u64
+    }
+
     /// The model of a part with a data EEPROM and the NVM registers; `f183` for the PIC16F183xx layout.
     pub fn find(dev: &Device, f183: bool) -> Option<Nvm16> {
         let r = &dev.memory.eeprom;
@@ -105,10 +110,9 @@ impl Nvm16 {
             f183,
             datah: addr(dev, "NVMDATH"),
             op: None,
-            write_cycles: if f183 { 4_000 } else { 11_000 },
             latch: [0x3FFF; 32],
             done: false,
-            flash_cycles: 2_000,
+            fosc_mhz: 64.0,
         })
     }
 
@@ -215,7 +219,7 @@ impl Nvm16 {
                 for i in b..b + 32 {
                     (prog[2 * i], prog[2 * i + 1]) = (0xFF, 0x3F); // 3FFFh
                 }
-                stall = self.flash_cycles;
+                stall = self.us(2_000);
             } else {
                 self.latch[w & 31] = u16::from(mem[self.datl]) | u16::from(mem[h] & 0x3F) << 8;
                 if v & LWLO == 0 {
@@ -230,7 +234,7 @@ impl Nvm16 {
                         prog[2 * (b + i) + 1] = (n >> 8) as u8;
                     }
                     self.latch = [0x3FFF; 32];
-                    stall = self.flash_cycles;
+                    stall = self.us(2_000);
                 }
             }
             self.done |= stall > 0;
@@ -241,10 +245,11 @@ impl Nvm16 {
             match (region.then(|| self.offset(mem)).flatten(), wrtd) {
                 (Some(_), true) => new |= WRERR,
                 (Some(o), false) => {
-                    self.op = Some((now + self.write_cycles, o, mem[self.datl]));
+                    let t = self.us(if self.f183 { 4_000 } else { 11_000 });
+                    self.op = Some((now + t, o, mem[self.datl]));
                     new |= WR;
                     mem[self.con1] = new;
-                    return if self.f183 { 0 } else { self.write_cycles };
+                    return if self.f183 { 0 } else { t };
                 }
                 (None, _) => {
                     notes.insert("NVM writes to program flash, User ID and configuration space are not modelled; the operation is ignored".into());

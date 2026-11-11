@@ -2428,12 +2428,16 @@ impl Periph {
     pub fn write(&mut self, k: u8, v: u8, now: u64, m: &mut DataMem, prog: &mut [u8]) {
         match k {
             NVMQ0..=NVMQ_LAST => {
+                let f = self.fosc_hz() as f64 / 1e6;
                 let n = self.nvmq.as_mut().unwrap();
+                n.fosc_mhz = f;
                 self.stall += n.write(k - NVMQ0, v, now, m, prog, &mut self.notes);
                 self.flash_event(now);
             }
             NVM0..=NVM_LAST => {
+                let f = self.fosc_hz() as f64 / 1e6;
                 let n = self.nvm.as_mut().unwrap();
+                n.fosc_mhz = f;
                 self.stall += n.write(k - NVM0, v, now, m, prog, &mut self.notes);
                 self.flash_event(now);
             }

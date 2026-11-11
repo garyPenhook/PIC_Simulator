@@ -6,7 +6,9 @@ use std::path::Path;
 
 fn machine() -> Machine {
     let dev = Device::load(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../../devices/18F27Q10.toml")).unwrap();
-    Machine::new(dev).unwrap()
+    let mut m = Machine::new(dev).unwrap();
+    m.cpu.p.board.fosc_mhz = 4.0; // the cycle counts below are at Fosc = 4 MHz (1 000 instruction cycles per ms)
+    m
 }
 
 fn a(m: &Machine, n: &str) -> u32 {
@@ -86,4 +88,26 @@ fn invalid_address_sets_nvmerr() {
     unlock_wr(&mut m);
     assert_eq!(m.cpu.read(c1) & 0x10, 0);
     assert_eq!(m.cpu.read(c0) & 0x10, 0x10, "NVMERR");
+}
+
+/// The 10 ms write is counted at the board's Fosc (review finding B12): 160 000 instruction cycles at 64 MHz.
+#[test]
+fn write_time_scales_with_fosc() {
+    let mut m = machine();
+    m.cpu.p.board.fosc_mhz = 64.0;
+    let (d, c0, c1) = (a(&m, "NVMDATL"), a(&m, "NVMCON0"), a(&m, "NVMCON1"));
+    setadr(&mut m, 0x310002);
+    m.cpu.write(d, 0x33);
+    m.cpu.write(c0, 0x80);
+    let t0 = m.cpu.cycles;
+    unlock_wr(&mut m);
+    while m.cpu.cycles < t0 + 159_000 {
+        m.cpu.step();
+    }
+    assert_eq!(m.cpu.read(c1) & 0x10, 0x10, "still writing after 9.94 ms");
+    while m.cpu.cycles < t0 + 160_100 {
+        m.cpu.step();
+    }
+    assert_eq!(m.cpu.read(c1) & 0x10, 0, "done after 10 ms");
+    assert!(nvmif(&mut m));
 }

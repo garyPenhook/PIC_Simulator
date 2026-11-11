@@ -6,7 +6,9 @@ use std::path::Path;
 
 fn machine(part: &str) -> Machine {
     let dev = Device::load(&Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("../../devices/{part}.toml"))).unwrap();
-    Machine::new(dev).unwrap()
+    let mut m = Machine::new(dev).unwrap();
+    m.cpu.p.board.fosc_mhz = 4.0; // the cycle counts below are at Fosc = 4 MHz (1 000 instruction cycles per ms)
+    m
 }
 
 fn a(m: &Machine, n: &str) -> u32 {

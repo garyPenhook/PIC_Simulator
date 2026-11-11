@@ -1105,7 +1105,9 @@ impl Pic16 {
                     self.sync_nvm();
                     let (now, v) = (self.cycles, v & self.implemented[a]);
                     let wrtd = self.cfg.get("WRTD") == Some(0);
+                    let f = if self.board.fosc_mhz > 0.0 { self.board.fosc_mhz } else { 64.0 };
                     if let Some(n) = self.nvm.as_mut() {
+                        n.fosc_mhz = f;
                         self.extra += n.write(k, v, now, &mut self.mem, &mut self.prog, wrtd, &mut self.notes);
                     }
                     self.sync_nvm();

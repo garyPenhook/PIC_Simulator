@@ -37,6 +37,7 @@ fn machine(part: &str, prog: &[u16]) -> Machine16 {
     text += &hexrec(&[2, 0, 0, 4, 0, 1]);
     text += &hexrec(&[1, 0xE0, 0x0E, 0, 0x5A]);
     m.load_hex(&(text + ":00000001FF\n")).unwrap();
+    m.cpu.board.fosc_mhz = 4.0; // the cycle counts below are at Fosc = 4 MHz (1 000 instruction cycles per ms)
     m
 }
 

@@ -14,8 +14,8 @@
 //! * Byte erase and write time MEM24: 11 ms maximum, no typical value (48.3.5 p.895).
 //!
 //! Assumptions `[A#]`, to be measured on hardware:
-//! * `[A33]` The write takes `write_cycles` instruction cycles (default 10 000 = 10 ms at Fosc 4 MHz; the data sheet
-//!   gives only the 11 ms maximum, and the models do not know Fosc).
+//! * `[A33]` The write takes 10 ms (the data sheet gives only the 11 ms maximum), counted in instruction cycles at the
+//!   board's Fosc when the write starts (`fosc_mhz`).
 //! * `[A34]` Post increment adds 1 to NVMADR on the DFM, when the operation completes (reads at once). The data sheet
 //!   does not say when a write increments (its Example 10-11 sets GO n times without polling).
 //! * `[A35]` The unlock is tracked as 55h then AAh written to NVMLOCK and the next NVMCON0 write; instructions between
@@ -31,7 +31,7 @@
 //!   Reads set no NVMIF (Table 10-1).
 //! * A write or erase at an invalid address sets WRERR and the GO attempt fails (10.3 p.91, 10.3.4 p.92).
 //! * Times (48.3.6 p.896) are maxima only: page write 10 ms, page erase 11 ms, word write 75 us. `[A38]` the model
-//!   uses them as the durations, scaled with `write_cycles` (A33). `[A39]` a page read takes no time, and post
+//!   uses them as the durations, converted at Fosc as in A33. `[A39]` a page read takes no time, and post
 //!   increment adds 2 to NVMADR on the PFM (a word) when the operation ends.
 
 use super::flash::Flash as Pfm;
@@ -61,7 +61,8 @@ pub struct NvmQ {
     unlock: u8,
     /// A write in progress: (completion cycle, byte offset, data, post increment).
     op: Option<(u64, usize, u8, bool)>,
-    pub write_cycles: u64,
+    /// Fosc in MHz, set by `Periph` before each write (operation times are taken at their start).
+    pub fosc_mhz: f64,
     pfm: Option<Pfm>,
     datah: usize,
 }
@@ -86,7 +87,7 @@ impl NvmQ {
             eeprom: vec![0xFF; r.size as usize],
             unlock: 0,
             op: None,
-            write_cycles: 10_000,
+            fosc_mhz: 64.0,
             pfm: Pfm::find(dev),
             datah: addr(dev, "NVMDATH")?,
         })
@@ -126,9 +127,9 @@ impl NvmQ {
         self.pfm.as_ref().map(|f| f.hold)
     }
 
-    /// Scale a time in microseconds to instruction cycles (`write_cycles` is the 10 ms of A33).
+    /// A time in microseconds as instruction cycles at the current Fosc (Fosc/4 per cycle).
     fn us(&self, t: u64) -> u64 {
-        t * self.write_cycles / 10_000
+        (t as f64 * self.fosc_mhz / 4.0).round() as u64
     }
 
     fn post_increment_by(&self, m: &mut DataMem, n: u32) {
@@ -208,7 +209,7 @@ impl NvmQ {
                 }
                 if let Some(o) = dfm {
                     if cmd == 3 || cmd == 4 {
-                        self.op = Some((now + self.write_cycles, o, m.mem[self.datl], cmd == 4));
+                        self.op = Some((now + self.us(10_000), o, m.mem[self.datl], cmd == 4));
                         m.mem[self.con0] |= GO;
                     } else {
                         m.mem[self.con1] |= WRERR; // a page operation directed to a DFM area

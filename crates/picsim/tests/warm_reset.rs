@@ -40,7 +40,7 @@ fn eeprom_survives_a_warm_reset() {
     m.cpu.write(c2, 0x55);
     m.cpu.write(c2, 0xAA);
     m.cpu.write(c1, 0x10);
-    let t = m.cpu.cycles + 20_000;
+    let t = m.cpu.cycles + 200_000; // 10 ms at the default 64 MHz is 160 000 cycles
     while m.cpu.cycles < t {
         m.cpu.step();
     }

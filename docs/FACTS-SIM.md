@@ -272,8 +272,8 @@ lacks keeps the register's unprogrammed default (0xFF). `basil-sim --config` pri
 * Write: NVMCON2 = 55h, AAh, then WR = 1, only with NVMEN set; erase-before-write; the CPU keeps running; hardware clears
   WR and sets NVMIF (PIR7.5) when done (12.1.2 p.147, 12.3.2 p.158). Clearing NVMEN afterwards does not stop it.
 * A write to an invalid address clears WR and sets NVMERR (12.3.4 p.159). NVMCON2 reads zero (12.5.3 p.164).
-* Time: MEM24 10 ms typ, 11 ms max (39.3.5 p.697). `[A30]` typical, in instruction cycles (`Nvm::write_cycles`, default
-  10 000 = Fosc 4 MHz; the models do not know Fosc). `[A31]` unlock tracking ignores instructions between the writes.
+* Time: MEM24 10 ms typ, 11 ms max (39.3.5 p.697). `[A30]` typical, counted in instruction cycles at the board's `fosc_mhz`
+  when the write starts (160 000 at the default 64 MHz). `[A31]` unlock tracking ignores instructions between the writes.
   `[A32]` not modelled: PFM read/write, sector operations, WRTD write protect, EEPROM content across power-on reset.
 * Errata DS80000832G 1.6.1 (NVMERR stays set across Resets) is not modelled; the search of the errata found no other NVM item.
 
@@ -286,7 +286,7 @@ lacks keeps the register's unprogrammed default (0xFF). `basil-sim --config` pri
 * While GO is set, writes to the NVM registers are blocked and GO cannot be cleared by software (10.1 p.88).
 * WRERR (NVMCON1.7): a write while locked, to an unimplemented area, or a page operation on the DFM sets it and the GO attempt
   fails (10.5.2 p.106, 10.4.5 p.104). Software can clear it but not set it. NVMLOCK reads zero (10.5.3 p.107).
-* Time: MEM24 gives 11 ms maximum and no typical value (48.3.5 p.895). `[A33]` `NvmQ::write_cycles` = 10 000 cycles (Fosc 4 MHz).
+* Time: MEM24 gives 11 ms maximum and no typical value (48.3.5 p.895). `[A33]` 10 ms, counted at `fosc_mhz` as in A30.
   `[A34]` post increment adds 1 on the DFM, at completion for writes (the data sheet does not say when). `[A35]` unlock tracking
   ignores instructions between the writes. `[A36]` not modelled: PFM and page operations, WRTn protection, WRERR after a Reset
   during a write, blocking of NVMADR/NVMDAT writes while GO is set.
@@ -308,8 +308,8 @@ lacks keeps the register's unprogrammed default (0xFF). `basil-sim --config` pri
 * 183xx: CPU execution continues in parallel during the write (11.4.3 p.127); MEM24 4.0 ms typical, 5.0 maximum (Table 35-5 p.419).
   171xx: the general sentence of 15.2.2.2 p.169 says the processor stalls until the operation is complete; MEM24 11 ms maximum, no
   typical (44.3.5 p.627).
-* `[A115]` Times in instruction cycles at 1 000 per millisecond (Fosc = 4 MHz, like `[A30]`): 4 000 (183xx, the typical value) and
-  11 000 (171xx, the maximum). The 171xx stall is the general sentence applied to the DFM; its DFM text does not say. PIC16F18056/76:
+* `[A115]` Times 4 ms (183xx, the typical value) and 11 ms (171xx, the maximum), counted in instruction cycles at the
+  board's `fosc_mhz` when the write starts, like `[A30]`. The 171xx stall is the general sentence applied to the DFM; its DFM text does not say. PIC16F18056/76:
   DS40002325C is not in the document set; the 171xx behaviour is assumed (same text in the library's header).
 * `[A116]` Unlock: 55h then AAh to NVMCON2, then the next NVMCON1 write; instructions in between are not checked and any other NVMCON2
   value or NVMCON1 write restarts it. A WR written without the unlock or with WREN clear is ignored and WRERR is not set.
@@ -322,7 +322,7 @@ lacks keeps the register's unprogrammed default (0xFF). `basil-sim --config` pri
   (33914 cycles), 16F18056, 16F18326 and 16F18346 (12902 cycles). MDB does not model the durations (D-SIM-3).
 * `[A119]` PIC16 program flash self-write (`periph/nvm16.rs`; PIC16F13145, 152xx, 171xx, 180x6, 183xx; DS40002343F 15.1.2 p.156-162, DS40001839E 11.4):
   row = 32 words of 14 bits, erase 3FFFh; word read through RD (NVMREGS = 0); FREE erase and the 32 write latches (LWLO = 1 loads one, LWLO = 0 loads
-  one and programs the row, then the latches are 3FFFh again); the CPU stalls 2 000 cycles for an erase or a row write (2 ms typical for the erase,
+  one and programs the row, then the latches are 3FFFh again); the CPU stalls 2 ms (at `fosc_mhz`) for an erase or a row write (2 ms typical for the erase,
   Figure 15-3 p.160; the write time is assumed the same), then NVMIF is set; a latch load takes no time and sets no NVMIF. The array changes at the
   start of the stall. An erase leaves the latches alone (p.159; the Important box p.162 disagrees; the library is safe either way). 0 -> 1 in a write
   ANDs, with a note. Not modelled: flash beyond the program memory (ignored with a note), WRTn, User ID and configuration writes.
@@ -396,7 +396,7 @@ Q10, DS40002043F 12.1 p.142-156; Q41, DS40002214G 10.3 p.88-98.
   word write 75 us, page write 10 ms, page erase 11 ms.
 * `[A37]` the Q10 sector read takes no time. `[A38]` the Q41 uses its maxima. `[A39]` a Q41 page read takes no time and post increment adds 2
   to NVMADR on the PFM. `[A40]` flash programming only clears bits: a write ANDs into what is there, with a note when it would need 0 -> 1.
-  All times scale with `write_cycles` (10 000 = 10 ms at Fosc 4 MHz, A30/A33).
+  All times are converted to instruction cycles at the board's `fosc_mhz` when the operation starts (A30/A33).
 * Not modelled: write protection (WRTn), User ID and configuration space (such operations are ignored with a note), NVMERR/WRERR after
   a Reset during a write. Errata DS80000832G 1.9.1 (the first instruction after a self-write instruction may not execute; the library adds
   two NOPs, p.7) is not modelled either, so code without the NOPs would run on the simulator and fail on silicon.
