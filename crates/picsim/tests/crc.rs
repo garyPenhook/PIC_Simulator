@@ -93,11 +93,11 @@ fn busy_full_and_the_interrupt_flag() {
     assert_eq!(r(&mut m, "CRCCON0") & 0x21, 0x20, "shifting: BUSY, shifter took the word");
     w(&mut m, "CRCDATL", 0x66);
     assert_eq!(r(&mut m, "CRCCON0") & 0x21, 0x21, "second word waits: FULL");
-    assert_eq!(r(&mut m, "PIR4") & 0, 0);
+    let pir = m.dev.sfr.iter().find(|s| s.name.starts_with("PIR") && s.fields.iter().any(|f| f.name == "CRCIF")).unwrap().clone();
+    let bit = pir.fields.iter().find(|f| f.name == "CRCIF").unwrap().pos;
+    assert_eq!(m.cpu.read(pir.addr) & (1 << bit), 0, "CRCIF clear while BUSY");
     run(&mut m, 40);
     assert_eq!(r(&mut m, "CRCCON0") & 0x21, 0);
-    let pir = m.dev.sfr.iter().find(|s| s.name.starts_with("PIR") && s.fields.iter().any(|f| f.name == "CRCIF")).unwrap();
-    let bit = pir.fields.iter().find(|f| f.name == "CRCIF").unwrap().pos;
     assert_ne!(m.cpu.read(pir.addr) & (1 << bit), 0, "CRCIF set when BUSY falls");
 }
 

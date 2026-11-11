@@ -54,7 +54,7 @@ pub struct NvmQ {
     adr: [usize; 3],
     datl: usize,
     flag: Flag,
-    start: u32,
+    pub(crate) start: u32,
     pub eeprom: Vec<u8>,
     /// 0 = locked, 1 = 55h seen, 2 = 55h and AAh seen.
     unlock: u8,

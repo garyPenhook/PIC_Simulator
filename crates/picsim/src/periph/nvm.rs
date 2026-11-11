@@ -55,7 +55,7 @@ pub struct Nvm {
     pub con1: usize,
     pub con2: usize,
     flag: Flag,
-    start: u32,
+    pub(crate) start: u32,
     pub eeprom: Vec<u8>,
     /// First unlock byte seen (55h, CCh, DDh or BBh).
     first: Option<u8>,

@@ -585,7 +585,7 @@ pub struct Board {
     pub leds: Vec<Led>,
     pub oleds: Vec<Oled>,
     /// How much of `Periph::i2c_log` has been read.
-    log_pos: usize,
+    pub(crate) log_pos: usize,
     /// The PIC clock in MHz (0 = 64 MHz): the OLED's scrolling runs on real time.
     pub fosc_mhz: f64,
 }

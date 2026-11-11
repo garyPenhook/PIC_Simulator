@@ -240,15 +240,16 @@ fn t1_dec(k: u8) -> Option<(usize, u8)> {
 }
 
 /// Timer2-type timers (index 0 = Timer2, 1 = Timer4, 2 = Timer6): sub-code 0 TxTMR, 1 TxPR, 2 TxCON, 3 TxHLT, 4 TxCLKCON.
-/// Index 0 keeps the first hook codes, the others use 244..=253.
+/// Index 0 keeps the first hook codes, the others use T2X0..=T2X0 + 9 (64..=73, after the ports).
+const T2X0: u8 = PORT_END;
 fn t2_hook(i: usize, sub: u8) -> u8 {
-    if i == 0 { T2T + sub } else { 244 + 5 * (i as u8 - 1) + sub }
+    if i == 0 { T2T + sub } else { T2X0 + 5 * (i as u8 - 1) + sub }
 }
 
 fn t2_dec(k: u8) -> Option<(usize, u8)> {
     match k {
         T2T..=T2CLK => Some((0, k - T2T)),
-        244..=253 => Some((1 + usize::from(k - 244) / 5, (k - 244) % 5)),
+        T2X0..=73 => Some((1 + usize::from(k - T2X0) / 5, (k - T2X0) % 5)),
         _ => None,
     }
 }
@@ -268,6 +269,8 @@ const QUART_END: u8 = QUART0 + 5 * quart::HOOKS;
 const T1G: u8 = 40;
 /// PORTx (index into `ports`) uses hook code PORT0 + index: a read gives the pin levels, a write goes to LATx.
 const PORT0: u8 = 48;
+/// At most 16 ports (48..=63).
+const PORT_END: u8 = PORT0 + 16;
 /// Q41 SPI n (0-based) uses hook codes SPI0 + spi::HOOKS * n + sub-code (see `spi.rs`); at most 2.
 const SPI0: u8 = 160;
 const SPI_END: u8 = SPI0 + 2 * spi::HOOKS;
@@ -301,7 +304,9 @@ fn wdt_dec(k: u8) -> Option<u8> {
     }
 }
 const NVM0: u8 = 240;
+const NVM_LAST: u8 = NVM0 + nvm::CON2;
 const NVMQ0: u8 = 242;
+const NVMQ_LAST: u8 = NVMQ0 + nvmq::LOCK;
 
 /// Characters sent to a receiver: the first start bit falls at cycle `at`, then back to back plus `gap` idle cycles.
 /// `bit` is the sender's bit time in instruction cycles; without it the receiver's own rate is used.
@@ -1033,7 +1038,38 @@ impl Periph {
         self.i2c_log = old.i2c_log;
         self.pin_log = old.pin_log;
         self.notes.extend(old.notes);
-        self.set_board(old.board);
+        // The data EEPROM is non-volatile: only a write in progress is lost (B9).
+        if let (Some(n), Some(o)) = (&mut self.nvm, old.nvm) {
+            n.eeprom = o.eeprom;
+        }
+        if let (Some(n), Some(o)) = (&mut self.nvmq, old.nvmq) {
+            n.eeprom = o.eeprom;
+        }
+        // The board is outside the part: its LED history and OLED contents and state survive the reset (B11).
+        let pos = old.board.log_pos;
+        self.board = old.board;
+        self.board_wiring();
+        self.board.log_pos = pos;
+    }
+
+    /// The data EEPROM array, if the part has one modelled.
+    pub fn eeprom(&self) -> Option<&[u8]> {
+        self.nvm.as_ref().map(|n| &n.eeprom[..]).or(self.nvmq.as_ref().map(|n| &n.eeprom[..]))
+    }
+
+    /// Data EEPROM contents from a hex image (`get` gives the byte at an address); FFh where the image has none.
+    pub fn load_eeprom(&mut self, get: impl Fn(u32) -> Option<u8>) {
+        let fill = |start: u32, ee: &mut Vec<u8>| {
+            for (i, v) in ee.iter_mut().enumerate() {
+                *v = get(start + i as u32).unwrap_or(0xFF);
+            }
+        };
+        if let Some(n) = &mut self.nvm {
+            fill(n.start, &mut n.eeprom);
+        }
+        if let Some(n) = &mut self.nvmq {
+            fill(n.start, &mut n.eeprom);
+        }
     }
 
     /// The reset the watchdog asked for, if any.
@@ -1870,7 +1906,8 @@ impl Periph {
                             t.cmp = m.mem[t.h];
                             true
                         } else {
-                            t.cnt += 1;
+                            // 8-bit mode counts in TMR0L only; a high byte left from 16-bit mode is dropped (B4)
+                            t.cnt = u16::from((t.cnt as u8).wrapping_add(1));
                             false
                         };
                         if wrap {
@@ -2050,7 +2087,7 @@ impl Periph {
 
     pub fn read(&mut self, k: u8, m: &mut DataMem, now: u64) -> u8 {
         match k {
-            PORT0..=0x6F => {
+            PORT0..PORT_END => {
                 let v = self.port_levels(usize::from(k - PORT0), m, now);
                 m.mem[self.ports[usize::from(k - PORT0)].port] = v;
                 v
@@ -2118,14 +2155,14 @@ impl Periph {
     /// without any side effect. `None` for the rest (their stored byte is current, or a read would pop a FIFO).
     pub fn peek_hook(&self, k: u8, m: &DataMem, now: u64) -> Option<u8> {
         match k {
-            PORT0..=0x6F => Some(self.port_levels(usize::from(k - PORT0), m, now)),
+            PORT0..PORT_END => Some(self.port_levels(usize::from(k - PORT0), m, now)),
             k if wdt_dec(k).is_some_and(|s| s >= wdt::PSL) && self.wdt.is_some() => Some(self.wdt_value(wdt_dec(k).unwrap(), m, now)),
             _ => None,
         }
     }
 
     pub fn is_stored(k: u8) -> bool {
-        !(k == NVM0 + nvm::CON2 || k == NVMQ0 + nvmq::LOCK || (matches!(k, T0L | PORT0..=0x6F) || matches!(t1_dec(k), Some((_, 0 | 1 | 4))) || matches!(t2_dec(k), Some((_, 0)))) || (UART0..40).contains(&k) && (k - UART0) % UART_HOOKS == 3
+        !(k == NVM0 + nvm::CON2 || k == NVMQ0 + nvmq::LOCK || (matches!(k, T0L | PORT0..PORT_END) || matches!(t1_dec(k), Some((_, 0 | 1 | 4))) || matches!(t2_dec(k), Some((_, 0)))) || (UART0..40).contains(&k) && (k - UART0) % UART_HOOKS == 3
             || (QUART0..QUART_END).contains(&k) && (k - QUART0) % quart::HOOKS == quart::RXB
             || (SPI0..SPI_END).contains(&k) && (k - SPI0) % spi::HOOKS == spi::RXB
             || (I2CQ0..I2CQ_END).contains(&k) && (k - I2CQ0) % i2cq::HOOKS == i2cq::RXB
@@ -2136,12 +2173,12 @@ impl Periph {
     /// A write: `v` is already masked to the implemented bits. The caller has synced to the writing cycle.
     pub fn write(&mut self, k: u8, v: u8, now: u64, m: &mut DataMem, prog: &mut [u8]) {
         match k {
-            NVMQ0..=244 => {
+            NVMQ0..=NVMQ_LAST => {
                 let n = self.nvmq.as_mut().unwrap();
                 self.stall += n.write(k - NVMQ0, v, now, m, prog, &mut self.notes);
                 self.flash_event(now);
             }
-            NVM0..=241 => {
+            NVM0..=NVM_LAST => {
                 let n = self.nvm.as_mut().unwrap();
                 self.stall += n.write(k - NVM0, v, now, m, prog, &mut self.notes);
                 self.flash_event(now);
@@ -2182,7 +2219,7 @@ impl Periph {
                 t.gb = None; // a polarity change is not an edge
                 m.mem[t.gcon] = v & !4 | m.mem[t.gcon] & 4; // GVAL is read only
             }
-            PORT0..=0x6F => {
+            PORT0..PORT_END => {
                 let p = &self.ports[usize::from(k - PORT0)];
                 m.mem[p.lat] = v;
                 m.mem[p.port] = v;

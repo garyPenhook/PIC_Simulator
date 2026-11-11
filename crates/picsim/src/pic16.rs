@@ -635,7 +635,9 @@ impl Pic16 {
         }
         // RxyPPS output codes of SCL1 and SDA1 (Table 18-2: DS40002343F p.202 and DS40002519D p.188 for the PIC16F171xx and
         // PIC16F131xx, DS40002686B p.207 for the PIC16F132xx; the other families as recorded in lib/i2c.bas from their data sheets).
-        let name = dev.device.name.as_str();
+        // A PIC16LF part has the PPS codes of its PIC16F twin (B3).
+        let name = dev.device.name.replacen("PIC16LF", "PIC16F", 1);
+        let name = name.as_str();
         let codes = if name.starts_with("PIC16F171") || name.starts_with("PIC16F131") || name.starts_with("PIC16F132") {
             Some((0x1B, 0x1C))
         } else if name.starts_with("PIC16F152") {
@@ -1453,7 +1455,8 @@ impl Pic16 {
                 t.cnt = 0;
                 true
             } else {
-                t.cnt += 1;
+                // 8-bit mode counts in TMR0L only; a high byte left from 16-bit mode is dropped (B4)
+                t.cnt = u16::from((t.cnt as u8).wrapping_add(1));
                 false
             };
             if wrap {

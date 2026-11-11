@@ -42,6 +42,8 @@ pub struct Ccp16 {
 /// on DS40002519D p.188 and DS40002686B Table 18-2 p.207; DS40002195E p.148: 01h and 02h; DS40001839E Register 13-2 p.163: 01100 to 01111). `None` where the
 /// simulator has no data sheet (PIC16F180x6).
 pub fn code_for(name: &str, n: u8) -> Option<u8> {
+    // A PIC16LF part has the codes of its PIC16F twin (B3).
+    let name = &name.replacen("PIC16LF", "PIC16F", 1);
     if name.starts_with("PIC16F171") || name.starts_with("PIC16F131") || name.starts_with("PIC16F132") {
         Some(8 + n)
     } else if name.starts_with("PIC16F152") {

@@ -246,6 +246,8 @@ impl Pic18 {
                 self.aux.insert(a, b);
             }
         }
+        let aux = &self.aux;
+        self.p.load_eeprom(|a| aux.get(&a).copied());
         self.apply_config();
     }
 
