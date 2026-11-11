@@ -256,7 +256,7 @@ fn a_ppsout_source_other_than_lat_is_noted() {
 fn the_mclr_pin_reads_one_while_enabled_and_is_a_digital_input_otherwise() {
     // RA3 reads 1 when MCLRE = 1 (DS40002343F 16.13 p.182, DS40002195E p.130, DS40002519D p.168, DS40001839E Register 12-1
     // note 2); with MCLRE = 0 it is a digital input-only pin that shows what drives it, and ANSELA does not affect it
-    for part in ["16F17146", "16F18346", "16F13145", "16F15244"] {
+    for part in ["16F17146", "16F18346", "16F13145", "16F13245", "16F15244"] {
         let probe = machine(part, &[], true, None);
         let porta = addr(&probe, "PORTA");
         let prog = [movlb(part, porta >> 7), movf_w(porta & 0x7F), movwf(0x20)];

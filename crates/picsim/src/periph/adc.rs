@@ -50,6 +50,9 @@ pub(crate) struct Adc {
     pub resh: usize,
     pub flag: Flag,
     pub bits: u32,
+    /// TAD periods of a conversion after the acquisition (AD21 "+ 2 TCY" is added separately): 14 on the Q41, the PIC16F171xx and
+    /// the PIC16F131xx, 12 on the PIC16F132xx (DS40002686B AD21 p.611: 12*TAD + 2*TCY).
+    pub conv_tad: u64,
     /// Cycle the running conversion ends, the value it will load (negative only in differential mode) and whether
     /// that mode was selected when it started.
     pub end: Option<(u64, i32, bool)>,
@@ -61,7 +64,7 @@ impl Adc {
     /// The ADC of the device, or None when it has none of the sourced ones. The resolution is not in the device
     /// description (the 10-bit PIC16F13145 and the 12-bit PIC16F17146 use the same register layout), so it comes from
     /// the part: Q10 10 bits (DS40002043F ch.33), Q41 12 (DS40002214G ch.40), PIC16F131xx 10 (DS40002519D Figure 32-3
-    /// p.443), PIC16F171xx 12 (DS40002343F Figure 33-3 p.491). Other PIC16 ADCCs (PIC16F18056/76: DS40002325C is not in
+    /// p.443) and PIC16F132xx 10 (DS40002686B Figure 32-3 p.486), PIC16F171xx 12 (DS40002343F Figure 33-3 p.491). Other PIC16 ADCCs (PIC16F18056/76: DS40002325C is not in
     /// the document set) are left alone.
     pub fn find(dev: &Device) -> Option<Adc> {
         if addr(dev, "ADCLK").is_none() {
@@ -72,7 +75,7 @@ impl Adc {
         let name = dev.device.name.as_str();
         let bits = if q41 {
             12
-        } else if pic18 || name.starts_with("PIC16F131") {
+        } else if pic18 || name.starts_with("PIC16F131") || name.starts_with("PIC16F132") {
             10
         } else if name.starts_with("PIC16F171") {
             12
@@ -80,15 +83,16 @@ impl Adc {
             return None;
         };
         let wide = q41 || !pic18;
+        let conv_tad = if name.starts_with("PIC16F132") { 12 } else { 14 };
         let (con, clk, pch, resl, resh) = (addr(dev, "ADCON0")?, addr(dev, "ADCLK")?, addr(dev, "ADPCH")?, addr(dev, "ADRESL")?, addr(dev, "ADRESH")?);
         let flag = Flag::find(dev, "ADIF")?;
         if wide {
             let (pre, acq) = (addr(dev, "ADPREL")?, addr(dev, "ADACQL")?);
             let hi = (addr(dev, "ADPREH")?, addr(dev, "ADACQH")?);
-            Some(Adc { con, clk, pre, acq, wide: Some(hi), go_needs_on: true, simple: None, pch, nch: addr(dev, "ADNCH"), resl, resh, flag, bits, end: None, feed: Vec::new() })
+            Some(Adc { con, clk, pre, acq, wide: Some(hi), go_needs_on: true, simple: None, pch, nch: addr(dev, "ADNCH"), resl, resh, flag, bits, conv_tad, end: None, feed: Vec::new() })
         } else {
             let (pre, acq) = (addr(dev, "ADPRE")?, addr(dev, "ADACQ")?);
-            Some(Adc { con, clk, pre, acq, wide: None, go_needs_on: false, simple: None, pch, nch: None, resl, resh, flag, bits, end: None, feed: Vec::new() })
+            Some(Adc { con, clk, pre, acq, wide: None, go_needs_on: false, simple: None, pch, nch: None, resl, resh, flag, bits, conv_tad, end: None, feed: Vec::new() })
         }
     }
 
@@ -101,7 +105,7 @@ impl Adc {
         }
         let (con, con1, resl, resh) = (addr(dev, "ADCON0")?, addr(dev, "ADCON1")?, addr(dev, "ADRESL")?, addr(dev, "ADRESH")?);
         let flag = Flag::find(dev, "ADIF")?;
-        Some(Adc { con, clk: 0, pre: 0, acq: 0, wide: None, go_needs_on: true, simple: Some(con1), pch: 0, nch: None, resl, resh, flag, bits: 10, end: None, feed: Vec::new() })
+        Some(Adc { con, clk: 0, pre: 0, acq: 0, wide: None, go_needs_on: true, simple: Some(con1), pch: 0, nch: None, resl, resh, flag, bits: 10, conv_tad: 0, end: None, feed: Vec::new() })
     }
 
     /// The addresses of the registers this model handles.
@@ -157,14 +161,14 @@ impl Adc {
         let (sample, end);
         if let Some((ph, ah)) = self.wide {
             // precharge and acquisition are counted in Fosc clocks (ADACQ = 0 with ADPRE != 0 is 8192),
-            // the conversion is 14 TAD + 2 TCY. `[A18]`
+            // the conversion is 14 TAD + 2 TCY (12 on the PIC16F132xx). `[A18]`
             let pre = u64::from(mem[ph] & 0x1F) << 8 | u64::from(mem[self.pre]);
             let mut acq = u64::from(mem[ah] & 0x1F) << 8 | u64::from(mem[self.acq]);
             if acq == 0 && pre != 0 {
                 acq = 8192;
             }
             sample = t + (pre + acq).div_ceil(4);
-            end = sample + (2 * n * 14).div_ceil(4) + 2;
+            end = sample + (2 * n * self.conv_tad).div_ceil(4) + 2;
         } else {
             let lead = u64::from(mem[self.pre]) + u64::from(mem[self.acq]);
             sample = t + (2 * n * lead).div_ceil(4);

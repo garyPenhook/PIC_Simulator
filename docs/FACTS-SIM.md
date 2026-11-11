@@ -152,7 +152,7 @@ GO cleared on completion (40.2.2 p.720). Differences from the Q10:
   (8 Fosc, 125 ns at 64 MHz, not 8 us); it now writes `ceil(FOSC * AcqUs / 1e6)` Fosc clocks on the Q41 and the PIC16F171xx
   (512 at 64 MHz for 8 us). The Q10 still counts ADC clocks.
 * Conversion = 14 TAD + 2 TCY after acquisition (AD21 p.903, Fosc clock source); precharge + acquisition = (ADPRE + ADACQ)/4 cycles.
-  `[A19]` AD21 is a "typ" design-guidance value; the model takes the 2 TCY as extra to the 14 TAD and starts counting at GO.
+  `[A19]` AD21 is a "typ" design-guidance value; on the PIC16F132xx it reads 12 TAD + 2 TCY (DS40002686B AD21 p.611), and the model uses 12 there; the model takes the 2 TCY as extra to the 14 TAD and starts counting at GO.
 * 12-bit result (FM = 1 right justified, FM = 0 shifted up four places, Figure 40-3 p.720); ADPCH is 8 bits (40.7.8 p.742).
 * `[A20]` GO written 1 by the instruction that sets ON (ON was 0) is ignored (p.720 "will not be set in the same instruction").
 * Same not-modelled list as the Q10 (ADCRC, computation, double sampling, ADACT, ADCP/CPRDY). Errata DS80000901H: 1.1.1 (ADC

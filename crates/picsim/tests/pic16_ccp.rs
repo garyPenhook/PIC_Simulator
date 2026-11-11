@@ -7,7 +7,7 @@ use devdesc::Device;
 use picsim::machine16::Machine16;
 use std::path::Path;
 
-const PARTS: [&str; 4] = ["16F17146", "16F13145", "16F15244", "16F18346"];
+const PARTS: [&str; 5] = ["16F17146", "16F13145", "16F13245", "16F15244", "16F18346"];
 const NOP: u16 = 0;
 const BRA_SELF: u16 = 0x33FF;
 

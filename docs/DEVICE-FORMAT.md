@@ -106,10 +106,11 @@ inside the config region and every setting value fitting its field.
   empty ranges (`start = end = 0`); program, user-ID and configuration sizes and addresses count
   14-bit **words**, not bytes; GPR sectors that only shadow common RAM are skipped so `total_gpr`
   matches the data sheet.
-* Descriptions exist for `PIC16F17126` and `PIC16F17146` (DS40002343F), for the nine parts of the PIC16F13145 family (DS40002519D) and for the eight parts PIC16F18313, 18323, 18324, 18325, 18326, 18344,
+* Descriptions exist for `PIC16F17126` and `PIC16F17146` (DS40002343F), for the nine parts of the PIC16F13145 family (DS40002519D), for the six parts PIC16F13214, 13215, 13224, 13225, 13244 and 13245 (DS40002686B) and for the eight parts PIC16F18313, 18323, 18324, 18325, 18326, 18344,
   18345 and 18346 and their PIC16LF18313 … 18346 twins (DS40001799F, DS40001800E, DS40001795K, DS40001839E) and for the six parts PIC16F15213, 15214, 15223, 15224, 15243 and 15244 (DS40002195E); all compile with the `pic16e` code
   generator. A part with no data EEPROM (the PIC16F13145 and PIC16F152xx families) has `[memory.eeprom] size = 0`; `devgen` writes that only for `pic16e` when the pack has no `EEDataSector`. The PIC16F183xx parts have
-  256 bytes of EEPROM at F000h (the data sheets call the region EEPROM; the pack lists it as `EEDataSector`) and four configuration words (8007h-800Ah); the PIC16F13145 and PIC16F152xx parts have five (8007h-800Bh).
+  256 bytes of EEPROM at F000h (the data sheets call the region EEPROM; the pack lists it as `EEDataSector`) and four configuration words (8007h-800Ah); the PIC16F13145 and PIC16F152xx parts have five (8007h-800Bh). The PIC16F132xx parts have 256 bytes of EEPROM at F000h and seven configuration words (8007h-800Dh; the data sheet's Table 15-2 says five, but its register chapters and the pack agree on seven). The pack
+  gave `implemented = 0` for their WDTPSL and WDTPSH and for PORTC on the 14-pin parts, and 192 for PORTC on the 20-pin parts; these are set to 255 (both WDT registers are full read-only bytes, DS40002686B 14.7.3-14.7.4 p.155-156) and to 63 and 255 (RC0-RC5, RC0-RC7: pin allocation tables).
 
 ## Adding a device (checklist)
 

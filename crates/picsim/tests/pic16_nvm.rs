@@ -71,26 +71,30 @@ fn nvmif(m: &Machine16, map: Map) -> bool {
 }
 
 #[test]
-fn f171_write_stalls_the_cpu_erases_first_and_sets_nvmif() {
-    let mut prog = write(P171, 5, 0x3C, true, true);
-    let n = prog.len();
-    prog.extend([NOP]);
-    let mut m = machine("16F17146", &prog);
-    step_to_end(&mut m, n - 1);
-    let c = m.cpu.cycles;
-    assert!(!nvmif(&m, P171));
-    m.cpu.step(); // BSF WR: the processor stalls until the byte is written
-    assert_eq!(m.cpu.cycles - c, 1 + 11_000);
-    assert_eq!(m.cpu.mem[P171.3] & 0x02, 0, "WR cleared by hardware");
-    assert!(nvmif(&m, P171));
-    assert_eq!(m.cpu.mem[P171.3] & 0x44, 0x44, "NVMREGS and WREN stay");
-    // read it back through FSR (7005h) with the extra cycle, and through RD
-    let mut p = prog.clone();
-    p.extend(set(P171, &[(P171.0, 5), (P171.3, 0x41)]));
-    let mut m = machine("16F17146", &p);
-    step_to_end(&mut m, p.len());
-    assert_eq!(m.cpu.mem[P171.2], 0x3C);
-    assert_eq!(m.cpu.mem[P171.3] & 1, 0, "RD cleared at once");
+fn f171_and_f132_write_stalls_the_cpu_erases_first_and_sets_nvmif() {
+    // PIC16F132xx: DS40002686B 15.2.2.2 p.174 (the processor stalls until the write is complete), MEM24 p.602 (11 ms maximum),
+    // the same NVM registers and the EEPROM at 7000h (Table 15-1 p.159)
+    for part in ["16F17146", "16F13245"] {
+        let mut prog = write(P171, 5, 0x3C, true, true);
+        let n = prog.len();
+        prog.extend([NOP]);
+        let mut m = machine(part, &prog);
+        step_to_end(&mut m, n - 1);
+        let c = m.cpu.cycles;
+        assert!(!nvmif(&m, P171));
+        m.cpu.step(); // BSF WR: the processor stalls until the byte is written
+        assert_eq!(m.cpu.cycles - c, 1 + 11_000, "{part}");
+        assert_eq!(m.cpu.mem[P171.3] & 0x02, 0, "WR cleared by hardware");
+        assert!(nvmif(&m, P171));
+        assert_eq!(m.cpu.mem[P171.3] & 0x44, 0x44, "NVMREGS and WREN stay");
+        // read it back through FSR (7005h) with the extra cycle, and through RD
+        let mut p = prog.clone();
+        p.extend(set(P171, &[(P171.0, 5), (P171.3, 0x41)]));
+        let mut m = machine(part, &p);
+        step_to_end(&mut m, p.len());
+        assert_eq!(m.cpu.mem[P171.2], 0x3C);
+        assert_eq!(m.cpu.mem[P171.3] & 1, 0, "RD cleared at once");
+    }
 }
 
 #[test]
@@ -117,7 +121,7 @@ fn f183_cpu_runs_on_during_the_write_and_wr_clears_after_4_ms() {
 
 #[test]
 fn no_write_without_the_unlock_or_without_wren() {
-    for (part, map) in [("16F17146", P171), ("16F18346", P183)] {
+    for (part, map) in [("16F17146", P171), ("16F13245", P171), ("16F18346", P183)] {
         for (unlock, wren) in [(false, true), (true, false)] {
             let mut prog = write(map, 5, 0x11, unlock, wren);
             prog.extend(std::iter::repeat_n(NOP, 20));

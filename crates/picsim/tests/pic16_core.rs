@@ -398,7 +398,7 @@ fn reset_reloads_everything_loaded() {
 
 #[test]
 fn every_modelled_pic16_part_runs() {
-    for part in ["16F17126", "16F17146", "16F18056", "16F18076", "16F13145", "16F15244"] {
+    for part in ["16F17126", "16F17146", "16F18056", "16F18076", "16F13145", "16F13214", "16F13215", "16F13224", "16F13225", "16F13244", "16F13245", "16F15244"] {
         let dev = Device::load(&Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("../../devices/{part}.toml"))).unwrap();
         let mut m = Machine16::new(dev).unwrap_or_else(|e| panic!("{part}: {e}"));
         m.load_hex(&{

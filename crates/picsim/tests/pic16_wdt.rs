@@ -7,7 +7,7 @@ use devdesc::Device;
 use picsim::machine16::Machine16;
 use std::path::Path;
 
-const WINDOWED: [&str; 2] = ["16F17146", "16F13145"];
+const WINDOWED: [&str; 3] = ["16F17146", "16F13145", "16F13245"];
 const SINGLE: [&str; 3] = ["16F15244", "16F18346", "16F18056"];
 const NOP: u16 = 0x0000;
 const SLEEP: u16 = 0x0063;

@@ -39,10 +39,10 @@ pub struct Ccp16 {
 }
 
 /// The RxyPPS output code of CCP `n` on the family of `name` (DS40002343F Table 18-2 p.202: CCP1 09h, CCP2 0Ah, and the same
-/// on DS40002519D p.188; DS40002195E p.148: 01h and 02h; DS40001839E Register 13-2 p.163: 01100 to 01111). `None` where the
+/// on DS40002519D p.188 and DS40002686B Table 18-2 p.207; DS40002195E p.148: 01h and 02h; DS40001839E Register 13-2 p.163: 01100 to 01111). `None` where the
 /// simulator has no data sheet (PIC16F180x6).
 pub fn code_for(name: &str, n: u8) -> Option<u8> {
-    if name.starts_with("PIC16F171") || name.starts_with("PIC16F131") {
+    if name.starts_with("PIC16F171") || name.starts_with("PIC16F131") || name.starts_with("PIC16F132") {
         Some(8 + n)
     } else if name.starts_with("PIC16F152") {
         Some(n)

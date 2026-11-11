@@ -289,31 +289,34 @@ fn adc_without_a_model_rejects_the_stimulus() {
 }
 
 #[test]
-fn pic16f13145_is_a_10_bit_converter_without_differential_mode() {
-    // DS40002519D Figure 32-3 p.443: 10 bits, left justified they fill ADRES bits 15..6; AD21 p.557: 14 TAD + 2 TCY
-    let dev = Device::load(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../../devices/16F13145.toml")).unwrap();
-    let a = |n: &str| dev.find_sfr(n).unwrap_or_else(|| panic!("no {n}")).addr as usize;
-    let (con, clk, pch, rl, rh) = (a("ADCON0"), a("ADCLK"), a("ADPCH"), a("ADRESL"), a("ADRESH"));
-    let pir = dev.sfr.iter().find(|s| s.fields.iter().any(|f| f.name == "ADIF")).unwrap();
-    let (pir, bit) = (pir.addr as usize, pir.fields.iter().find(|f| f.name == "ADIF").unwrap().pos);
-    for (on, want) in [(0x84u16, 0x03FFu16), (0x80, 0xFFC0)] {
-        let mut p = set(&[(clk, 0), (pch, 4), (con, on), (con, on | 1)]);
-        p.extend([NOP; 100]);
-        let mut m = machine_of("16F13145", &p, &[], "[[adc]]\nchannel = 4\nvalue = 0xFFF\n");
-        assert_eq!(m.cpu.mem[con], 0, "no IC bit: ADCON0 resets to 0");
-        for _ in 0..1000 {
-            m.cpu.step();
-            if m.cpu.mem[con] & 1 != 0 {
-                break;
+fn pic16f131xx_and_132xx_are_10_bit_converters_without_differential_mode() {
+    // PIC16F13145: DS40002519D Figure 32-3 p.443: 10 bits, left justified they fill ADRES bits 15..6; AD21 p.557: 14 TAD + 2 TCY.
+    // PIC16F132xx: DS40002686B Figure 32-3 p.486 and AD21 p.611: 10 bits, 12 TAD + 2 TCY
+    for (part, cycles) in [("16F13145", 9), ("16F13245", 8), ("16F13214", 8), ("16F13224", 8), ("16F13244", 8)] {
+        let dev = Device::load(&Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("../../devices/{part}.toml"))).unwrap();
+        let a = |n: &str| dev.find_sfr(n).unwrap_or_else(|| panic!("no {n}")).addr as usize;
+        let (con, clk, pch, rl, rh) = (a("ADCON0"), a("ADCLK"), a("ADPCH"), a("ADRESL"), a("ADRESH"));
+        let pir = dev.sfr.iter().find(|s| s.fields.iter().any(|f| f.name == "ADIF")).unwrap();
+        let (pir, bit) = (pir.addr as usize, pir.fields.iter().find(|f| f.name == "ADIF").unwrap().pos);
+        for (on, want) in [(0x84u16, 0x03FFu16), (0x80, 0xFFC0)] {
+            let mut p = set(&[(clk, 0), (pch, 4), (con, on), (con, on | 1)]);
+            p.extend([NOP; 100]);
+            let mut m = machine_of(part, &p, &[], "[[adc]]\nchannel = 4\nvalue = 0xFFF\n");
+            assert_eq!(m.cpu.mem[con], 0, "no IC bit: ADCON0 resets to 0");
+            for _ in 0..1000 {
+                m.cpu.step();
+                if m.cpu.mem[con] & 1 != 0 {
+                    break;
+                }
             }
+            let t0 = m.cpu.cycles;
+            while m.cpu.mem[con] & 1 != 0 {
+                m.cpu.step();
+            }
+            assert_eq!(m.cpu.cycles - t0, cycles, "{part}: TAD of 2 Fosc, 2 TCY");
+            assert_eq!(u16::from(m.cpu.mem[rh]) << 8 | u16::from(m.cpu.mem[rl]), want, "{part} ADCON0 = {on:02X}: the code is limited to 10 bits");
+            assert_eq!(m.cpu.mem[pir] >> bit & 1, 1);
         }
-        let t0 = m.cpu.cycles;
-        while m.cpu.mem[con] & 1 != 0 {
-            m.cpu.step();
-        }
-        assert_eq!(m.cpu.cycles - t0, 9, "14 TAD of 2 Fosc = 7 cycles, 2 TCY");
-        assert_eq!(u16::from(m.cpu.mem[rh]) << 8 | u16::from(m.cpu.mem[rl]), want, "ADCON0 = {on:02X}: the code is limited to 10 bits");
-        assert_eq!(m.cpu.mem[pir] >> bit & 1, 1);
     }
 }
 

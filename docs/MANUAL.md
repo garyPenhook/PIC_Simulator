@@ -1,6 +1,6 @@
 # pic-sim Manual
 
-Revision for **pic-sim 0.2.4** and **basil-sim 0.2.4** (one workspace version). Simulated families: **PIC18** (PIC18F27Q10 and the PIC18F04/05/06/14/15/16Q41) and **PIC16 enhanced mid-range** (PIC16F131xx, 152xx, 171xx, 180x6 and 183xx).
+Revision for **pic-sim 0.2.4** and **basil-sim 0.2.4** (one workspace version). Simulated families: **PIC18** (PIC18F27Q10 and the PIC18F04/05/06/14/15/16Q41) and **PIC16 enhanced mid-range** (PIC16F131xx, 132xx, 152xx, 171xx, 180x6 and 183xx).
 
 This manual describes what the simulator does today. It is organised in the order you meet the tools: what the simulator is, how to build and start it, how to prepare a program for it, the graphical front end `pic-sim`, the command-line front end `basil-sim`, the stimulus file that describes the outside world, the simulated board (LEDs and OLED), and finally what is and is not modelled. Anything not listed here is not supported.
 
@@ -166,6 +166,7 @@ The parts the simulator can load are the files in `devices/`:
 | PIC18-Q10 | 18F27Q10 | PIC18 | The 28-pin part; the 40-pin variant is not separately described |
 | PIC18-Q41 | 18F04Q41, 18F05Q41, 18F06Q41, 18F14Q41, 18F15Q41, 18F16Q41 | PIC18 | Interrupts with `MVECEN` on (vector table, as XC8 `__interrupt(irq(...))` builds it) or off (see section 9) |
 | PIC16F131xx | 16F13113, 13114, 13115, 13123, 13124, 13125, 13143, 13144, 13145 | PIC16 enhanced | |
+| PIC16F132xx | 16F13214, 13215, 13224, 13225, 13244, 13245 | PIC16 enhanced | 8-, 14- and 20-pin parts (DS40002686B); 256 bytes of data EEPROM; the 10-bit ADC converts in 12 TAD + 2 TCY (the PIC16F131xx takes 14 TAD) |
 | PIC16F152xx | 16F15213, 15214, 15223, 15224, 15243, 15244 | PIC16 enhanced | |
 | PIC16F171xx | 16F17126, 16F17146 | PIC16 enhanced | |
 | PIC16F180x6 | 16F18056, 16F18076 | PIC16 enhanced | |
@@ -711,11 +712,11 @@ Models exist for the following; a register of anything else is plain storage tha
 | MSSP (SPI and I2C host) | yes | — | I2C host mode, to drive the OLED |
 | SPI host | via MSSP | yes | — |
 | I2C host | via MSSP | yes | — |
-| CCP1/2 and PWM3/4 | yes | — | CCP1 to CCP4 (capture, compare, standard PWM) on PIC16F131xx, 152xx, 171xx and 183xx; the separate PWM modules (PWM3 to PWM6, the PWM1/2 of the 171xx) are not modelled |
+| CCP1/2 and PWM3/4 | yes | — | CCP1 to CCP4 (capture, compare, standard PWM) on PIC16F131xx, 132xx, 152xx, 171xx and 183xx; the separate PWM modules (PWM3 to PWM6, the PWM1/2 of the 171xx) are not modelled |
 | CWG1 | yes | — | — |
 | Comparators C1/C2 | yes | — | — |
 | CLC1–CLC8 | yes | — | — |
-| Watchdog (windowed on the Q10) and the resets it causes | yes | — | yes: windowed WWDT (PIC16F131xx, PIC16F171xx) or single-register WDT (PIC16F152xx, PIC16F183xx, PIC16F180x6) |
+| Watchdog (windowed on the Q10) and the resets it causes | yes | — | yes: windowed WWDT (PIC16F131xx, PIC16F132xx, PIC16F171xx) or single-register WDT (PIC16F152xx, PIC16F183xx, PIC16F180x6) |
 | CRC and memory scanner | yes | — | — |
 | External interrupts INT0–2, interrupt-on-change | yes | — | the INT pin and interrupt-on-change |
 | MCLR pin reset | yes | yes | the MCLR pin is part of the port model |

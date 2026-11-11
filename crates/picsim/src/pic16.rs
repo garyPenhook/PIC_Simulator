@@ -594,9 +594,9 @@ impl Pic16 {
             }
         }
         // RxyPPS output codes of SCL1 and SDA1 (Table 18-2: DS40002343F p.202 and DS40002519D p.188 for the PIC16F171xx and
-        // PIC16F131xx; the other families as recorded in lib/i2c.bas from their data sheets).
+        // PIC16F131xx, DS40002686B p.207 for the PIC16F132xx; the other families as recorded in lib/i2c.bas from their data sheets).
         let name = dev.device.name.as_str();
-        let codes = if name.starts_with("PIC16F171") || name.starts_with("PIC16F131") {
+        let codes = if name.starts_with("PIC16F171") || name.starts_with("PIC16F131") || name.starts_with("PIC16F132") {
             Some((0x1B, 0x1C))
         } else if name.starts_with("PIC16F152") {
             Some((0x07, 0x08))

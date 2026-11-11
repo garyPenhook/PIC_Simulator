@@ -67,7 +67,7 @@ fn q10_masks() {
 #[test]
 fn f16_masks() {
     // WDTPSL/H are full read-only bytes. PORTC has RC0-RC5 on the 14-pin parts and RC0-RC7 on the 20-pin ones (pin allocation tables).
-    for part in ["16F13113", "16F13123", "16F13143", "16F15223", "16F17126", "16F17146"] {
+    for part in ["16F13113", "16F13123", "16F13143", "16F13214", "16F13224", "16F13244", "16F15223", "16F17126", "16F17146"] {
         let dev = load(part);
         for n in ["WDTPSL", "WDTPSH"] {
             if dev.find_sfr(n).is_some() {
@@ -75,7 +75,7 @@ fn f16_masks() {
             }
         }
     }
-    for (part, m) in [("16F13123", 0x3F), ("16F13124", 0x3F), ("16F13125", 0x3F), ("16F15223", 0x3F), ("16F15224", 0x3F), ("16F17126", 0x3F), ("16F13143", 0xFF), ("16F13144", 0xFF), ("16F13145", 0xFF), ("16F15243", 0xFF), ("16F15244", 0xFF), ("16F17146", 0xFF)] {
+    for (part, m) in [("16F13123", 0x3F), ("16F13124", 0x3F), ("16F13125", 0x3F), ("16F15223", 0x3F), ("16F15224", 0x3F), ("16F17126", 0x3F), ("16F13143", 0xFF), ("16F13144", 0xFF), ("16F13145", 0xFF), ("16F13224", 0x3F), ("16F13225", 0x3F), ("16F13244", 0xFF), ("16F13245", 0xFF), ("16F15243", 0xFF), ("16F15244", 0xFF), ("16F17146", 0xFF)] {
         assert_eq!(mask(&load(part), "PORTC"), m, "{part} PORTC");
     }
 }
@@ -91,5 +91,14 @@ fn q41_pir2_pie2_ipr2_keep_their_bits() {
             m.cpu.write(a, 0x00);
             assert_eq!(m.cpu.read(a), 0x00, "{part} {n} clears");
         }
+    }
+}
+
+#[test]
+fn f132_parts_have_seven_configuration_words_at_8007h() {
+    // DS40002686B Sec. 8.5.1-8.5.7 p.26-36 (Table 15-2 p.171 says five; the pack and the register chapters say seven)
+    for part in ["16F13214", "16F13215", "16F13224", "16F13225", "16F13244", "16F13245"] {
+        let dev = load(part);
+        assert_eq!((dev.memory.config.start, dev.memory.config.size, dev.config.len()), (0x8007, 7, 7), "{part}");
     }
 }
