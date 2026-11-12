@@ -29,11 +29,15 @@ impl Image {
     pub fn parse(text: &str) -> Result<Image, HexError> {
         let mut img = Image::default();
         let mut base: u32 = 0;
+        let mut ended = None::<usize>;
         for (n, raw) in text.lines().enumerate() {
             let line = n + 1;
             let l = raw.trim();
             if l.is_empty() {
                 continue;
+            }
+            if let Some(e) = ended {
+                return Err(HexError(format!("line {line}: a record after the end record on line {e}")));
             }
             let body = l.strip_prefix(':').ok_or_else(|| HexError(format!("line {line}: no ':'")))?;
             let len = hexbyte(body, 0, line)? as usize;
@@ -50,6 +54,9 @@ impl Image {
                 data.push(b);
             }
             let ck = hexbyte(body, 8 + 2 * len, line)?;
+            if body.len() > (len + 5) * 2 {
+                return Err(HexError(format!("line {line}: characters after the checksum")));
+            }
             if sum.wrapping_add(ck) != 0 {
                 return Err(HexError(format!("line {line}: checksum")));
             }
@@ -59,10 +66,12 @@ impl Image {
                         img.bytes.insert(base.wrapping_add(addr).wrapping_add(i as u32), *b);
                     }
                 }
-                1 => break,
-                2 if len == 2 => base = (u32::from(data[0]) << 8 | u32::from(data[1])) << 4,
-                4 if len == 2 => base = (u32::from(data[0]) << 8 | u32::from(data[1])) << 16,
-                _ => {}
+                1 => ended = Some(line),
+                2 | 4 if len != 2 => return Err(HexError(format!("line {line}: a type {kind:02X} record must hold 2 bytes, not {len}"))),
+                2 => base = (u32::from(data[0]) << 8 | u32::from(data[1])) << 4,
+                4 => base = (u32::from(data[0]) << 8 | u32::from(data[1])) << 16,
+                3 | 5 => {} // start address: the part starts at its reset vector
+                _ => return Err(HexError(format!("line {line}: unknown record type {kind:02X}"))),
             }
         }
         Ok(img)
@@ -117,4 +126,27 @@ pub fn empty_note(dev: &devdesc::Device, img: &Image) -> Option<String> {
     let k = if dev.device.family == "pic18" { 1 } else { 2 };
     let (s, n) = (dev.memory.program.start, dev.memory.program.size);
     (!img.bytes.keys().any(|&a| (k * s..k * (s + n)).contains(&a))).then(|| "the hex file has no program bytes: the part runs erased flash".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Image;
+
+    const EOF: &str = ":00000001FF\n";
+
+    #[test]
+    fn malformed_records_are_errors() {
+        let ok = format!(":020000040000FA\n:0100000012ED\n:0400000500000000F7\n{EOF}\n");
+        assert_eq!(Image::parse(&ok).unwrap().bytes.get(&0), Some(&0x12));
+        for (bad, why) in [
+            (format!(":0100000012EDFF\n{EOF}"), "characters after the checksum"),
+            (format!(":0100000400FB\n{EOF}"), "must hold 2 bytes"),
+            (format!(":03000002000000FB\n{EOF}"), "must hold 2 bytes"),
+            (format!("{EOF}:0100000012ED\n"), "after the end record"),
+            (format!(":0000000AF6\n{EOF}"), "unknown record type"),
+        ] {
+            let e = Image::parse(&bad).err().unwrap_or_else(|| panic!("{bad} parsed")).0;
+            assert!(e.contains(why), "{bad}: {e}");
+        }
+    }
 }
