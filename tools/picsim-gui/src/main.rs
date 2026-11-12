@@ -517,11 +517,17 @@ impl eframe::App for App {
         }
         egui::Panel::top("top").show(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
+                let mut picked = false;
                 egui::ComboBox::from_id_salt("dev").selected_text(&self.device).show_ui(ui, |ui| {
                     for d in self.devices.clone() {
-                        ui.selectable_value(&mut self.device, d.clone(), d);
+                        picked |= ui.selectable_value(&mut self.device, d.clone(), d).changed();
                     }
                 });
+                // G3: the box names the part that runs. Another part chosen with a program loaded loads it again on that
+                // part (load stops a run and drops a step job first); with nothing loaded the choice waits for Load.
+                if picked && (self.m.is_some() || self.m16.is_some()) {
+                    self.load();
+                }
                 ui.add(egui::TextEdit::singleline(&mut self.hex_path).hint_text("path to .hex or .elf").desired_width(320.0));
                 ui.add(egui::TextEdit::singleline(&mut self.stim_path).hint_text("stimulus .toml (optional)").desired_width(180.0))
                     .on_hover_text("Optional. A stimulus file you write to feed the program serial input, ADC values, pin levels, LEDs or an OLED. Leave empty to run without one.");
