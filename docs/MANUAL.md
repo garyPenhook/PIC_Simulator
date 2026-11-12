@@ -427,7 +427,7 @@ TMR0L = 17  (11)
 
 The decimal value is the little-endian combination of the bytes, followed by the bytes in memory order.
 
-**Serial.** `tx1: …` and `tx2: …` show what the EUSART/UART transmitted, as a string with control characters escaped (`\r\n`).
+**Serial.** `tx1: …`, `tx2: …` and so on, one line per EUSART/UART that sent anything (UART3 on the Q41 parts included), show what it transmitted, as a string with control characters escaped (`\r\n`).
 
 **SPI (PIC18 only).** `spi1: 9F 00 00` lists the bytes the program sent through SPI 1, in hex.
 

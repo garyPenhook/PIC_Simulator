@@ -150,7 +150,7 @@ fn run() -> Result<ExitCode, String> {
         let v: u64 = b.iter().rev().fold(0, |a, x| a << 8 | u64::from(*x));
         println!("{name} = {v}  ({})", b.iter().map(|x| format!("{x:02X}")).collect::<Vec<_>>().join(" "));
     }
-    for n in 1..=2u8 {
+    for n in m.cpu.p.tx.iter().map(|t| t.0).collect::<std::collections::BTreeSet<u8>>() {
         let bytes: Vec<u8> = m.cpu.p.tx.iter().filter(|t| t.0 == n).map(|t| t.2).collect();
         if !bytes.is_empty() {
             println!("tx{n}: {}", String::from_utf8_lossy(&bytes).escape_debug());
@@ -306,7 +306,7 @@ fn run16(
         let v: u64 = b.iter().rev().fold(0, |a, x| a << 8 | u64::from(*x));
         println!("{name} = {v}  ({})", b.iter().map(|x| format!("{x:02X}")).collect::<Vec<_>>().join(" "));
     }
-    for n in 1..=2u8 {
+    for n in m.cpu.tx.iter().map(|t| t.0).collect::<std::collections::BTreeSet<u8>>() {
         let bytes: Vec<u8> = m.cpu.tx.iter().filter(|t| t.0 == n).map(|t| t.2).collect();
         if !bytes.is_empty() {
             println!("tx{n}: {}", String::from_utf8_lossy(&bytes).escape_debug());
