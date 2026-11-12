@@ -24,10 +24,10 @@ usage: basil-sim prog.hex|prog.elf [--device PART] [--devices DIR]
   --until SYMBOL        stop when the PC reaches SYMBOL (default __halt)
   --max-cycles N        stop after N instruction cycles (default 2000000000)
   --stim FILE           stimulus file
-  --dump NAME[:N],...   after the run print these symbols or SFRs, N bytes (1..65536) each
+  --dump NAME[:N],...   after the run print these symbols, SFRs or addresses (0x20), N bytes (1..65536) each
   --bp SYMBOL,...       print a line each time one of these is reached
   --bp-max N            stop after N breakpoint hits (default 20)
-  --trace FROM-TO       print every instruction from cycle FROM to TO, then exit
+  --trace FROM-TO       print every instruction from cycle FROM to TO (FROM <= TO), then exit
   --trace-regs NAME,... the registers each --trace line shows
   --config              print the configuration words (PIC18 only)
   --speed max|R         run at a fraction R of real time (default max)
@@ -80,7 +80,11 @@ fn run() -> Result<ExitCode, String> {
             "--trace" => {
                 let v = val("--trace")?;
                 let (a, b) = v.split_once('-').ok_or("--trace FROM-TO (cycles)")?;
-                trace = Some((a.parse().map_err(|_| "bad --trace")?, b.parse().map_err(|_| "bad --trace")?));
+                let (a, b): (u64, u64) = (a.parse().map_err(|_| "bad --trace")?, b.parse().map_err(|_| "bad --trace")?);
+                if a > b {
+                    return Err(format!("--trace {v}: FROM must not be after TO"));
+                }
+                trace = Some((a, b));
             }
             "--trace-regs" => trace_regs = Some(val("--trace-regs")?.split(',').map(String::from).collect()),
             "--config" => show_cfg = true,
@@ -178,7 +182,10 @@ fn run() -> Result<ExitCode, String> {
     println!("stop: {stop:?}  cycles: {}  instructions: {}", m.cpu.cycles, m.cpu.icount);
     for d in &dump {
         let (name, len) = dump_spec(d)?;
-        let addr = sym(&m.syms, &m.debug, name)?.or_else(|| m.dev.find_sfr(name).map(|s| s.addr)).ok_or(format!("unknown symbol {name}"))?;
+        let addr = match num_addr(name) {
+            Some(a) => a,
+            None => sym(&m.syms, &m.debug, name)?.or_else(|| m.dev.find_sfr(name).map(|s| s.addr)).ok_or(format!("unknown symbol {name}"))?,
+        };
         let b = m.peek(addr, len);
         let v: u64 = b.iter().rev().fold(0, |a, x| a << 8 | u64::from(*x));
         println!("{name} = {v}  ({})", b.iter().map(|x| format!("{x:02X}")).collect::<Vec<_>>().join(" "));
@@ -337,7 +344,10 @@ fn run16(
     println!("stop: {stop:?}  cycles: {}  instructions: {}", m.cpu.cycles, m.cpu.icount);
     for d in dump {
         let (name, len) = dump_spec(d)?;
-        let addr = sym(&m.syms, &m.debug, name)?.or_else(|| m.dev.find_sfr(name).map(|s| s.addr)).ok_or(format!("unknown symbol {name}"))?;
+        let addr = match num_addr(name) {
+            Some(a) => a,
+            None => sym(&m.syms, &m.debug, name)?.or_else(|| m.dev.find_sfr(name).map(|s| s.addr)).ok_or(format!("unknown symbol {name}"))?,
+        };
         let b = m.peek(addr, len);
         let v: u64 = b.iter().rev().fold(0, |a, x| a << 8 | u64::from(*x));
         println!("{name} = {v}  ({})", b.iter().map(|x| format!("{x:02X}")).collect::<Vec<_>>().join(" "));
@@ -376,6 +386,15 @@ fn check_dump(d: &picsim::debuginfo::DebugInfo, dump: &[String]) -> Result<(), S
         dump_spec(x)?;
     }
     dump.iter().filter_map(|x| d.ambiguous(x.split_once(':').map_or(x.as_str(), |p| p.0))).next().map_or(Ok(()), Err)
+}
+
+/// A `--dump` name that is a data address: `0x` and hex digits, or decimal digits.
+fn num_addr(name: &str) -> Option<u32> {
+    match name.strip_prefix("0x").or_else(|| name.strip_prefix("0X")) {
+        Some(h) => u32::from_str_radix(h, 16).ok(),
+        None if name.bytes().all(|c| c.is_ascii_digit()) => name.parse().ok(),
+        None => None,
+    }
 }
 
 /// Longest `--dump NAME:LEN`: more than any PIC data space, small enough to allocate (C1).
@@ -442,6 +461,16 @@ mod tests {
             n += 1;
         }
         assert!(n >= 18, "found only {n} options");
+    }
+
+    #[test]
+    fn dump_takes_numeric_addresses() {
+        assert_eq!(num_addr("0x20"), Some(0x20));
+        assert_eq!(num_addr("0X4FF"), Some(0x4FF));
+        assert_eq!(num_addr("32"), Some(32));
+        for n in ["WREG", "0x", "0xZZ", "", "x20"] {
+            assert_eq!(num_addr(n), None, "{n}");
+        }
     }
 
     #[test]

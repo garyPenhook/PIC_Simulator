@@ -375,10 +375,10 @@ The program runs from reset until it stops, then `basil-sim` prints a report and
 | `--until SYMBOL` | `__halt` | Stop when the program counter reaches this symbol, which must exist in the listing or ELF or the run does not start. A routine's name stops the run when the routine is **entered**, including by a call (useful for C). When no `--until` is given and the program has no `__halt` (a C program), the run is not stopped by a symbol: it lasts `--max-cycles`, with a note on standard error |
 | `--max-cycles N` | 2 000 000 000 | Stop after this many instruction cycles even if the symbol was not reached |
 | `--stim FILE` | none | Stimulus file (section 7) |
-| `--dump LIST` | none | After the run, print these symbols or SFRs; `NAME` is one byte, `NAME:N` is *N* bytes read little-endian (*N* from 1 to 65536; any other length is refused before the run) |
+| `--dump LIST` | none | After the run, print these symbols, SFRs or data addresses (`0x20` in hex, `32` in decimal; an address outside data memory reads 0); `NAME` is one byte, `NAME:N` is *N* bytes read little-endian (*N* from 1 to 65536; any other length is refused before the run) |
 | `--bp LIST` | none | Comma-separated code symbols. Each time the program reaches one, a line is printed and the run continues |
 | `--bp-max N` | 20 | Stop after this many breakpoint hits |
-| `--trace FROM-TO` | off | Run silently to cycle FROM, then print every instruction until cycle TO, then exit |
+| `--trace FROM-TO` | off | Run silently to cycle FROM, then print every instruction until cycle TO, then exit; FROM after TO is refused before the run |
 | `--trace-regs NAME,…` | see below | The registers each `--trace` line shows, by data-sheet name; a name the part does not have is an error before the run |
 | `--config` | off | Print the configuration words and the oscillator and watchdog registers they set (PIC18 only) |
 | `--speed max\|R` | `max` | Limit the run to a fraction of real time: `1` is real time, `0.5`, `1/10`, `0.001` … |
