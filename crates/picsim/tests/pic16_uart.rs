@@ -154,3 +154,15 @@ fn txif_cannot_be_cleared_by_software() {
     run_to(&mut m, 5);
     assert_eq!(pir4(&m) & TXIF, TXIF, "the clear was ignored");
 }
+
+#[test]
+fn auto_baud_wake_up_and_break_give_notes() {
+    const BAUD1CON: u16 = 0x12;
+    // SPEN, TXEN + SENDB, ABDEN + WUE
+    let prog: Vec<u16> = [vec![movlb(14), movlw(0x90), movwf(RC1STA), movlw(0x28), movwf(TX1STA), movlw(0x03), movwf(BAUD1CON)], vec![NOP; 100]].concat();
+    let mut m = machine(&prog, &[], None);
+    run_to(&mut m, 100);
+    for f in ["ABDEN", "WUE", "SENDB"] {
+        assert!(m.cpu.notes.iter().any(|n| n.contains(f)), "{f}: {:?}", m.cpu.notes);
+    }
+}

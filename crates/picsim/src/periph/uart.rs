@@ -154,6 +154,18 @@ impl Uart {
     pub fn sync(&mut self, mem: &mut [u8], now: u64, ev: &mut Vec<u64>, tx: &mut Log<(u8, u64, u8)>, notes: &mut BTreeSet<String>) {
         if mem[self.sta] & 0x10 != 0 {
             notes.insert(format!("EUSART{} synchronous mode is not modelled; nothing is sent", self.num));
+        } else {
+            // Asynchronous-only features that are not modelled (BAUDxCON bits 0, 1; TXxSTA bit 3; DS40002519D p.428, 432):
+            // the bits stay set, so a program polling for the hardware to clear them waits for ever.
+            if mem[self.baud] & 1 != 0 {
+                notes.insert(format!("EUSART{} auto-baud detect (ABDEN) is not modelled; ABDEN never clears", self.num));
+            }
+            if mem[self.baud] & 2 != 0 {
+                notes.insert(format!("EUSART{} wake-up on receive (WUE) is not modelled; WUE never clears", self.num));
+            }
+            if mem[self.sta] & 8 != 0 {
+                notes.insert(format!("EUSART{} break character (SENDB) is not modelled; no break is sent and SENDB never clears", self.num));
+            }
         }
         while let Some(e) = self.tsr_end.filter(|e| *e <= now) {
             self.tsr_end = None;

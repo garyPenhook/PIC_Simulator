@@ -917,8 +917,11 @@ impl Periph {
             let mut best: Option<(u64, usize)> = None;
             for (i, c) in self.ccps.iter().enumerate() {
                 let Some(reg) = c.pps else { continue };
-                if !c.en(m) || !(3..=7).contains(&c.mode(m)) || !self.t1.iter().any(|t| t.n == ccp::timer_of(self.ccptmrs, m, c.n, false)) || m.mem[c.cap] & 15 != 0 {
+                if !c.en(m) || !(3..=7).contains(&c.mode(m)) || !self.t1.iter().any(|t| t.n == ccp::timer_of(self.ccptmrs, m, c.n, false)) {
                     continue;
+                }
+                if m.mem[c.cap] & 15 != 0 {
+                    continue; // noted in `sync_with`
                 }
                 for at in self.drive.times(c.scan, now) {
                     if best.is_none_or(|b| (at, i) < b) && self.pps_pin(m, reg, at) != self.pps_pin(m, reg, at - 1) {
@@ -2103,6 +2106,13 @@ impl Periph {
                 }
             }));
         sb.comps = comps;
+        // Capture from a source other than the CCPxPPS pin (CTS not 0) is not modelled, as on the PIC16 core.
+        for c in &self.ccps {
+            let cap = m.mem[c.cap] & 15;
+            if cap != 0 && c.en(m) && (3..=7).contains(&c.mode(m)) {
+                self.notes.insert(format!("CCP{} capture source CTS={cap} is not modelled (only the CCPxPPS pin); no capture", c.n));
+            }
+        }
         // Timer2-type period matches (timer number, cycle, PR, prescaler shift) go to `sb.periods`.
         // Each running timer's clock edges are looked up first: they read the pins and the other tables of `self`.
         // In Sleep a timer is run if it was set up to count at SLEEP (`sleep_run`, the same fact `thaw` goes by); it counts

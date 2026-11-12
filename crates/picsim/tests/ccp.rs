@@ -387,3 +387,15 @@ fn pwm_on_a_fosc_clocked_timer2_gives_a_note() {
     assert!(m.cpu.p.pin_log.is_empty());
     assert!(m.cpu.notes.iter().any(|n| n.contains("CCP1 PWM on Timer2 clocked by FOSC")), "{:?}", m.cpu.notes);
 }
+
+#[test]
+fn capture_from_a_source_other_than_the_pin_gives_a_note() {
+    let mut m = machine("");
+    w(&mut m, "T1CLK", 1);
+    w(&mut m, "CCP1CAP", 3); // CTS not 0: not the CCP1PPS pin
+    w(&mut m, "CCP1CON", 0x85);
+    w(&mut m, "T1CON", 0x01);
+    let start = m.cpu.cycles;
+    run_to(&mut m, start + 100);
+    assert!(m.cpu.notes.iter().chain(m.cpu.p.notes.iter()).any(|n| n.contains("CCP1 capture source CTS=3")), "{:?}", m.cpu.notes);
+}
