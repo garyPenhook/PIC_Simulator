@@ -796,6 +796,7 @@ The simulator follows the data sheet. Where it differs from MDB it says so in `d
 | Serial input is garbled or lost | Your `bit` or the program's baud rate differs; with `bit` omitted the sender uses the receiver's own rate. The receiver must be enabled (`SPEN`, `CREN`) before the Start bit falls |
 | An input pin always reads 0 | Nothing drives it in the stimulus (`[[pin]]`/`[[port]]`), or `ANSELx` has the bit set |
 | A flag never sets | The peripheral may be unmodelled; look for `unmodelled SFRs touched` in the notes |
+| The program runs wild from reset | The hex may be built for another part: look for the notes `… hex byte(s) at … are outside every memory region of the …` and `the ELF was built for … but the part is the …`. A PIC16 hex on a large PIC18 part can fit its memory without either note when there is no ELF |
 | Results differ from the real chip | See the notes and section 9. If a behaviour matters and is marked `[A#]` in `docs/FACTS-SIM.md`, it is an assumption not yet measured on silicon |
 
 ---

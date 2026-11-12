@@ -22,17 +22,20 @@ pub struct Machine16 {
     /// `run` stops at its `until` address even when the PC gets there by a CALL: the address is the entry of a routine
     /// (`basil-sim --until ROUTINE`), not basil's `__halt`, which may be the first address of a routine that follows the program.
     pub until_routine: bool,
+    /// Notes about the files loaded (a hex or ELF for another part, C2), given to the core again after every reset.
+    load_notes: Vec<String>,
 }
 
 impl Machine16 {
     pub fn new(dev: Device) -> Result<Machine16, String> {
         let cpu = Pic16::new(&dev)?;
-        Ok(Machine16 { cpu, dev, syms: BTreeMap::new(), breakpoints: Vec::new(), debug: DebugInfo::default(), image: Image::default(), stimulus: None, until_routine: false })
+        Ok(Machine16 { cpu, dev, syms: BTreeMap::new(), breakpoints: Vec::new(), debug: DebugInfo::default(), image: Image::default(), stimulus: None, until_routine: false, load_notes: Vec::new() })
     }
 
     pub fn load_hex(&mut self, text: &str) -> Result<(), String> {
         let img = Image::parse(text).map_err(|e| e.to_string())?;
         self.cpu.load(&img);
+        self.note_load(crate::hex::stray_note(&self.dev, &img));
         self.image.bytes.extend(img.bytes); // reset() reloads everything loaded so far, as the running machine has it
         Ok(())
     }
@@ -54,8 +57,17 @@ impl Machine16 {
         }
         c.set_board(self.cpu.board.fresh()); // the parts stay wired, back at power-on
         self.cpu = c;
+        self.cpu.notes.extend(self.load_notes.iter().cloned());
         self.watch_entries();
         Ok(())
+    }
+
+    /// Record a note about a loaded file, in the core's notes now and again after every reset.
+    fn note_load(&mut self, n: Option<String>) {
+        if let Some(n) = n {
+            self.cpu.notes.insert(n.clone());
+            self.load_notes.push(n);
+        }
     }
 
     pub fn load_symbols_from_asm(&mut self, asm: &str) {
@@ -66,6 +78,7 @@ impl Machine16 {
     pub fn load_elf(&mut self, path: &std::path::Path) -> Result<(), String> {
         let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
         self.load_debug(DebugInfo::from_elf(&bytes).map_err(|e| format!("{}: {e}", path.display()))?);
+        self.note_load(crate::hex::elf_part_note(&self.dev, &bytes));
         Ok(())
     }
 

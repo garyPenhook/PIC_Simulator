@@ -68,3 +68,46 @@ impl Image {
         Ok(img)
     }
 }
+
+/// A note when bytes of `img` fall in no memory region of `dev` (program, data EEPROM, user ID, configuration, device
+/// ID), which is how a hex file built for another part or family shows itself (REVIEW-2026-11-11 C2). PIC16 regions are
+/// in words, two hex bytes each.
+pub fn stray_note(dev: &devdesc::Device, img: &Image) -> Option<String> {
+    let k = if dev.device.family == "pic18" { 1 } else { 2 };
+    let m = &dev.memory;
+    let regions = [(m.program.start, m.program.size), (m.eeprom.start, m.eeprom.size), (m.user_id.start, m.user_id.size), (m.config.start, m.config.size), (m.device_id.start, m.device_id.size)];
+    let inside = |a: u32| regions.iter().any(|&(s, n)| n > 0 && (k * s..k * (s + n)).contains(&a));
+    let stray: Vec<u32> = img.bytes.keys().copied().filter(|&a| !inside(a)).collect();
+    let (first, last) = (stray.first()?, stray.last()?);
+    Some(format!(
+        "{} hex byte(s) at {first:06X}-{last:06X} are outside every memory region of the {}: is the hex file built for another part?",
+        stray.len(),
+        dev.device.name
+    ))
+}
+
+/// The parts an ELF's debug information names through the processor include it was built with (`proc/pic18f27q10.inc`
+/// from basil, `proc/pic18f27q10.h` from XC8), upper case without the `PIC` prefix (`18F27Q10`).
+pub fn elf_parts(bytes: &[u8]) -> std::collections::BTreeSet<String> {
+    let key = b"proc/pic";
+    let mut out = std::collections::BTreeSet::new();
+    let mut i = 0;
+    while let Some(p) = bytes[i..].windows(key.len()).position(|w| w.eq_ignore_ascii_case(key)) {
+        let s = i + p + key.len();
+        let n = bytes[s..].iter().take_while(|b| b.is_ascii_alphanumeric()).count();
+        let rest = &bytes[s + n..];
+        if n > 0 && (rest.starts_with(b".inc") || rest.starts_with(b".h")) {
+            out.insert(String::from_utf8_lossy(&bytes[s..s + n]).to_ascii_uppercase());
+        }
+        i = s;
+    }
+    out
+}
+
+/// A note when the ELF names parts and `dev` is not one of them.
+pub fn elf_part_note(dev: &devdesc::Device, bytes: &[u8]) -> Option<String> {
+    let parts = elf_parts(bytes);
+    let want = dev.device.name.to_ascii_uppercase();
+    let want = want.strip_prefix("PIC").unwrap_or(&want);
+    (!parts.is_empty() && !parts.contains(want)).then(|| format!("the ELF was built for {} but the part is the {}", parts.into_iter().collect::<Vec<_>>().join(", "), dev.device.name))
+}
