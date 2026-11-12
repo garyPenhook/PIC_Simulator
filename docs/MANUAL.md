@@ -357,7 +357,7 @@ basil-sim prog.hex|prog.elf [--device PART] [--devices DIR]
           [--bp SYMBOL,…] [--bp-max N]
           [--trace FROM-TO] [--trace-regs NAME,…] [--config]
           [--speed max|RATIO] [--fosc MHZ]
-basil-sim --version
+basil-sim --help | --version
 ```
 
 The program runs from reset until it stops, then `basil-sim` prints a report and exits.
@@ -383,7 +383,10 @@ The program runs from reset until it stops, then `basil-sim` prints a report and
 | `--config` | off | Print the configuration words and the oscillator and watchdog registers they set (PIC18 only) |
 | `--speed max\|R` | `max` | Limit the run to a fraction of real time: `1` is real time, `0.5`, `1/10`, `0.001` … |
 | `--fosc MHZ` | 64 | The clock `--speed` uses (0 < MHZ ≤ 64) |
+| `--help`, `-h` | | Print the synopsis and a line for each option, and exit |
 | `--version`, `-V` | | Print `basil-sim <version>` and exit |
+
+Any other argument that starts with `-` is refused as an unknown option, so a program path cannot start with `-` (write `./-prog.hex`).
 
 In a C program of several files, a symbol given to `--until`, `--dump` or `--bp` can carry its file: `helper@main.c`, `count@util.c:2`. That is required when two files each define a `static` of that name; the bare name is then refused before the run.
 

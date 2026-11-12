@@ -8,6 +8,34 @@ use picsim::{Machine, Stop};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+/// The text `--help` prints; the usage error on a missing program prints its synopsis lines.
+const HELP: &str = "\
+usage: basil-sim prog.hex|prog.elf [--device PART] [--devices DIR]
+                 [--asm prog.S] [--until SYMBOL] [--max-cycles N]
+                 [--stim FILE] [--dump NAME[:BYTES],...]
+                 [--bp SYMBOL,...] [--bp-max N]
+                 [--trace FROM-TO] [--trace-regs NAME,...] [--config]
+                 [--speed max|RATIO] [--fosc MHZ]
+       basil-sim --help | --version
+
+  --device PART         the part, a file in the devices folder without .toml (default 18F27Q10)
+  --devices DIR         folder holding the device files
+  --asm FILE            assembly listing to take symbols from (default <hex>.S)
+  --until SYMBOL        stop when the PC reaches SYMBOL (default __halt)
+  --max-cycles N        stop after N instruction cycles (default 2000000000)
+  --stim FILE           stimulus file
+  --dump NAME[:N],...   after the run print these symbols or SFRs, N bytes (1..65536) each
+  --bp SYMBOL,...       print a line each time one of these is reached
+  --bp-max N            stop after N breakpoint hits (default 20)
+  --trace FROM-TO       print every instruction from cycle FROM to TO, then exit
+  --trace-regs NAME,... the registers each --trace line shows
+  --config              print the configuration words (PIC18 only)
+  --speed max|R         run at a fraction R of real time (default max)
+  --fosc MHZ            the clock --speed uses, 0 < MHZ <= 64 (default 64)
+  -h, --help            print this help and exit
+  -V, --version         print the version and exit
+";
+
 fn main() -> ExitCode {
     match run() {
         Ok(c) => c,
@@ -37,6 +65,10 @@ fn run() -> Result<ExitCode, String> {
                 println!("basil-sim {}", env!("CARGO_PKG_VERSION"));
                 return Ok(ExitCode::SUCCESS);
             }
+            "--help" | "-h" => {
+                print!("{HELP}");
+                return Ok(ExitCode::SUCCESS);
+            }
             "--device" => device = val("--device")?,
             "--devices" => root = PathBuf::from(val("--devices")?),
             "--asm" => asm = Some(PathBuf::from(val("--asm")?)),
@@ -63,12 +95,12 @@ fn run() -> Result<ExitCode, String> {
             "--bp" => bps = val("--bp")?.split(',').map(String::from).collect(),
             "--bp-max" => bp_max = val("--bp-max")?.parse().map_err(|_| "bad --bp-max")?,
             "--max-cycles" => max = val("--max-cycles")?.parse().map_err(|_| "bad --max-cycles")?,
-            s if s.starts_with("--") => return Err(format!("unknown option {s}")),
+            s if s.starts_with('-') && s.len() > 1 => return Err(format!("unknown option {s} (see --help)")),
             _ => hex = Some(PathBuf::from(a)),
         }
     }
     let mut pace = if speed > 0.0 { Some(Pace::new(speed, fosc)) } else { None };
-    let hex = hex.ok_or("usage: basil-sim prog.hex --device PART [--asm prog.S] [--until SYM] [--dump A,B:2] [--speed max|R] [--fosc MHZ]")?;
+    let hex = hex.ok_or_else(|| HELP.split("\n\n").next().unwrap_or(HELP).to_string() + "\n(see --help)")?;
     let dev = devdesc::Device::load(&root.join(format!("{device}.toml"))).map_err(|e| e.to_string())?;
     if dev.device.family == "pic16e" {
         if show_cfg {
@@ -398,6 +430,19 @@ fn paced_run<M>(pace: &mut Option<Pace>, budget: u64, m: &mut M, cycles: impl Fn
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn help_lists_every_option() {
+        let src = include_str!("main.rs");
+        let arms = src.split("match a.as_str()").nth(1).unwrap().split("s if s.starts_with").next().unwrap();
+        let mut n = 0;
+        let pats = arms.lines().filter_map(|l| l.trim().split_once(" =>")).map(|(p, _)| p);
+        for opt in pats.flat_map(|p| p.split(" | ")).map(|o| o.trim_matches('"')).filter(|o| o.starts_with('-')) {
+            assert!(HELP.contains(opt), "--help does not list {opt}");
+            n += 1;
+        }
+        assert!(n >= 18, "found only {n} options");
+    }
 
     #[test]
     fn dump_lengths_are_bounded() {
