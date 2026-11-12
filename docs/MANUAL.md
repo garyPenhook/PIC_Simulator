@@ -77,10 +77,15 @@ On Linux the window needs the usual graphics libraries for an `egui` program (X1
 
 ## Where the device descriptions are found
 
-The simulator needs one description file per part, `devices/<part>.toml` (section 4). The folder is found at **build time**: the programs look for `devices/` at `<workspace>/devices`, the path they were built from. Consequences:
+The simulator needs one description file per part, `devices/<part>.toml` (section 4). Both programs look for the folder in this order and use the first that exists:
 
-* Run the programs from where `cargo` built them, or keep the workspace where it was when you built it. If you move the workspace, rebuild.
-* `basil-sim` can be pointed elsewhere with `--devices DIR`. `pic-sim` has no such option; if its device box is empty, the `devices/` folder could not be found.
+1. `--devices DIR` (`basil-sim` only);
+2. the folder named by the environment variable `PICSIM_DEVICES` (when it is set it is used even if it does not exist, so a mistyped path is an error rather than another set of parts);
+3. `devices/` in the folder that holds the executable;
+4. `../share/picsim/devices` from the executable's folder (for a binary installed in `<prefix>/bin`);
+5. `<workspace>/devices`, the path the programs were built from.
+
+So a binary run from where `cargo` built it finds the workspace's folder as before. To install or move it, copy `devices/` beside it, or set `PICSIM_DEVICES`. If `pic-sim`'s device box is empty, none of these folders was found.
 
 ## Starting
 
@@ -370,7 +375,7 @@ The program runs from reset until it stops, then `basil-sim` prints a report and
 |---|---|---|
 | `prog.hex` / `prog.elf` | required | The program. Given an `.elf`, the hex beside it (or in `dist/`) is loaded |
 | `--device PART` | `18F27Q10` | The part, as the name of a file in `devices/` without `.toml` (`18F16Q41`, `16F17146`, `16LF18346`). The part is **not** taken from the ELF here, so give the right one |
-| `--devices DIR` | `<workspace>/devices` | Folder holding the device files |
+| `--devices DIR` | see section 2 | Folder holding the device files (else `PICSIM_DEVICES`, `devices/` beside the executable, `../share/picsim/devices`, then the workspace) |
 | `--asm FILE` | `<hex>.S` | The assembly listing to take symbols from |
 | `--until SYMBOL` | `__halt` | Stop when the program counter reaches this symbol, which must exist in the listing or ELF or the run does not start. A routine's name stops the run when the routine is **entered**, including by a call (useful for C). When no `--until` is given and the program has no `__halt` (a C program), the run is not stopped by a symbol: it lasts `--max-cycles`, with a note on standard error |
 | `--max-cycles N` | 2 000 000 000 | Stop after this many instruction cycles even if the symbol was not reached |
@@ -790,7 +795,7 @@ The simulator follows the data sheet. Where it differs from MDB it says so in `d
 
 | Symptom | Cause and remedy |
 |---|---|
-| The device box is empty | `devices/` was not found at its build-time location. Rebuild from the workspace that holds it (section 2) |
+| The device box is empty | No `devices/` folder was found (section 2). Set `PICSIM_DEVICES` or copy `devices/` beside the executable |
 | `NAME is a routine in more than one file (a.c, b.c): name one as NAME@a.c` (or `a variable`) | Two C files each define a `static` of that name, and `basil-sim` will not pick one. Add the file, as the message shows: `--until helper@main.c`, `--dump count@util.c` |
 | `symbol NAME not found (no prog.S)` | The symbol given with `--until` or `--bp` is in neither the listing nor the ELF. Build with `-g` (for C also `-O0`, so the routine is not inlined away), or check the spelling. A C routine is named as in the source (`add`), without XC8's leading underscore |
 | `basil-sim` runs for a long time and exits with status 1 | The program never reaches `__halt` (a main loop). Add `--max-cycles` for the time you want to simulate |
@@ -831,7 +836,7 @@ The simulator follows the data sheet. Where it differs from MDB it says so in `d
 
 ## basil-sim options
 
-`--device`, `--devices`, `--asm`, `--until`, `--max-cycles`, `--stim`, `--dump`, `--bp`, `--bp-max`, `--trace`, `--trace-regs`, `--config`, `--speed`, `--fosc`, `--version`.
+`--device`, `--devices`, `--asm`, `--until`, `--max-cycles`, `--stim`, `--dump`, `--bp`, `--bp-max`, `--trace`, `--trace-regs`, `--config`, `--speed`, `--fosc`, `--help`, `--version`. Environment: `PICSIM_DEVICES`.
 
 ## Stimulus sections
 

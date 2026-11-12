@@ -484,3 +484,17 @@ mod tests {
         assert_eq!(d.count_sfr("TX#STA"), 2);
     }
 }
+
+/// The folder of device descriptions when none is given on the command line: `$PICSIM_DEVICES` if it is set, else
+/// `devices/` beside the executable, else `../share/picsim/devices` from it (an installed layout), else `built`, the
+/// workspace folder the program was built from. A set `$PICSIM_DEVICES` is used even if it is not a folder, so a
+/// mistyped one fails instead of quietly giving another set of parts; of the others the first that is a directory wins,
+/// and `built` is returned when none is.
+pub fn devices_dir(built: &std::path::Path) -> std::path::PathBuf {
+    if let Some(e) = std::env::var_os("PICSIM_DEVICES").filter(|e| !e.is_empty()) {
+        return e.into();
+    }
+    let exe = std::env::current_exe().ok().and_then(|e| e.parent().map(std::path::Path::to_path_buf));
+    let beside = exe.iter().flat_map(|d| [d.join("devices"), d.join("../share/picsim/devices")]);
+    beside.into_iter().find(|d| d.is_dir()).unwrap_or_else(|| built.to_path_buf())
+}

@@ -152,7 +152,7 @@ fn list_devices(dir: &PathBuf) -> Vec<String> {
 
 impl App {
     fn new(hex: Option<String>, device: Option<String>) -> App {
-        let devices_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../devices");
+        let devices_dir = devdesc::devices_dir(&PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../devices"));
         let devices = list_devices(&devices_dir);
         let mut a = App {
             devices_dir,

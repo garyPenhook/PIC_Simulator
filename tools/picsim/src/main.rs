@@ -19,7 +19,8 @@ usage: basil-sim prog.hex|prog.elf [--device PART] [--devices DIR]
        basil-sim --help | --version
 
   --device PART         the part, a file in the devices folder without .toml (default 18F27Q10)
-  --devices DIR         folder holding the device files
+  --devices DIR         folder holding the device files (else $PICSIM_DEVICES, devices/ beside
+                        the executable, ../share/picsim/devices, then the build workspace)
   --asm FILE            assembly listing to take symbols from (default <hex>.S)
   --until SYMBOL        stop when the PC reaches SYMBOL (default __halt)
   --max-cycles N        stop after N instruction cycles (default 2000000000)
@@ -57,7 +58,7 @@ fn run() -> Result<ExitCode, String> {
     let mut until_given = false;
     let (mut hex, mut device, mut asm, mut until, mut dump, mut max) =
         (None::<PathBuf>, String::from("18F27Q10"), None::<PathBuf>, Some(String::from("__halt")), Vec::new(), 2_000_000_000u64);
-    let mut root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../devices");
+    let mut root = devdesc::devices_dir(&PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../devices"));
     while let Some(a) = args.next() {
         let mut val = |n: &str| args.next().ok_or(format!("{n} needs a value"));
         match a.as_str() {
@@ -105,7 +106,8 @@ fn run() -> Result<ExitCode, String> {
     }
     let mut pace = if speed > 0.0 { Some(Pace::new(speed, fosc)) } else { None };
     let hex = hex.ok_or_else(|| HELP.split("\n\n").next().unwrap_or(HELP).to_string() + "\n(see --help)")?;
-    let dev = devdesc::Device::load(&root.join(format!("{device}.toml"))).map_err(|e| e.to_string())?;
+    let path = root.join(format!("{device}.toml"));
+    let dev = devdesc::Device::load(&path).map_err(|e| format!("{}: {e}", path.display()))?;
     if dev.device.family == "pic16e" {
         if show_cfg {
             return Err("--config is not supported for PIC16 parts yet".into());
