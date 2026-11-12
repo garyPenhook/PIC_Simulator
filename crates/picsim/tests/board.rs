@@ -218,10 +218,16 @@ fn released_bus_pins_read_high_with_the_pull_ups() {
 #[test]
 fn bad_board_entries_are_errors() {
     let dev = || Device::load(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../../devices/18F27Q10.toml")).unwrap();
-    for bad in ["[[led]]\n", "[[led]]\npin = \"RZ9\"\n", "[[led]]\npin = \"RB0\"\nactive = \"mid\"\n", "[[oled]]\nbus = \"spi\"\nscl = \"RC0\"\nsda = \"RC1\"\n", "[[oled]]\nbus = \"gpio\"\nscl = \"RC0\"\n", "[[oled]]\nbus = \"gpio\"\nscl = \"RC0\"\nsda = \"RC1\"\nheight = 48\n", "[[led]]\npin = \"RH0\"\n"] {
+    for bad in ["[[led]]\n", "[[led]]\npin = \"RZ9\"\n", "[[led]]\npin = \"RB0\"\nactive = \"mid\"\n", "[[oled]]\nbus = \"spi\"\nscl = \"RC0\"\nsda = \"RC1\"\n", "[[oled]]\nbus = \"gpio\"\nscl = \"RC0\"\n", "[[oled]]\nbus = \"gpio\"\nscl = \"RC0\"\nsda = \"RC1\"\nheight = 48\n", "[[led]]\npin = \"RH0\"\n", "[[oled]]\nbus = \"i2c0\"\nscl = \"RC3\"\nsda = \"RC4\"\n", "[[oled]]\nbus = \"i2c3\"\nscl = \"RC3\"\nsda = \"RC4\"\n", "[[uart]]\nbytes = \"\u{20AC}\"\n"] {
         let mut m = Machine::new(dev()).unwrap();
         assert!(m.load_stimulus(bad).is_err(), "{bad}");
     }
+}
+
+#[test]
+fn uart_bytes_take_latin_1() {
+    let mut m = Machine::new(Device::load(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../../devices/18F27Q10.toml")).unwrap()).unwrap();
+    assert!(m.load_stimulus("[[uart]]\nbytes = \"caf\u{E9}\"\n").is_ok(), "a character from U+0000 to U+00FF is one byte");
 }
 
 #[test]

@@ -548,7 +548,7 @@ nine = false         # 11-bit characters: data values up to 0x1FF, bit 8 is the 
 bad_stop = false     # send the Stop bit as 0 (a framing error)
 ```
 
-Give exactly one of `bytes` and `data`. A character whose Start bit falls while the receiver is off is lost, as on the part. The receiver's FIFO, framing and overrun errors behave as the data sheet describes (`docs/FACTS-SIM.md`).
+Give exactly one of `bytes` and `data`. Each character of `bytes` is one byte, so it must be U+0000 to U+00FF (Latin-1); any other is an error, and byte values go in `data`. A character whose Start bit falls while the receiver is off is lost, as on the part. The receiver's FIFO, framing and overrun errors behave as the data sheet describes (`docs/FACTS-SIM.md`).
 
 ## ADC input: `[[adc]]`
 

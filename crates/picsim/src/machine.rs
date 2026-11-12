@@ -77,16 +77,24 @@ impl Machine {
     pub fn reset(&mut self) {
         if let Ok(mut c) = Pic18::new(&self.dev) {
             c.load(&self.image);
-            if let Some(t) = &self.stimulus
-                && let Ok(st) = crate::stimulus::Stimulus::parse(t)
-            {
-                c.set_mclr_events(st.mclr.clone());
-                let _ = st.apply(&self.dev, &c.m, &mut c.p); // it applied once on this device, so it applies again
+            // It applied once on this device, so it should apply again; if it does not, say so rather than run without it.
+            let mut bad = None;
+            if let Some(t) = &self.stimulus {
+                match crate::stimulus::Stimulus::parse(t) {
+                    Ok(st) => {
+                        c.set_mclr_events(st.mclr.clone());
+                        bad = st.apply(&self.dev, &c.m, &mut c.p).err();
+                    }
+                    Err(e) => bad = Some(e),
+                }
             }
             c.p.set_board(self.cpu.p.board.fresh());
             c.stim = self.stimulus.clone();
             self.cpu = c;
             self.cpu.notes.extend(self.load_notes.iter().cloned());
+            if let Some(e) = bad {
+                self.cpu.notes.insert(format!("the stimulus no longer applies after the reset: {e}"));
+            }
             self.watch_entries();
         }
     }

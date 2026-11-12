@@ -331,7 +331,7 @@ impl Stimulus {
                 }
                 let nine = flag("nine")?;
                 let words: Vec<u16> = match (t.get("bytes"), t.get("data")) {
-                    (Some(b), None) => b.as_str().ok_or("uart.bytes must be a string")?.chars().map(|c| c as u16 & 0xFF).collect(),
+                    (Some(b), None) => b.as_str().ok_or("uart.bytes must be a string")?.chars().map(|c| u8::try_from(c).map(u16::from).map_err(|_| format!("uart.bytes: {c:?} is not one byte (use uart.data for byte values)"))).collect::<Result<_, _>>()?,
                     (None, Some(d)) => d
                         .as_array()
                         .ok_or("uart.data must be an array")?
@@ -440,6 +440,10 @@ impl Stimulus {
                 if !p.has_pin(m, pin) {
                     return Err(format!("{}: no pin {} on this part", dev.device.name, crate::periph::pin_name(pin)));
                 }
+            }
+            // an I2C host the part lacks would leave the OLED "NOT WIRED" only at run time (as `apply16` refuses it)
+            if let Some(n) = self.board.oleds.iter().filter_map(|o| if let Bus::I2c(n) = o.bus { Some(n) } else { None }).find(|&n| !p.has_i2c_host(n)) {
+                return Err(format!("{}: the part has no I2C host {n} (MSSP{n} or I2C{n}) in the simulator; an [[oled]] needs bus = \"gpio\" (bit-banged) or a host the part has", dev.device.name));
             }
             p.set_board(self.board);
         }

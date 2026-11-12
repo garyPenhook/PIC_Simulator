@@ -758,6 +758,11 @@ impl Periph {
     }
 
     /// Does the part have this pin?
+    /// Whether the part has hardware I2C host `n` (an MSSP or an I2C module) an `[[oled]]` can sit on.
+    pub fn has_i2c_host(&self, n: u8) -> bool {
+        self.mssps.iter().any(|s| s.num == n) || self.i2cqs.iter().any(|s| s.num == n)
+    }
+
     pub fn has_pin(&self, m: &DataMem, p: Pin) -> bool {
         self.ports.iter().any(|q| q.letter == p.0 && m.implemented[q.port] >> p.1 & 1 != 0)
     }
