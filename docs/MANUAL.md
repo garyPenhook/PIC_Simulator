@@ -373,7 +373,7 @@ The program runs from reset until it stops, then `basil-sim` prints a report and
 
 | Option | Default | Meaning |
 |---|---|---|
-| `prog.hex` / `prog.elf` | required | The program. Given an `.elf`, the hex beside it (or in `dist/`) is loaded |
+| `prog.hex` / `prog.elf` | required | The program. Given an `.elf`, the hex beside it (or in `dist/`) is loaded; exactly one may be given |
 | `--device PART` | `18F27Q10` | The part, as the name of a file in `devices/` without `.toml` (`18F16Q41`, `16F17146`, `16LF18346`). The part is **not** taken from the ELF here, so give the right one |
 | `--devices DIR` | see section 2 | Folder holding the device files (else `PICSIM_DEVICES`, `devices/` beside the executable, `../share/picsim/devices`, then the workspace) |
 | `--asm FILE` | `<hex>.S` | The assembly listing to take symbols from |

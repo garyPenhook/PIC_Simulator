@@ -101,7 +101,10 @@ fn run() -> Result<ExitCode, String> {
             "--bp-max" => bp_max = val("--bp-max")?.parse().map_err(|_| "bad --bp-max")?,
             "--max-cycles" => max = val("--max-cycles")?.parse().map_err(|_| "bad --max-cycles")?,
             s if s.starts_with('-') && s.len() > 1 => return Err(format!("unknown option {s} (see --help)")),
-            _ => hex = Some(PathBuf::from(a)),
+            _ => match &hex {
+                Some(h) => return Err(format!("two programs given: {} and {a} (give one)", h.display())),
+                None => hex = Some(PathBuf::from(a)),
+            },
         }
     }
     let mut pace = if speed > 0.0 { Some(Pace::new(speed, fosc)) } else { None };
