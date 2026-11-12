@@ -111,3 +111,24 @@ fn a_reset_from_the_cached_peripherals_matches_a_fresh_bind() {
         assert_eq!(m.cpu.p.board.leds.len(), 1, "{part}: stimulus board kept");
     }
 }
+
+/// One SPI byte through MSSP1 at Fosc/4: what the client answered.
+fn spi_byte(m: &mut Machine) -> u8 {
+    let (con, buf) = (a(m, "SSP1CON1"), a(m, "SSP1BUF"));
+    m.cpu.write(con, 0x20); // SSPEN, SSPM = 0000: Fosc/4
+    m.cpu.write(buf, 0x00);
+    let end = m.cpu.cycles + 8;
+    while m.cpu.cycles < end {
+        m.cpu.step();
+    }
+    m.cpu.read(buf)
+}
+
+#[test]
+fn an_spi_client_goes_on_after_a_warm_reset() {
+    let mut m = machine("18F27Q10");
+    m.load_stimulus("[[spi]]\ndata = [0xA5, 0x3C]\n").unwrap();
+    assert_eq!(spi_byte(&mut m), 0xA5);
+    m.cpu.reset_cond(ResetKind::Wdt);
+    assert_eq!(spi_byte(&mut m), 0x3C, "the outside device was not reset");
+}

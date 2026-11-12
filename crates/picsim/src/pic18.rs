@@ -1409,7 +1409,7 @@ impl Pic18 {
     /// A reset that is not a power-on reset (RESET instruction, watchdog): the registers take their MCLR-column reset values, the
     /// cause bits of STATUS and PCON0 change as in Table 9-3 (DS40002043F p.89-90), the program counter and the stack pointer go to
     /// the reset state, data RAM and the program stay, and the peripherals start over (rebuilt, the stimulus applied again; the
-    /// logs, the notes and the board stay). `[A91]`-`[A93]` in FACTS-SIM.md.
+    /// logs, the notes, the board and the `[[spi]]`/`[[i2c]]` clients' places in their data stay). `[A91]`-`[A93]` in FACTS-SIM.md.
     pub fn reset_cond(&mut self, kind: ResetKind) {
         self.entry_sp.fill(None);
         self.entry_irq.fill(false);

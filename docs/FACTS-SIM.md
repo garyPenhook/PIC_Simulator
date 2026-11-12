@@ -601,7 +601,7 @@ NACKed and a read from nobody gives FFh.
 * `[A90]` A valid CLRWDT in windowed mode disarms the WWDT again; the read of WDTCON0 arms it in every mode; a write to WDTCON0/1 disarms it.
 * `[A91]` The table, not the prose of 9.5 (TO, PD and RWDT "change"), decides which bits a reset changes: a time-out clears nTO and RWDT, a violation only WDTWV. PD is not touched.
 * `[A92]` After a reset other than the power-on reset the peripherals are rebuilt (all their state starts over) and the stimulus is applied again from its start (a `[[uart]]` stream
-  or I2C client begins again; pin and analog levels are by absolute cycle and stay right). The logs (`tx`, `pin_log`, ...), the notes and the board stay. The reset takes no time.
+  begins again; pin and analog levels are by absolute cycle and stay right). The `[[spi]]` and `[[i2c]]` clients are outside devices and are not reset: they go on from the byte they had reached (REVIEW-2026-11-11 B17; `tests/warm_reset.rs`). The logs (`tx`, `pin_log`, ...), the notes and the board stay. The reset takes no time.
 * `[A93]` Sleep (DS40002043F 7.2.1 p.69, 10.6 p.99, Table 9-3 p.90): SLEEP sets TO = 1, PD = 0 and clears the WWDT; with an enabled interrupt flag already pending (PEIE for groups after PIR0, GIE ignored) it is a NOP.
   The WWDT counts in Sleep for WDTE = 3, or 1 with SEN; WDTE = 2 is off. A time-out wakes the part with no reset: PC + 2, TO = PD = 0, PCON0 unchanged (the table, as `[A91]`). An enabled interrupt flag wakes it
   with TO = 1, PD = 0 (the OV = 0 in the table row is not modelled); with GIE set the vector is taken after the instruction following SLEEP. The WWDT is cleared again on wake. With no interrupt enabled the

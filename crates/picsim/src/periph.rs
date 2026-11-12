@@ -1251,6 +1251,24 @@ impl Periph {
         if let (Some(n), Some(o)) = (&mut self.nvmq, old.nvmq) {
             n.eeprom = o.eeprom;
         }
+        // The `[[spi]]` and `[[i2c]]` clients are outside devices too: they go on from the byte they had reached (B17).
+        // The board's I2C clients (tag not 0) are put back fresh by `board_wiring`; their state is in `board`.
+        for o in old.spis {
+            if let Some(s) = self.spis.iter_mut().find(|s| s.num == o.num) {
+                s.client = o.client;
+            }
+        }
+        for o in old.mssps {
+            if let Some(s) = self.mssps.iter_mut().find(|s| s.num == o.num) {
+                s.spi = o.spi;
+                s.i2c = o.i2c;
+            }
+        }
+        for o in old.i2cqs {
+            if let Some(s) = self.i2cqs.iter_mut().find(|s| s.num == o.num) {
+                s.i2c = o.i2c;
+            }
+        }
         // The board is outside the part: its LED history and OLED contents and state survive the reset (B11).
         let pos = old.board.log_pos;
         self.board = old.board;
