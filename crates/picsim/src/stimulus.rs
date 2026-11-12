@@ -415,7 +415,7 @@ impl Stimulus {
     }
 
     /// Hand the characters to the receivers of `cpu`. An EUSART the part does not have is an error.
-    pub fn apply(self, dev: &Device, p: &mut crate::periph::Periph) -> Result<(), String> {
+    pub fn apply(self, dev: &Device, m: &crate::mem::DataMem, p: &mut crate::periph::Periph) -> Result<(), String> {
         if self.clb.is_some() {
             return Err(format!("{}: the part has no CLB", dev.device.name));
         }
@@ -435,10 +435,10 @@ impl Stimulus {
             }
         }
         if !self.board.is_empty() {
-            let letters: Vec<u8> = self.board.leds.iter().map(|l| l.pin.0).chain(self.board.oleds.iter().flat_map(|o| [o.scl.0, o.sda.0])).collect();
-            for l in letters {
-                if !p.has_port(l) {
-                    return Err(format!("{}: no PORT{} in the simulator", dev.device.name, l as char));
+            // the pin itself, not only its port letter: a bit the port does not implement would never light (as `apply16`)
+            for pin in self.board.leds.iter().map(|l| l.pin).chain(self.board.oleds.iter().flat_map(|o| [o.scl, o.sda])) {
+                if !p.has_pin(m, pin) {
+                    return Err(format!("{}: no pin {} on this part", dev.device.name, crate::periph::pin_name(pin)));
                 }
             }
             p.set_board(self.board);

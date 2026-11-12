@@ -1443,7 +1443,7 @@ impl Pic18 {
             if let Some(t) = &self.stim
                 && let Ok(st) = crate::stimulus::Stimulus::parse(t)
             {
-                let _ = st.apply(&self.dev, &mut np);
+                let _ = st.apply(&self.dev, &self.m, &mut np);
             }
             self.reset_p = Some((self.stim.clone(), Box::new(np)));
         }

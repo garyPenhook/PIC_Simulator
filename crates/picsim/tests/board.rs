@@ -324,3 +324,17 @@ fn peek_shows_live_port_levels() {
     assert_eq!(m.cpu.peek(port) & 1, 1);
     assert_eq!(m.peek(port, 1)[0] & 1, 1);
 }
+
+#[test]
+fn an_led_on_a_pin_the_part_lacks_is_refused() {
+    // review B15: a port the part has, a bit it does not implement (taken from the part's own pin list; the 14-pin Q41
+    // has ports narrower than 8 bits, where the 27Q10's are all full)
+    let dev = Device::load(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../../devices/18F04Q41.toml")).unwrap();
+    let mut m = Machine::new(dev).unwrap();
+    let pins = m.cpu.p.pins(&m.cpu.m);
+    let (l, b) = pins.iter().map(|p| p.0).find_map(|l| (0..8u8).find(|b| !pins.contains(&(l, *b))).map(|b| (l, b))).expect("a port with a missing bit");
+    let e = m.load_stimulus(&format!("[[led]]\npin = \"R{}{b}\"\n", l as char)).unwrap_err();
+    assert!(e.contains("no pin"), "{e}");
+    let e = m.load_stimulus(&format!("[[oled]]\nbus = \"gpio\"\nscl = \"RB1\"\nsda = \"R{}{b}\"\n", l as char)).unwrap_err();
+    assert!(e.contains("no pin"), "{e}");
+}

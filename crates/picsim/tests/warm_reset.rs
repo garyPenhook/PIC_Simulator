@@ -102,7 +102,7 @@ fn the_board_survives_a_warm_reset() {
 fn a_reset_from_the_cached_peripherals_matches_a_fresh_bind() {
     for part in ["18F27Q10", "18F16Q41"] {
         let mut m = machine(part);
-        m.load_stimulus("[[led]]\npin = \"RB0\"\n").unwrap();
+        m.load_stimulus("[[led]]\npin = \"RB4\"\n").unwrap(); // RB4: the 20-pin Q41 has no RB0-RB3
         m.cpu.reset_cond(ResetKind::Instruction); // binds and caches
         let (mem, special) = (m.cpu.m.mem.clone(), m.cpu.m.special.clone());
         m.cpu.reset_cond(ResetKind::Instruction); // from the cache

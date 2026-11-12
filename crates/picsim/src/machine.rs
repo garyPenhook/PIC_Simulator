@@ -62,7 +62,7 @@ impl Machine {
     pub fn load_stimulus(&mut self, text: &str) -> Result<(), String> {
         let st = crate::stimulus::Stimulus::parse(text)?;
         let mclr = st.mclr.clone();
-        st.apply(&self.dev, &mut self.cpu.p)?;
+        st.apply(&self.dev, &self.cpu.m, &mut self.cpu.p)?;
         self.cpu.set_mclr_events(mclr);
         self.stimulus = Some(text.to_string());
         self.cpu.stim = self.stimulus.clone();
@@ -77,7 +77,7 @@ impl Machine {
                 && let Ok(st) = crate::stimulus::Stimulus::parse(t)
             {
                 c.set_mclr_events(st.mclr.clone());
-                let _ = st.apply(&self.dev, &mut c.p); // it applied once on this device, so it applies again
+                let _ = st.apply(&self.dev, &c.m, &mut c.p); // it applied once on this device, so it applies again
             }
             c.p.set_board(self.cpu.p.board.fresh());
             c.stim = self.stimulus.clone();
