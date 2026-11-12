@@ -21,6 +21,7 @@ fn main() -> ExitCode {
 fn run() -> Result<ExitCode, String> {
     let mut args = std::env::args().skip(1);
     let mut trace: Option<(u64, u64)> = None;
+    let mut trace_regs = None::<Vec<String>>;
     let (mut bps, mut bp_max) = (Vec::<String>::new(), 20usize);
     let mut show_cfg = false;
     let (mut speed, mut fosc) = (0.0f64, 64.0f64);
@@ -49,6 +50,7 @@ fn run() -> Result<ExitCode, String> {
                 let (a, b) = v.split_once('-').ok_or("--trace FROM-TO (cycles)")?;
                 trace = Some((a.parse().map_err(|_| "bad --trace")?, b.parse().map_err(|_| "bad --trace")?));
             }
+            "--trace-regs" => trace_regs = Some(val("--trace-regs")?.split(',').map(String::from).collect()),
             "--config" => show_cfg = true,
             "--speed" => speed = parse_ratio(&val("--speed")?)?,
             "--fosc" => {
@@ -72,7 +74,7 @@ fn run() -> Result<ExitCode, String> {
         if show_cfg {
             return Err("--config is not supported for PIC16 parts yet".into());
         }
-        return run16(dev, &hex, asm, stim, until, until_given, &dump, max, trace, &bps, bp_max, &mut pace);
+        return run16(dev, &hex, asm, stim, until, until_given, &dump, max, trace, trace_regs, &bps, bp_max, &mut pace);
     }
     let mut m = Machine::new(dev)?;
     let given = hex.clone();
@@ -107,6 +109,7 @@ fn run() -> Result<ExitCode, String> {
     };
     m.until_routine = until_given && stop_at.is_some_and(|a| m.debug.is_routine_entry(a));
     if let Some((from, to)) = trace {
+        let regs = trace_columns(&m.dev, trace_regs, &["TMR0L", "PIR0", "INTCON0", "INTCON"])?;
         m.run(None, from);
         while m.cpu.cycles < to {
             let pc = m.cpu.pc;
@@ -114,10 +117,8 @@ fn run() -> Result<ExitCode, String> {
             let (text, _) = picsim::disasm::disasm(pc, w, w2, w3, true);
             let c0 = m.cpu.cycles;
             m.cpu.step();
-            println!("{:>8} {:06X}  {:<28} +{}  TMR0L={} PIR0={:02X} INTCON={:02X}", c0, pc, text, m.cpu.cycles - c0,
-                m.peek(m.dev.find_sfr("TMR0L").map_or(0, |x| x.addr), 1)[0],
-                m.peek(m.dev.find_sfr("PIR0").map_or(0, |x| x.addr), 1)[0],
-                m.peek(m.dev.find_sfr("INTCON").map_or(0, |x| x.addr), 1)[0]);
+            let cols: String = regs.iter().map(|(n, a)| format!(" {n}={:02X}", m.peek(*a, 1)[0])).collect();
+            println!("{:>8} {:06X}  {:<28} +{} {cols}", c0, pc, text, m.cpu.cycles - c0);
         }
         return Ok(ExitCode::SUCCESS);
     }
@@ -241,6 +242,7 @@ fn run16(
     dump: &[String],
     max: u64,
     trace: Option<(u64, u64)>,
+    trace_regs: Option<Vec<String>>,
     bps: &[String],
     bp_max: usize,
     pace: &mut Option<Pace>,
@@ -269,13 +271,15 @@ fn run16(
     };
     m.until_routine = until_given && stop_at.is_some_and(|a| m.debug.is_routine_entry(a));
     if let Some((from, to)) = trace {
+        let regs = trace_columns(&m.dev, trace_regs, &["WREG", "STATUS"])?;
         m.run(None, from);
         while m.cpu.cycles < to {
             let pc = m.cpu.pc;
             let c0 = m.cpu.cycles;
             let text = m.cpu.disasm(m.cpu.fetch(pc));
             m.cpu.step();
-            println!("{:>8} {:04X}  {:<28} +{}  W={:02X} STATUS={:02X}", c0, pc, text, m.cpu.cycles - c0, m.cpu.mem[9], m.cpu.mem[3]);
+            let cols: String = regs.iter().map(|(n, a)| format!(" {n}={:02X}", m.peek(*a, 1)[0])).collect();
+            println!("{:>8} {:04X}  {:<28} +{} {cols}", c0, pc, text, m.cpu.cycles - c0);
         }
         return Ok(ExitCode::SUCCESS);
     }
@@ -403,5 +407,17 @@ mod tests {
         for bad in ["WREG:99999999999", "WREG:65537", "WREG:0", "WREG:x", "WREG:"] {
             assert!(dump_spec(bad).is_err(), "{bad}");
         }
+    }
+}
+
+/// The registers a `--trace` line shows, with their addresses. Names the user gave must all be SFRs of the
+/// part (an error before the run otherwise); of the default list, those the part does not have are left out.
+fn trace_columns(dev: &devdesc::Device, given: Option<Vec<String>>, default: &[&str]) -> Result<Vec<(String, u32)>, String> {
+    match given {
+        Some(names) => names
+            .into_iter()
+            .map(|n| dev.find_sfr(&n).map(|s| s.addr).ok_or(format!("--trace-regs: no register {n} on this part")).map(|a| (n, a)))
+            .collect(),
+        None => Ok(default.iter().filter_map(|n| dev.find_sfr(n).map(|s| (n.to_string(), s.addr))).collect()),
     }
 }

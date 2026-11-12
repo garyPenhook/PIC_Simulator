@@ -355,7 +355,7 @@ basil-sim prog.hex|prog.elf [--device PART] [--devices DIR]
           [--asm prog.S] [--until SYMBOL] [--max-cycles N]
           [--stim FILE] [--dump NAME[:BYTES],…]
           [--bp SYMBOL,…] [--bp-max N]
-          [--trace FROM-TO] [--config]
+          [--trace FROM-TO] [--trace-regs NAME,…] [--config]
           [--speed max|RATIO] [--fosc MHZ]
 basil-sim --version
 ```
@@ -379,6 +379,7 @@ The program runs from reset until it stops, then `basil-sim` prints a report and
 | `--bp LIST` | none | Comma-separated code symbols. Each time the program reaches one, a line is printed and the run continues |
 | `--bp-max N` | 20 | Stop after this many breakpoint hits |
 | `--trace FROM-TO` | off | Run silently to cycle FROM, then print every instruction until cycle TO, then exit |
+| `--trace-regs NAME,…` | see below | The registers each `--trace` line shows, by data-sheet name; a name the part does not have is an error before the run |
 | `--config` | off | Print the configuration words and the oscillator and watchdog registers they set (PIC18 only) |
 | `--speed max\|R` | `max` | Limit the run to a fraction of real time: `1` is real time, `0.5`, `1/10`, `0.001` … |
 | `--fosc MHZ` | 64 | The clock `--speed` uses (0 < MHZ ≤ 64) |
@@ -488,7 +489,11 @@ Print the instructions between cycles 1000 and 1040:
 basil-sim prog.hex --trace 1000-1040
 ```
 
-On a PIC18 each trace line shows the cycle, address, mnemonic, the cycles the instruction took (`+n`) and the values of `TMR0L`, `PIR0` and `INTCON`; on a PIC16 it shows `W` and `STATUS`.
+On a PIC18 each trace line shows the cycle, address, mnemonic, the cycles the instruction took (`+n`) and the value of each register in hex. By default a PIC18 shows `TMR0L`, `PIR0` and `INTCON` (or `INTCON0` on the parts that have it, such as the Q41), and a PIC16 shows `WREG` and `STATUS`. `--trace-regs` replaces that list:
+
+```
+basil-sim prog.hex --trace 1000-1040 --trace-regs WREG,LATA,PIR3
+```
 
 ---
 
@@ -823,7 +828,7 @@ The simulator follows the data sheet. Where it differs from MDB it says so in `d
 
 ## basil-sim options
 
-`--device`, `--devices`, `--asm`, `--until`, `--max-cycles`, `--stim`, `--dump`, `--bp`, `--bp-max`, `--trace`, `--config`, `--speed`, `--fosc`, `--version`.
+`--device`, `--devices`, `--asm`, `--until`, `--max-cycles`, `--stim`, `--dump`, `--bp`, `--bp-max`, `--trace`, `--trace-regs`, `--config`, `--speed`, `--fosc`, `--version`.
 
 ## Stimulus sections
 
