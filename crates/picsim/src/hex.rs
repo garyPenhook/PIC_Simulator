@@ -111,3 +111,10 @@ pub fn elf_part_note(dev: &devdesc::Device, bytes: &[u8]) -> Option<String> {
     let want = want.strip_prefix("PIC").unwrap_or(&want);
     (!parts.is_empty() && !parts.contains(want)).then(|| format!("the ELF was built for {} but the part is the {}", parts.into_iter().collect::<Vec<_>>().join(", "), dev.device.name))
 }
+
+/// A note when `img` holds no byte of program memory (an empty hex file, or one with only configuration words) (C3).
+pub fn empty_note(dev: &devdesc::Device, img: &Image) -> Option<String> {
+    let k = if dev.device.family == "pic18" { 1 } else { 2 };
+    let (s, n) = (dev.memory.program.start, dev.memory.program.size);
+    (!img.bytes.keys().any(|&a| (k * s..k * (s + n)).contains(&a))).then(|| "the hex file has no program bytes: the part runs erased flash".to_string())
+}

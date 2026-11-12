@@ -612,6 +612,9 @@ impl Pic18 {
         let w = self.fetch(self.pc);
         let at = self.pc;
         self.pc = (self.pc + 2) & self.pc_mask;
+        if self.pc < at {
+            self.wrap_note(at);
+        }
         self.cycles += 1;
         self.icount += 1;
         let f = u32::from(w & 0xFF);
@@ -1475,6 +1478,12 @@ impl Pic18 {
 
     fn reset(&mut self) {
         self.reset_cond(ResetKind::Instruction);
+    }
+
+    /// The PC ran off the last word of program memory and wrapped to 0 (C3): usually a program that does not end in a loop.
+    #[cold]
+    fn wrap_note(&mut self, at: u32) {
+        self.notes.insert(format!("the PC ran past the end of program memory at {at:06X} and wrapped to 000000"));
     }
 
     fn undefined(&mut self, w: u16, at: u32) {

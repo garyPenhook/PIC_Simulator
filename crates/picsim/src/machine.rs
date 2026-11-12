@@ -57,6 +57,7 @@ impl Machine {
         let img = Image::parse(text).map_err(|e| e.to_string())?;
         self.cpu.load(&img);
         self.note_load(crate::hex::stray_note(&self.dev, &img));
+        self.note_load(crate::hex::empty_note(&self.dev, &img));
         self.image = img;
         Ok(())
     }

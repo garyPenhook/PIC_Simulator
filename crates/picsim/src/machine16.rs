@@ -37,6 +37,15 @@ impl Machine16 {
         self.cpu.load(&img);
         self.note_load(crate::hex::stray_note(&self.dev, &img));
         self.image.bytes.extend(img.bytes); // reset() reloads everything loaded so far, as the running machine has it
+        // Across every hex loaded so far: a second file may hold only the configuration words.
+        let empty = crate::hex::empty_note(&self.dev, &self.image);
+        self.load_notes.retain(|n| Some(n) != empty.as_ref());
+        match empty {
+            Some(n) => self.note_load(Some(n)),
+            None => {
+                self.cpu.notes.retain(|n| !n.starts_with("the hex file has no program bytes"));
+            }
+        }
         Ok(())
     }
 

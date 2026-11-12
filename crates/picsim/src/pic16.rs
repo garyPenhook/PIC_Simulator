@@ -2946,13 +2946,23 @@ impl Pic16 {
     fn run_one(&mut self) {
         self.no_irq = false;
         let w = self.fetch(self.pc);
+        let at = self.pc;
         self.pc = self.inc_pc(self.pc);
+        if self.pc < at {
+            self.wrap_note(at);
+        }
         self.cycles += 1;
         self.icount += 1;
         self.extra = 0;
         self.flash_cycle = false;
         self.exec(w);
         self.cycles += self.extra + u64::from(self.flash_cycle);
+    }
+
+    /// The PC ran off the last word of program memory and wrapped to 0 (C3): usually a program that does not end in a loop.
+    #[cold]
+    fn wrap_note(&mut self, at: u32) {
+        self.notes.insert(format!("the PC ran past the end of program memory at {at:04X} and wrapped to 0000"));
     }
 
     fn skip(&mut self) {

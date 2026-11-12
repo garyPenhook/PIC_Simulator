@@ -49,3 +49,24 @@ fn elf_parts_reads_basil_and_xc8_includes() {
     let p: Vec<String> = picsim::hex::elf_parts(b).into_iter().collect();
     assert_eq!(p, ["16F18056", "18F27Q10"]);
 }
+
+#[test]
+fn an_empty_hex_and_a_pc_that_wraps_give_notes() {
+    let mut m = Machine::new(dev("18F27Q10")).unwrap();
+    m.load_hex(":00000001FF\n").unwrap();
+    assert!(m.cpu.notes.iter().any(|n| n.contains("no program bytes")), "{:?}", m.cpu.notes);
+    while m.cpu.cycles < 70_000 {
+        m.cpu.step();
+    }
+    assert!(m.cpu.notes.iter().any(|n| n.contains("ran past the end of program memory at 01FFFE")), "{:?}", m.cpu.notes);
+    let mut p = Machine16::new(dev("16F15244")).unwrap();
+    p.load_hex(":00000001FF\n").unwrap();
+    assert!(p.cpu.notes.iter().any(|n| n.contains("no program bytes")), "{:?}", p.cpu.notes);
+    while p.cpu.cycles < 20_000 {
+        p.cpu.step();
+    }
+    assert!(p.cpu.notes.iter().any(|n| n.contains("ran past the end of program memory at 0FFF")), "{:?}", p.cpu.notes);
+    // A second hex with the program clears the note.
+    p.load_hex(":020000000528D1\n:00000001FF\n").unwrap();
+    assert!(!p.cpu.notes.iter().any(|n| n.contains("no program bytes")), "{:?}", p.cpu.notes);
+}
