@@ -375,7 +375,7 @@ The program runs from reset until it stops, then `basil-sim` prints a report and
 | `--until SYMBOL` | `__halt` | Stop when the program counter reaches this symbol, which must exist in the listing or ELF or the run does not start. A routine's name stops the run when the routine is **entered**, including by a call (useful for C). When no `--until` is given and the program has no `__halt` (a C program), the run is not stopped by a symbol: it lasts `--max-cycles`, with a note on standard error |
 | `--max-cycles N` | 2 000 000 000 | Stop after this many instruction cycles even if the symbol was not reached |
 | `--stim FILE` | none | Stimulus file (section 7) |
-| `--dump LIST` | none | After the run, print these symbols or SFRs; `NAME` is one byte, `NAME:N` is *N* bytes read little-endian |
+| `--dump LIST` | none | After the run, print these symbols or SFRs; `NAME` is one byte, `NAME:N` is *N* bytes read little-endian (*N* from 1 to 65536; any other length is refused before the run) |
 | `--bp LIST` | none | Comma-separated code symbols. Each time the program reaches one, a line is printed and the run continues |
 | `--bp-max N` | 20 | Stop after this many breakpoint hits |
 | `--trace FROM-TO` | off | Run silently to cycle FROM, then print every instruction until cycle TO, then exit |

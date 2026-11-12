@@ -144,7 +144,7 @@ fn run() -> Result<ExitCode, String> {
     }
     println!("stop: {stop:?}  cycles: {}  instructions: {}", m.cpu.cycles, m.cpu.icount);
     for d in &dump {
-        let (name, len) = d.split_once(':').map_or((d.as_str(), 1), |(n, l)| (n, l.parse().unwrap_or(1)));
+        let (name, len) = dump_spec(d)?;
         let addr = sym(&m.syms, &m.debug, name)?.or_else(|| m.dev.find_sfr(name).map(|s| s.addr)).ok_or(format!("unknown symbol {name}"))?;
         let b = m.peek(addr, len);
         let v: u64 = b.iter().rev().fold(0, |a, x| a << 8 | u64::from(*x));
@@ -300,7 +300,7 @@ fn run16(
     }
     println!("stop: {stop:?}  cycles: {}  instructions: {}", m.cpu.cycles, m.cpu.icount);
     for d in dump {
-        let (name, len) = d.split_once(':').map_or((d.as_str(), 1), |(n, l)| (n, l.parse().unwrap_or(1)));
+        let (name, len) = dump_spec(d)?;
         let addr = sym(&m.syms, &m.debug, name)?.or_else(|| m.dev.find_sfr(name).map(|s| s.addr)).ok_or(format!("unknown symbol {name}"))?;
         let b = m.peek(addr, len);
         let v: u64 = b.iter().rev().fold(0, |a, x| a << 8 | u64::from(*x));
@@ -336,7 +336,22 @@ fn sym(syms: &std::collections::BTreeMap<String, u32>, d: &picsim::debuginfo::De
 
 /// Refuses, before the run, a `--dump` name that `sym` would refuse after it.
 fn check_dump(d: &picsim::debuginfo::DebugInfo, dump: &[String]) -> Result<(), String> {
+    for x in dump {
+        dump_spec(x)?;
+    }
     dump.iter().filter_map(|x| d.ambiguous(x.split_once(':').map_or(x.as_str(), |p| p.0))).next().map_or(Ok(()), Err)
+}
+
+/// Longest `--dump NAME:LEN`: more than any PIC data space, small enough to allocate (C1).
+const DUMP_MAX: usize = 65536;
+
+/// A `--dump` entry `NAME` or `NAME:LEN` as (name, length in bytes); a length that is not a number from 1 to `DUMP_MAX` is an error.
+fn dump_spec(d: &str) -> Result<(&str, usize), String> {
+    let Some((name, l)) = d.split_once(':') else { return Ok((d, 1)) };
+    match l.parse::<usize>() {
+        Ok(n) if (1..=DUMP_MAX).contains(&n) => Ok((name, n)),
+        _ => Err(format!("--dump {d}: the length must be a number from 1 to {DUMP_MAX}")),
+    }
 }
 
 /// The symbol to stop at. Unless `--until` named one, that is `__halt`, which a basil program has; a C program built with XC8 has none, so
@@ -372,6 +387,21 @@ fn paced_run<M>(pace: &mut Option<Pace>, budget: u64, m: &mut M, cycles: impl Fn
         match run(m, due) {
             Stop::Cycles => {}
             s => return s,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dump_lengths_are_bounded() {
+        assert_eq!(dump_spec("WREG"), Ok(("WREG", 1)));
+        assert_eq!(dump_spec("buf:64"), Ok(("buf", 64)));
+        assert_eq!(dump_spec("buf:65536"), Ok(("buf", DUMP_MAX)));
+        for bad in ["WREG:99999999999", "WREG:65537", "WREG:0", "WREG:x", "WREG:"] {
+            assert!(dump_spec(bad).is_err(), "{bad}");
         }
     }
 }
