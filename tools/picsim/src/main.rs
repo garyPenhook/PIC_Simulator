@@ -1,5 +1,5 @@
 //! `basil-sim prog.hex|prog.elf --device 18F16Q41 [--asm prog.S] [--until __halt] [--dump T_R1:2,T_R2] [--bp SYM,SYM] [--bp-max N] [--config] [--stim FILE]`
-//! `--speed max|R` limits the run to a fraction R of real time (`1` = real time, `0.5`, `1/10`...) at `--fosc MHZ` (default 64); the default is `max`.
+//! `--speed max|R` limits the run to a fraction R of real time (`1` = real time, `0.5`, `1/10`...) at `--fosc MHZ` (default the family's highest clock: 32 on a PIC16, 64 on a PIC18); the default is `max`.
 //! `--bp` prints the cycle count each time one of the symbols is reached (at most `--bp-max`, default 20).
 
 use picsim::pace::{parse_ratio, Pace};
@@ -32,7 +32,8 @@ usage: basil-sim prog.hex|prog.elf [--device PART] [--devices DIR]
   --trace-regs NAME,... the registers each --trace line shows
   --config              print the configuration words (PIC18 only)
   --speed max|R         run at a fraction R of real time (default max)
-  --fosc MHZ            the clock --speed uses, 0 < MHZ <= 64 (default 64)
+  --fosc MHZ            the clock --speed uses, up to the family's highest (32 MHz PIC16,
+                        64 MHz PIC18), which is the default
   -h, --help            print this help and exit
   -V, --version         print the version and exit
 ";
@@ -53,7 +54,7 @@ fn run() -> Result<ExitCode, String> {
     let mut trace_regs = None::<Vec<String>>;
     let (mut bps, mut bp_max) = (Vec::<String>::new(), 20usize);
     let mut show_cfg = false;
-    let (mut speed, mut fosc) = (0.0f64, 64.0f64);
+    let (mut speed, mut fosc) = (0.0f64, None::<f64>);
     let mut stim = None::<PathBuf>;
     let mut until_given = false;
     let (mut hex, mut device, mut asm, mut until, mut dump, mut max) =
@@ -91,10 +92,11 @@ fn run() -> Result<ExitCode, String> {
             "--config" => show_cfg = true,
             "--speed" => speed = parse_ratio(&val("--speed")?)?,
             "--fosc" => {
-                fosc = val("--fosc")?.parse().map_err(|_| "bad --fosc (MHz)")?;
-                if !(fosc > 0.0 && fosc <= 64.0) {
+                let f: f64 = val("--fosc")?.parse().map_err(|_| "bad --fosc (MHz)")?;
+                if !(f > 0.0 && f <= 64.0) {
                     return Err("--fosc must be in 0..64 MHz".into());
                 }
+                fosc = Some(f);
             }
             "--stim" => stim = Some(PathBuf::from(val("--stim")?)),
             "--bp" => bps = val("--bp")?.split(',').map(String::from).collect(),
@@ -107,10 +109,15 @@ fn run() -> Result<ExitCode, String> {
             },
         }
     }
-    let mut pace = if speed > 0.0 { Some(Pace::new(speed, fosc)) } else { None };
     let hex = hex.ok_or_else(|| HELP.split("\n\n").next().unwrap_or(HELP).to_string() + "\n(see --help)")?;
     let path = root.join(format!("{device}.toml"));
     let dev = devdesc::Device::load(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    // The family's highest clock is the default and the limit (G2): 32 MHz on a PIC16, 64 on a PIC18.
+    let fosc = fosc.unwrap_or(dev.fosc_max_mhz());
+    if fosc > dev.fosc_max_mhz() {
+        return Err(format!("--fosc {fosc}: the {} runs at most at {} MHz", dev.device.name, dev.fosc_max_mhz()));
+    }
+    let mut pace = if speed > 0.0 { Some(Pace::new(speed, fosc)) } else { None };
     if dev.device.family == "pic16e" {
         if show_cfg {
             return Err("--config is not supported for PIC16 parts yet".into());

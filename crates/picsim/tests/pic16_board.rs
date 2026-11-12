@@ -257,3 +257,14 @@ fn the_pin_list_has_every_pin_of_the_part() {
     assert!(pins.contains(&(b'B', 4)) && pins.contains(&(b'C', 7)));
     assert!(!pins.contains(&(b'B', 0)) && !pins.contains(&(b'Z', 0)));
 }
+
+#[test]
+fn the_pic16_clock_defaults_to_the_family_maximum() {
+    // OS20: FOSC is at most 32 MHz on the PIC16 parts (DS40002343F p.629), 64 on the PIC18s (G2)
+    assert_eq!(machine("16F17146", "").unwrap().cpu.board.fosc_mhz, 32.0);
+    assert_eq!(machine("16F17146", "fosc_mhz = 8\n").unwrap().cpu.board.fosc_mhz, 8.0, "a clock without parts still applies");
+    assert_eq!(machine("16F17146", "fosc_mhz = 8\n[[led]]\npin = \"RC0\"\n").unwrap().cpu.board.fosc_mhz, 8.0);
+    assert_eq!(machine("16F17146", "[[led]]\npin = \"RC0\"\n").unwrap().cpu.board.fosc_mhz, 32.0, "parts without a clock keep the default");
+    let e = machine("16F17146", "fosc_mhz = 48\n").err().unwrap();
+    assert!(e.contains("above the part's 32 MHz"), "{e}");
+}

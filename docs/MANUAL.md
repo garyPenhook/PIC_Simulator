@@ -233,7 +233,7 @@ Pressing **Load** again always starts afresh: the program is reloaded, the cycle
 | **Out** | Run until the current routine returns |
 | **Reset** | Restart the part from its reset vector with cycle counter 0 and the stimulus replayed from the start. The wiring of LEDs and OLED stays (the OLED starts blank, as after power-up). Clears the stopwatch |
 | **Speed** | Run speed (below) |
-| **Fosc MHz** | The oscillator frequency used to turn cycles into time (0.03 to 64). It does not change the program's own idea of its clock; it is the clock the *display* assumes. PIC16 parts are limited to 32 MHz when loaded |
+| **Fosc MHz** | The oscillator frequency used to turn cycles into time (0.03 up to the family's highest clock: 32 MHz on a PIC16, 64 MHz on a PIC18, parameter OS20 of each data sheet). It does not change the program's own idea of its clock; it is the clock the *display*, the watchdog, the timers' LFINTOSC/SOSC clocks and the OLED's scrolling assume. Loading a program takes the stimulus file's `fosc_mhz` into the box; without one a PIC16 lowers the box to 32 if it was higher |
 
 While a step is in progress, **Run**, **Step**, **Step over**, **Line**, **Line over** and **Out** are disabled and only **Pause** is available; the status line shows `stepping... (Pause cancels)`. A source-line step (Line, Line over, Out) also stops early at a breakpoint, at `__halt`, or after about a million instructions.
 
@@ -387,7 +387,7 @@ The program runs from reset until it stops, then `basil-sim` prints a report and
 | `--trace-regs NAME,…` | see below | The registers each `--trace` line shows, by data-sheet name; a name the part does not have is an error before the run |
 | `--config` | off | Print the configuration words and the oscillator and watchdog registers they set (PIC18 only) |
 | `--speed max\|R` | `max` | Limit the run to a fraction of real time: `1` is real time, `0.5`, `1/10`, `0.001` … |
-| `--fosc MHZ` | 64 | The clock `--speed` uses (0 < MHZ ≤ 64) |
+| `--fosc MHZ` | 32 (PIC16), 64 (PIC18) | The clock `--speed` uses, at most the family's highest clock (OS20: 32 MHz on a PIC16, 64 MHz on a PIC18); a higher one is refused |
 | `--help`, `-h` | | Print the synopsis and a line for each option, and exit |
 | `--version`, `-V` | | Print `basil-sim <version>` and exit |
 
@@ -646,10 +646,10 @@ The pin is high until driven.
 ## Clock for the display: `fosc_mhz`
 
 ```toml
-fosc_mhz = 64     # the PIC clock, 0 < MHz ≤ 64
+fosc_mhz = 64     # the PIC clock: 0 < MHz ≤ 32 on a PIC16, ≤ 64 on a PIC18
 ```
 
-An optional top-level key. It gives the clock used for the **OLED's scrolling** time (the OLED's own timing is in real time, the program's in cycles). Default 64.
+An optional top-level key. It gives the clock used for the **OLED's scrolling** time (the OLED's own timing is in real time, the program's in cycles), the watchdog period and the timers' LFINTOSC/SOSC clocks. It applies with or without `[[led]]` and `[[oled]]` entries. Default: the family's highest clock, 32 MHz on a PIC16 and 64 MHz on a PIC18 (OS20); a higher value than the part's is refused.
 
 ## Board parts: `[[led]]` and `[[oled]]`
 
@@ -770,7 +770,7 @@ Where this table says "—", `docs/FACTS-SIM.md` documents no model for that per
 
 **Not modelled anywhere:** DMA, synchronous EUSART mode, weak pull-ups, open-drain outputs, input thresholds, the oscillator start-up and clock switching (the oscillator registers take their reset values from the configuration words, but `CSWEN` and the ready bits are not applied), brown-out, `LVP`, code and write protection. 
 
-**The watchdog on a PIC16 part.** It times out and resets the part (TO and `RWDT` cleared) when the configuration enables it (`WDTE`), and a time-out in Sleep wakes the part with TO = PD = 0. A program that is built without `WDTE` set to off therefore has a watchdog: an erased configuration word enables it, with the default period of 2 s, and a program that never executes `CLRWDT` is reset after 2 s of simulated time. The period is counted in simulated instruction cycles from the clock the stimulus names (`fosc_mhz`, 64 MHz until set): at the wrong `fosc_mhz` the time-out arrives at the wrong simulated time. On the windowed parts (PIC16F131xx, PIC16F171xx) a `CLRWDT` that the window does not allow, or one that did not follow a read of `WDTCON0` while a window is set, resets the part and clears `WDTWV`. `WDTCON` of the PIC16F152xx is documented with a reset value of 0 but with a default period of 2 s: the simulator uses the 2 s. The PIC16F180x6 are modelled from the device file only, because their data sheet is not available to the project. The watchdog clock is always LFINTOSC (31 kHz, or 31.25 kHz where `WDTCON.CS` says MFINTOSC); EXTOSC and SOSC are not modelled.
+**The watchdog on a PIC16 part.** It times out and resets the part (TO and `RWDT` cleared) when the configuration enables it (`WDTE`), and a time-out in Sleep wakes the part with TO = PD = 0. A program that is built without `WDTE` set to off therefore has a watchdog: an erased configuration word enables it, with the default period of 2 s, and a program that never executes `CLRWDT` is reset after 2 s of simulated time. The period is counted in simulated instruction cycles from the clock the stimulus names (`fosc_mhz`, 32 MHz, the PIC16 maximum, until set): at the wrong `fosc_mhz` the time-out arrives at the wrong simulated time. On the windowed parts (PIC16F131xx, PIC16F171xx) a `CLRWDT` that the window does not allow, or one that did not follow a read of `WDTCON0` while a window is set, resets the part and clears `WDTWV`. `WDTCON` of the PIC16F152xx is documented with a reset value of 0 but with a default period of 2 s: the simulator uses the 2 s. The PIC16F180x6 are modelled from the device file only, because their data sheet is not available to the project. The watchdog clock is always LFINTOSC (31 kHz, or 31.25 kHz where `WDTCON.CS` says MFINTOSC); EXTOSC and SOSC are not modelled.
 
 **Pins on a PIC16 part.** Only the pin changes that the stimulus makes (`[[pin]]`, `[[port]]`) reach `T0CKIPPS`, `TxCKIPPS` and `TxGPPS`; a level that the program or a peripheral puts on a pin is not seen by them (so a CCP output cannot be looped back into a capture input). The EUSART RX/TX pins of the PIC16 parts are not modelled.
 

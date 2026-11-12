@@ -358,7 +358,7 @@ impl App {
                 self.tab = if m.debug.vars.is_empty() { 0 } else { 4 }; // the Variables tab
                 self.msg = format!("loaded {} ({} labels, {} variables){dev_note}{note}", self.hex_path, labels.len(), m.debug.vars.len());
                 self.labels = labels;
-                self.fosc_mhz = stim_fosc.map_or(self.fosc_mhz.min(32.0), |f| f as f32);
+                self.fosc_mhz = stim_fosc.map_or(self.fosc_mhz.min(m.dev.fosc_max_mhz() as f32), |f| f as f32);
                 self.m16 = Some(m);
             }
             Err(e) => {
@@ -640,7 +640,9 @@ impl eframe::App for App {
                     ui.add(egui::Slider::new(&mut self.speed, 0.0..=7.0).text("cycles/frame (10^x)"));
                 }
                 ui.label("Fosc MHz");
-                ui.add(egui::DragValue::new(&mut self.fosc_mhz).range(0.03..=64.0));
+                // the family's highest clock (G2): 32 MHz on a PIC16, 64 on a PIC18
+                let fmax = self.m16.as_ref().map(|m| m.dev.fosc_max_mhz()).or(self.m.as_ref().map(|m| m.dev.fosc_max_mhz())).unwrap_or(64.0);
+                ui.add(egui::DragValue::new(&mut self.fosc_mhz).range(0.03..=fmax as f32));
             });
             // Simulated cycles per second while running, against what the part does at the chosen Fosc.
             if self.running {

@@ -52,7 +52,7 @@
 //! level = 0           # 0 or 1; from `at` on, later entries replace earlier ones; the pin is high until driven
 //! at = 20000
 //!
-//! fosc_mhz = 64       # optional: the PIC clock, for the OLED's scrolling time (default 64)
+//! fosc_mhz = 64       # optional: the PIC clock, for the OLED's scrolling time and the watchdog (default the family's highest: 32 on a PIC16, 64 on a PIC18)
 //!
 //! [[led]]             # an LED on a pin: on while the pin is an output at the active level
 //! pin = "RB0"         # the PIC pin the LED is wired to
@@ -396,8 +396,13 @@ impl Stimulus {
         if let Some((l, ..)) = self.pins.iter().find(|p| !cpu.has_port(p.0)) {
             return Err(format!("{}: no PORT{} in the simulator", dev.device.name, *l as char));
         }
+        if self.board.fosc_mhz > dev.fosc_max_mhz() {
+            return Err(format!("{}: fosc_mhz = {} is above the part's {} MHz", dev.device.name, self.board.fosc_mhz, dev.fosc_max_mhz()));
+        }
         if !self.board.is_empty() {
             cpu.set_board(self.board);
+        } else if self.board.fosc_mhz > 0.0 {
+            cpu.board.fosc_mhz = self.board.fosc_mhz; // a clock without parts still sets the timing
         }
         if let Some(c) = self.clb {
             cpu.clb_set(c);
@@ -446,6 +451,8 @@ impl Stimulus {
                 return Err(format!("{}: the part has no I2C host {n} (MSSP{n} or I2C{n}) in the simulator; an [[oled]] needs bus = \"gpio\" (bit-banged) or a host the part has", dev.device.name));
             }
             p.set_board(self.board);
+        } else if self.board.fosc_mhz > 0.0 {
+            p.board.fosc_mhz = self.board.fosc_mhz; // a clock without parts still sets the timing
         }
         for (letter, at, mask, val) in self.pins {
             if !p.pin_feed(letter, at, mask, val) {

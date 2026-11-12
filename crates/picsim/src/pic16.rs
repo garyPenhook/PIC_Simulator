@@ -138,6 +138,9 @@ pub enum Reset {
     WdtWindow,
 }
 
+/// The clock a PIC16 runs at when no stimulus or window gives one: the family maximum, OS20 = 32 MHz (`Device::fosc_max_mhz`).
+pub const FOSC_DEFAULT_MHZ: f64 = 32.0;
+
 #[derive(Clone)]
 pub struct Pic16 {
     pub mem: Vec<u8>,
@@ -462,7 +465,7 @@ impl Pic16 {
             pps_reg: vec![false; MEM],
             pps_out: Vec::new(),
             mclr_pin: None,
-            board: Board::default(),
+            board: Board { fosc_mhz: FOSC_DEFAULT_MHZ, ..Board::default() },
             pullup: Vec::new(),
             forced: Vec::new(),
             ioc: Vec::new(),
@@ -1105,7 +1108,7 @@ impl Pic16 {
                     self.sync_nvm();
                     let (now, v) = (self.cycles, v & self.implemented[a]);
                     let wrtd = self.cfg.get("WRTD") == Some(0);
-                    let f = if self.board.fosc_mhz > 0.0 { self.board.fosc_mhz } else { 64.0 };
+                    let f = if self.board.fosc_mhz > 0.0 { self.board.fosc_mhz } else { FOSC_DEFAULT_MHZ };
                     if let Some(n) = self.nvm.as_mut() {
                         n.fosc_mhz = f;
                         self.extra += n.write(k, v, now, &mut self.mem, &mut self.prog, wrtd, &mut self.notes);
@@ -1246,7 +1249,8 @@ impl Pic16 {
     /// Replace the parts on the board (their states start at power-on); an OLED on a hardware I2C bus is registered on
     /// that MSSP as a client.
     pub fn set_board(&mut self, b: Board) {
-        self.board = b.fresh();
+        let f = if b.fosc_mhz > 0.0 { b.fosc_mhz } else { self.board.fosc_mhz };
+        self.board = Board { fosc_mhz: f, ..b.fresh() };
         self.board_wiring();
     }
 
@@ -2528,7 +2532,7 @@ impl Pic16 {
     }
 
     fn wdt_fosc(&mut self) {
-        let f = if self.board.fosc_mhz > 0.0 { self.board.fosc_mhz } else { 64.0 };
+        let f = if self.board.fosc_mhz > 0.0 { self.board.fosc_mhz } else { FOSC_DEFAULT_MHZ };
         if let Some(w) = self.wdt.as_mut() {
             w.fosc_mhz = f;
         }

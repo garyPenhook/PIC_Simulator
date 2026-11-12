@@ -214,6 +214,14 @@ impl std::fmt::Display for Error {
 impl std::error::Error for Error {}
 
 impl Device {
+    /// The highest system clock (FOSC) of the family, in MHz, and the clock the simulator assumes when none is given:
+    /// parameter OS20 is 32 MHz on every PIC16 data sheet of the parts in `devices/` (DS40002195E p.373, DS40002343F
+    /// p.629, DS40002519D, DS40002686B p.604, DS40002325C p.523, DS40001799F p.401, DS40001800E p.419, DS40001795K
+    /// p.421, DS40001839E p.422) and 64 MHz on the PIC18s (DS40002043F p.699, DS40002214G p.898).
+    pub fn fosc_max_mhz(&self) -> f64 {
+        if self.device.family == "pic16e" { 32.0 } else { 64.0 }
+    }
+
     pub fn load(path: &Path) -> Result<Device, Error> {
         let text = std::fs::read_to_string(path).map_err(Error::Io)?;
         Device::from_toml(&text)

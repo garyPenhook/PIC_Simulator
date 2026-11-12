@@ -1,7 +1,7 @@
 //! The watchdog on the PIC16 core: the windowed WWDT of the PIC16F131xx and PIC16F171xx (DS40002343F ch.14 p.144-153, Table 10-4
 //! p.76; PIC16F13145 DS40002519D) and the single-register WDT of the PIC16F152xx and PIC16F183xx (DS40002195E ch.14 p.103-106,
-//! DS40001839E ch.10 p.120-121). Fosc is 64 MHz (the default), so one 31 kHz watchdog clock is 516.13 instruction cycles:
-//! PS = 0 times out after 32 clocks = 16517 cycles.
+//! DS40001839E ch.10 p.120-121). Fosc is 32 MHz (the default, the PIC16 maximum OS20), so one 31 kHz watchdog clock is 258.06 instruction
+//! cycles: PS = 0 times out after 32 clocks = 8259 cycles.
 
 use devdesc::Device;
 use picsim::machine16::Machine16;
@@ -14,7 +14,7 @@ const SLEEP: u16 = 0x0063;
 const CLRWDT: u16 = 0x0064;
 const BRA_SELF: u16 = 0x33FF;
 const GOTO_0: u16 = 0x2800;
-const TIME_OUT: u64 = 16517;
+const TIME_OUT: u64 = 8259;
 
 fn hexrec(b: &[u8]) -> String {
     let sum = b.iter().fold(0u8, |a, &x| a.wrapping_add(x));
@@ -196,7 +196,7 @@ fn the_watchdog_that_is_off_in_sleep_leaves_the_part_asleep() {
 
 #[test]
 fn a_sleep_with_the_default_two_second_period_takes_one_step_per_jump() {
-    // 65536 clocks of 516 cycles are 33.8 million cycles: far too many to step one by one, so the sleep jumps to the time-out
+    // 65536 clocks of 258 cycles are 16.9 million cycles: far too many to step one by one, so the sleep jumps to the time-out
     let mut m = machine("16F17146", &[SLEEP, NOP, BRA_SELF], &[("WDTE", 3)]);
     let mut steps = 0;
     while m.cpu.pc < 2 && steps < 1000 {
@@ -204,12 +204,12 @@ fn a_sleep_with_the_default_two_second_period_takes_one_step_per_jump() {
         steps += 1;
     }
     assert_eq!(m.cpu.pc, 2);
-    assert!((33_800_000..33_900_000).contains(&m.cpu.cycles), "{}", m.cpu.cycles);
+    assert!((16_900_000..16_950_000).contains(&m.cpu.cycles), "{}", m.cpu.cycles);
 }
 
 #[test]
 fn a_clrwdt_outside_the_window_is_a_window_violation() {
-    // WDTCWS = 3: WINDOW = 011, the window opens at 50 % of the period (DS40002343F 14.7.2 p.149). PS = 0: 16517 cycles.
+    // WDTCWS = 3: WINDOW = 011, the window opens at 50 % of the period (DS40002343F 14.7.2 p.149). PS = 0: 8259 cycles.
     for part in WINDOWED {
         // not armed: any CLRWDT is a violation, however late (14.5.1)
         let mut m = machine(part, &[NOP, CLRWDT, BRA_SELF], &[("WDTE", 3), ("WDTCWS", 3)]);
@@ -232,7 +232,7 @@ fn a_clrwdt_outside_the_window_is_a_window_violation() {
         let mut m = machine(part, &[CLRWDT, GOTO_0], &[("WDTE", 3), ("WDTCWS", 3)]);
         w(&mut m, "WDTCON0", 0x00);
         r(&mut m, "WDTCON0");
-        m.cpu.cycles = 9000; // past 50 % of the period (the window opened at 8259)
+        m.cpu.cycles = 4500; // past 50 % of the period (the window opened at 4130)
         // the watchdog started at cycle 0
         m.cpu.step();
         assert_eq!(r(&mut m, "PCON0") & 0x30, 0x30, "{part}: valid CLRWDT");
@@ -245,7 +245,7 @@ fn the_registers_show_the_count() {
     for part in WINDOWED {
         let mut m = machine(part, &[BRA_SELF], &[("WDTE", 3)]);
         w(&mut m, "WDTCON0", 0x00); // 32 clocks
-        run_to(&mut m, 10 * 516);
+        run_to(&mut m, 10 * 258);
         let t = r(&mut m, "WDTTMR");
         assert_eq!(t >> 3, 9, "{part}: TMR[4:0] counts clocks in 32nds of the period (n = 0), {t:#04x}");
         assert_eq!(t & 4, 0, "{part}: not armed");
