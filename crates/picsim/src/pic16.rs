@@ -652,6 +652,9 @@ impl Pic16 {
                     p.core[a] = true;
                     p.uart_reg[a] = Some((i, sub as u8));
                 }
+                // the baud rate registers are read from the stored bytes by the model
+                p.core[u.brgl] = true;
+                p.core[u.brgh] = true;
                 p.uarts.push(u);
             }
         }

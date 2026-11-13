@@ -865,7 +865,7 @@ $ basil-sim crates/picsim/tests/data/zed_g.hex --device 18F27Q10 --max-cycles 50
 stop: Cycles  cycles: 5000001  instructions: 3334050
 tx1: \r\nMCP7940N clock/calendar\r\nRTCC not answering, status 3\r\n
 i2c1: S 6FW! P S 6FW! P S 6FW! P S 6FW! P
-note: unmodelled SFRs touched: RX1PPS SP1BRGH SP1BRGL SSP1CLKPPS SSP1DATPPS
+note: unmodelled SFRs touched: RX1PPS SSP1CLKPPS SSP1DATPPS
 ```
 
 Reading it:

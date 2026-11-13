@@ -833,6 +833,8 @@ impl Periph {
             regs.extend(port.ansel);
         }
         regs.extend(p.ppsout.iter().map(|o| o.0));
+        // the baud rate registers the EUSART model reads from the stored bytes (not unmodelled)
+        regs.extend(p.uarts.iter().flat_map(|u| [u.brgl, u.brgh]));
         for a in regs {
             if m.special[a] == Special::None {
                 m.special[a] = Special::Sync;
