@@ -196,7 +196,7 @@ Device files are generated from Microchip's device packs by `tools/devgen` and c
 +----------+----------------------------+----------------------+
 | CPU      | Program                    | Memory  SFRs  Watch  |
 |  regs    |  Source | Disassembly      |  Board  Variables    |
-|  Stop-   |  [x] follow PC             |                      |
+|  Stop-   |  [x] follow PC             |  UART  Debugger      |
 |  watch   |  [x] stay in my code       |  (the selected tab)  |
 |  Call    |  goto [      ] Go          |                      |
 |  stack   |  > 0042  ...               |                      |
@@ -225,18 +225,18 @@ Pressing **Load** again always starts afresh: the program is reloaded, the cycle
 
 | Control | Action |
 |---|---|
-| **Run** | Run the program. Enabled when a program is loaded and nothing is running or stepping. The program runs until it halts, reaches a breakpoint, goes to Sleep with nothing able to wake it, or you press Pause |
+| **Run** | Run the program. Enabled when a program is loaded and nothing is running or stepping. The program runs until it halts, reaches a breakpoint or data watchpoint, goes to Sleep with nothing able to wake it, or you press Pause |
 | **Pause** | Stop a run or cancel a step in progress. Enabled while running or stepping |
 | **Step** | Execute one instruction |
 | **Step over** | Like Step, but a call (PIC18: `CALL`, `RCALL`; PIC16: `CALL`, `CALLW`) runs until it returns to the following instruction. Everything else is one step. A long step over runs in the background, keeps the window alive, and can be cancelled with Pause |
 | **Line** | Step to the next BASIC or C source line, going into called routines. Needs the ELF with source lines |
 | **Line over** | Step to the next source line, running calls and interrupts to completion |
 | **Out** | Run until the current routine returns |
-| **Reset** | Restart the part from its reset vector with cycle counter 0 and the stimulus replayed from the start. The wiring of LEDs and OLED stays (the OLED starts blank, as after power-up). Clears the stopwatch |
+| **Reset** | Restart the part from its reset vector with cycle counter 0 and the stimulus replayed from the start. The wiring of LEDs and OLED stays (the OLED starts blank, as after power-up). Clears the stopwatch, UART terminal history and waveform capture; keeps data watchpoints and trace choices |
 | **Speed** | Run speed (below) |
 | **Fosc override MHz** | Zero (the default) derives Fosc from the firmware's oscillator configuration and registers. A positive value overrides it, up to 32 MHz on a PIC16 or 64 MHz on a PIC18. The CPU panel shows the effective Fosc. Loading a stimulus with `fosc_mhz` copies that override into the box |
 
-While a step is in progress, **Run**, **Step**, **Step over**, **Line**, **Line over** and **Out** are disabled and only **Pause** is available; the status line shows `stepping... (Pause cancels)`. A source-line step (Line, Line over, Out) also stops early at a breakpoint, at `__halt`, or after about a million instructions.
+While a step is in progress, **Run**, **Step**, **Step over**, **Line**, **Line over** and **Out** are disabled and only **Pause** is available; the status line shows `stepping... (Pause cancels)`. A source-line step (Line, Line over, Out) also stops early at a breakpoint, a data watchpoint, `__halt`, or Sleep with nothing able to wake the part. Pause cancels a long step.
 
 When a run or step ends the status line shows the reason after the loading message, for example `loaded … — stopped: Halt`. The reasons are:
 
@@ -244,6 +244,7 @@ When a run or step ends the status line shows the reason after the loading messa
 |---|---|
 | `Halt` | The program counter reached `__halt` (or the target of a Step over) |
 | `Breakpoint(addr)` | A breakpoint address was reached |
+| `data watchpoint at 0xADDR: OLD → NEW` | A watched data byte changed; the address and values are hexadecimal |
 | `Sleep` | `SLEEP` was executed and nothing that is enabled can wake the part |
 | `Cycles` | The cycle budget ran out (`basil-sim` only) |
 
@@ -257,7 +258,7 @@ The **Speed** selector sets how fast simulated time passes against real time:
 | **1x (real time)** | The simulated part runs as fast as the real one at the chosen Fosc |
 | **1/2, 1/4, 1/10, 1/100, 1/1000** | A fraction of real time |
 
-Use *1x* or a fraction to watch an LED blink or a display scroll at a speed you can see, and Max to get through initialisation. The Fosc box sets the clock for this calculation: one instruction cycle is `Fosc / 4`, so at 64 MHz real time is 16 million cycles a second. Changing the speed or Fosc while running takes effect immediately without a jump. If the host stalls, the simulator never catches up by more than 0.25 s of real time, so the part does not race through a burst.
+Use *1x* or a fraction to watch an LED blink or a display scroll at a speed you can see, and Max to get through initialisation. The effective firmware clock (or the Fosc override, when set) determines this calculation: one instruction cycle is `Fosc / 4`, so at 64 MHz real time is 16 million cycles a second. Changing the speed or Fosc while running takes effect immediately without a jump. If the host stalls, the simulator never catches up by more than 0.25 s of real time, so the part does not race through a burst.
 
 While running, the status line shows the achieved rate, for example `running at 100.0% of real time (16.00 Mcycles/s)`. It also reminds you that a wait on a UART or timer flag shows as one source line for a long time — that is the program waiting, not the simulator.
 
@@ -287,11 +288,11 @@ The left panel shows the core registers and the cycle counts.
 
 *PIC16:* PC (word address), WREG, BSR, STATUS (Z, DC, C), PCLATH, INTCON, FSR0, FSR1.
 
-Both show **Cycles** (instruction cycles since reset), **Instr** (instructions executed; some take two or more cycles) and **Time** (cycles at the Fosc box's clock, in milliseconds).
+Both show **Cycles** (instruction cycles since reset), **Instr** (instructions executed; some take two or more cycles) and **Time** (elapsed simulated milliseconds, accounting for firmware clock changes or the explicit override).
 
 ### Stopwatch
 
-The stopwatch measures the interval between two moments of the *simulated* run, in cycles and in microseconds at the Fosc box. Because it reads the simulated cycle counter it is exact whatever the run speed.
+The stopwatch measures the interval between two moments of the *simulated* run, in cycles and in microseconds of simulated time. The time reading accounts for firmware clock changes or the explicit Fosc override, and is independent of the run speed.
 
 | Button | Action |
 |---|---|
@@ -314,15 +315,29 @@ When the simulator meets something it does not model or that is suspect, it adds
 
 ### Memory
 
-A hex dump of data memory, 16 bytes a row with an ASCII column. On a PIC16 an address that has no implemented bit shows `--`. The view is read-only.
+A hex dump of data memory, 16 bytes a row with an ASCII column. On a PIC16 an address that has no implemented bit shows `--`. Use the Debugger tab to write a data byte.
 
 ### SFRs
 
-A list of the special function registers with address, hex and binary value, in alphabetical order. The *filter* box matches part of a name (case-insensitive). Reading is without side effects: viewing a register does not clear a flag or pop a receive buffer.
+A list of the special function registers with address, hex and binary value, in alphabetical order. The *filter* box matches part of a name (case-insensitive). Reading is without side effects: viewing a register does not clear a flag or pop a receive buffer. While paused, edit the hex value directly; writes use the normal CPU register path, including implemented-bit masks, read-only bits and peripheral side effects.
 
 ### Watch
 
 Enter `symbol` or `symbol:bytes` and press **Add** to watch a value; `bytes` is 1 to 8 (default 1). The symbol may be a code or data label from the listing, a global variable from the ELF, or an SFR name (`TMR0L`, `PIR0`). Each entry shows address and value as unsigned, signed and hex, for example `T_R1[2] @0123 = 1000 (1000) 0x3E8`. Multi-byte values are little-endian. A `static` global that two C files both define is read from the file of the routine the PC is in, and the entry names that file (`count (util.c)`); `count@util.c` always reads that file's copy. A name that is not found shows `unknown`. Press `x` to remove an entry.
+
+### Debugger
+
+Available for both PIC16 and PIC18. The CPU panel's **Edit…** button opens this tab. Mutation controls are enabled while paused, including between instruction and source steps.
+
+Enter an SFR name, global variable (the same names and `name@file.c` syntax as Watch), or a decimal/`0x` data address. The current byte is shown in hex; choose a new hex value and press **Write**. To change the program counter, enter `PC` (PIC16: word address; PIC18: even byte address). PC values wrap within the part's program memory. Register writes obey the hardware model, including read-only bits and side effects. Multi-byte registers can be edited through their individual byte members. PIC16 linear RAM addresses are translated to banked data addresses.
+
+**Break on value change** adds a data watchpoint on the selected byte. Run, Step, Step over, Line, Line over and Out stop after an instruction changes it; the stop reason reports the address and old/new values. Peripheral changes also count. Reads, same-value writes, and changes that return to the original value within one instruction do not trigger. Edits made while paused become the next step's starting value. **Remove** deletes a watchpoint.
+
+**External inputs:** enter an existing pin such as `RA0`, select **High**, and press **Drive pin** to drive high or low at the current cycle. Enter a decimal ADC channel and conversion code and press **Apply** to change the ADC input. Codes use the part's ADC resolution. These changes use the stimulus model, persist until overridden by a later stimulus/input change, and are cleared by Reset or Load. Pin direction and analog selection still apply.
+
+**Waveform capture:** select a data byte and press **Trace data byte**, or select a pin above and press **Trace pin**. Choose signals before recording; **Clear capture** allows changing the signal list again. **Record** captures an initial sample at the next step and subsequent values at instruction boundaries while stepping or running. **Stop capture** pauses recording; **Record** resumes on the same simulated timeline. The preview displays digital pins as high/low and data bytes as a 0–255 staircase. Long previews are reduced for drawing; export retains every stored sample.
+
+**Export VCD…** saves the capture with a 1 ns timescale and timestamps relative to its first sample, using simulated time (including clock changes). Pin traces are the digital PORT readings, so ANSEL applies. Pulses entirely within an instruction may be missed. Capture stops at 100,000 stored samples and reports that it is full; unchanged intervals are compacted while preserving their duration. Reset clears the capture and keeps watchpoint/signal choices; Load starts with a new debugger configuration.
 
 ### Board
 
@@ -352,7 +367,7 @@ When LEDs or an OLED are wired, a strip along the bottom shows them. An LED is a
 
 **Time a routine.** Breakpoints at its first and last line, Stopwatch as above.
 
-**Check an output waveform.** Wire an LED to the pin, run at 1/10 or 1/100 speed and watch it, or use `basil-sim` and read the change list (section 6).
+**Check an output waveform.** In Debugger, select a pin, press **Trace pin**, then **Record** and Run or Step. Pause, inspect the waveform and use **Export VCD…** to open the capture in a waveform viewer. For visual feedback, wire an LED and run at 1/10 or 1/100 speed; `basil-sim` also reports LED changes (section 6).
 
 **Test serial input.** Write a stimulus file with a `[[uart]]` section, load it with the program, and Run; the characters arrive at the receiver at the cycle you chose. Watch the receive variables in the Variables tab.
 
@@ -794,16 +809,18 @@ Models exist for the following; a register of anything else is plain storage tha
 | Comparators C1/C2 | yes | — | — | — |
 | CLC1–CLC8 | yes | — | — | — |
 | CLB (PIC16F131xx, 132xx) | — | — | — | yes: 32 BLEs, input edge detectors, 3-bit counter, software inputs and outputs, PPS outputs and interrupts, driven by a `[clb]` netlist in the stimulus file (section 10); the Synthesizer's bitstream is not read; no clock, gate or trigger connections to other peripherals |
-| Watchdog (windowed on the Q10) and the resets it causes | yes | — | — | yes: windowed WWDT (PIC16F131xx, PIC16F132xx, PIC16F171xx) or single-register WDT (PIC16F152xx, PIC16F183xx, PIC16F180x6) |
+| Watchdog (windowed on Q10 and Q41) and the resets it causes | yes | yes | — | yes: windowed WWDT (PIC16F131xx, PIC16F132xx, PIC16F171xx) or single-register WDT (PIC16F152xx, PIC16F183xx, PIC16F180x6) |
 | CRC and memory scanner | yes | — | — | — |
-| External interrupts INT0–2, interrupt-on-change | yes | — | the INT0..2 flags set by software; pin edges are not modelled | the INT pin and interrupt-on-change |
+| External interrupts INT0–2, interrupt-on-change | yes | yes: PPS pin routing, edge selection, Sleep wake-up and legacy/vectored interrupt dispatch | the INT0..2 flags set by software; pin edges are not modelled | the INT pin and interrupt-on-change |
 | MCLR pin reset | yes | yes | yes | the MCLR pin is part of the port model |
 | LEDs and SSD1306 OLED | yes | yes | yes | yes |
-| Oscillator status (OSTS, HFIOFS, PLLRDY) | — | — | yes | — |
+| Firmware oscillator frequency and status | yes | yes | yes: FOSC, OSCCON.IRCF/SCS, OSCTUNE.PLLEN and OSTS/HFIOFS/PLLRDY | yes |
 
-Where this table says "—", `docs/FACTS-SIM.md` documents no model for that peripheral on that family: its registers are plain storage and the program is reported as touching unmodelled SFRs. (The watchdog, CRC, comparator, CLC, CWG, CCP and external-interrupt models are written and cited against the Q10 data sheet.) `docs/FACTS-SIM.md` is the authoritative list, section by section, with the data sheet page for each rule; peripherals are added over time.
+Where this table says "—", `docs/FACTS-SIM.md` documents no model for that peripheral on that family: its registers are plain storage and the program is reported as touching unmodelled SFRs. The Q10 models have their own data sheet citations; shared watchdog behaviour and Q41 pin-interrupt routing are also covered in that document. `docs/FACTS-SIM.md` is the authoritative list, section by section, with the data sheet page for each rule; peripherals are added over time.
 
-**Not modelled anywhere:** DMA, synchronous EUSART mode, input thresholds, the oscillator start-up and clock switching (the oscillator registers take their reset values from the configuration words, but `CSWEN` and the ready bits are not applied), brown-out, `LVP`, code and write protection.
+**Not modelled anywhere:** DMA, synchronous EUSART mode, input thresholds, oscillator start-up and PLL lock delays, oscillator trim and fail-safe clock monitoring (supported clock switches complete immediately; `CSWEN` and `CSWHOLD` are honoured), brown-out, `LVP`, code and write protection.
+
+**The watchdog on PIC18-Q10 and Q41 parts.** The shared windowed watchdog model follows `WDTE`, `WDTCPS`, `WDTCWS` and `WDTCCS` configuration settings. Time-outs while awake reset the part; time-outs in Sleep wake it. Window violations also reset the part, and software enable, `CLRWDT` and reset-cause flags follow the model. All six Q41 variants are covered. Timing uses the effective firmware clock or explicit Fosc override. The K22 watchdog remains unmodelled.
 
 **The watchdog on a PIC16 part.** It times out and resets the part (TO and `RWDT` cleared) when the configuration enables it (`WDTE`), and a time-out in Sleep wakes the part with TO = PD = 0. A program that is built without `WDTE` set to off therefore has a watchdog: an erased configuration word enables it, with the default period of 2 s, and a program that never executes `CLRWDT` is reset after 2 s of simulated time. The period is counted in simulated instruction cycles from the clock the stimulus names (`fosc_mhz` override, or the clock derived from firmware when no override is supplied): at the wrong `fosc_mhz` the time-out arrives at the wrong simulated time. On the windowed parts (PIC16F131xx, PIC16F171xx) a `CLRWDT` that the window does not allow, or one that did not follow a read of `WDTCON0` while a window is set, resets the part and clears `WDTWV`. `WDTCON` of the PIC16F152xx is documented with a reset value of 0 but with a default period of 2 s: the simulator uses the 2 s. The PIC16F180x6 are modelled from the device file only, because their data sheet is not available to the project. The watchdog clock is always LFINTOSC (31 kHz, or 31.25 kHz where `WDTCON.CS` says MFINTOSC); EXTOSC and SOSC are not modelled.
 
@@ -864,16 +881,21 @@ The simulator follows the data sheet. Where it differs from MDB it says so in `d
 | Toolbar | Reset | Restart the part, replay the stimulus, keep the wiring |
 | Toolbar | Load | (Re)load the program and stimulus; clears breakpoints |
 | Toolbar | Stim… / x | Choose a stimulus file (opens in its folder, the program's, or `tests/sim`) / clear it |
-| Toolbar | Speed, Fosc MHz | Run speed and display clock |
+| Toolbar | Speed, Fosc override MHz | Run speed; zero derives the clock from firmware, a positive value overrides it |
 | Program pane | click a line | Toggle a breakpoint |
 | Program pane | follow PC, stay in my code, goto/Go | View control |
 | CPU panel | Stopwatch Start/Stop/Lap/Clear | Time simulated intervals |
-| Right tabs | Memory, SFRs, Watch, Board, Variables | Inspection and wiring |
+| CPU panel | Edit… | Open the Debugger tab |
+| Right tabs | Memory, SFRs, Watch, Board, Variables, UART, Debugger | Inspection, register editing, wiring, terminal and debugging |
+| Debugger | Write / Drive pin / Apply | Edit a data byte or PC; change digital or ADC input while paused |
+| Debugger | Break on value change / Remove | Add or remove a data watchpoint |
+| Debugger | Trace data byte / Trace pin; Record / Stop capture / Clear capture | Choose signals and control waveform capture |
+| Debugger | Export VCD… | Save the waveform with simulated nanosecond timestamps |
 | Window | drop `.hex`/`.elf`/`.toml` | Load the program / set the stimulus |
 
 ## basil-sim options
 
-`--device`, `--devices`, `--asm`, `--until`, `--max-cycles`, `--stim`, `--dump`, `--bp`, `--bp-max`, `--trace`, `--trace-regs`, `--config`, `--speed`, `--fosc`, `--help`, `--version`. Environment: `PICSIM_DEVICES`.
+`--device`, `--devices`, `--asm`, `--until`, `--max-cycles`, `--stim`, `--dump`, `--bp`, `--bp-max`, `--trace`, `--trace-regs`, `--config`, `--speed`, `--fosc`, `--strict`, `--help`, `--version`. Environment: `PICSIM_DEVICES`.
 
 ## Stimulus sections
 
@@ -889,7 +911,7 @@ The simulator follows the data sheet. Where it differs from MDB it says so in `d
 
 ## Exit status of basil-sim
 
-0 reached `--until`; 1 stopped for another reason; 2 error.
+0 reached `--until` or completed a run with no stop symbol; 1 stopped for another reason; 2 error; 3 unmodelled SFR access in strict mode.
 
 ---
 
@@ -910,7 +932,7 @@ Reading it:
 * The program did not halt in the 5 000 000 cycles allowed (`stop: Cycles`), which is 0.31 s at 64 MHz, and `basil-sim` would exit with status 1.
 * It printed its banner on the serial port and then reported that the real-time clock chip did not answer (`tx1`).
 * The `i2c1` line shows why: four times the host started a transfer to address 6F for writing and the byte was not acknowledged (`!`), followed by a stop. No device listens at that address.
-* Four SFRs are listed as unmodelled for this part; they belong to peripherals whose models do not cover those registers.
+* Three SFRs are listed as unmodelled for this part; they belong to peripherals whose models do not cover those registers.
 
 To make the chip answer, give the I2C bus a client in a stimulus file:
 

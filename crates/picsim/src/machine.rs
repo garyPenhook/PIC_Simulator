@@ -18,6 +18,8 @@ pub enum Stop {
     Sleep,
     /// A breakpoint address was reached.
     Breakpoint(u32),
+    /// A watched data byte changed during the last instruction.
+    Watchpoint(crate::debugger::DataChange),
 }
 
 /// State of a source-line step that runs over several calls of `Machine::line_step`.
@@ -34,6 +36,7 @@ pub struct Machine {
     pub dev: Device,
     pub syms: BTreeMap<String, u32>,
     pub breakpoints: Vec<u32>,
+    pub debugger: crate::debugger::Debugger,
     /// Routines, typed variables and source lines from the ELF (`basil -g`); empty without one.
     pub debug: DebugInfo,
     image: Image,
@@ -54,7 +57,7 @@ impl Machine {
             return Err(format!("{}: family {} is not simulated yet", dev.device.name, dev.device.family));
         }
         let cpu = Pic18::new(&dev)?;
-        Ok(Machine { cpu, dev, syms: BTreeMap::new(), breakpoints: Vec::new(), debug: DebugInfo::default(), image: Image::default(), stimulus: None, until_routine: false, strict: false, load_notes: Vec::new() })
+        Ok(Machine { cpu, dev, syms: BTreeMap::new(), breakpoints: Vec::new(), debugger: crate::debugger::Debugger::default(), debug: DebugInfo::default(), image: Image::default(), stimulus: None, until_routine: false, strict: false, load_notes: Vec::new() })
     }
 
     pub fn load_hex(&mut self, text: &str) -> Result<(), String> {
@@ -100,6 +103,7 @@ impl Machine {
                 self.cpu.notes.insert(format!("the stimulus no longer applies after the reset: {e}"));
             }
             self.watch_entries();
+            self.debugger.reset();
         }
     }
 
@@ -188,7 +192,9 @@ impl Machine {
         let halt = self.syms.get("__halt").copied();
         for _ in 0..budget {
             let before = self.stack_depth();
-            self.cpu.step();
+            if let Some(stop) = self.step() {
+                return Some(Some(stop));
+            }
             if self.strict && !self.cpu.m.unmodelled.is_empty() {
                 return Some(Some(Stop::Unmodelled));
             }
@@ -257,7 +263,9 @@ impl Machine {
                 return Stop::Breakpoint(pc);
             }
             first = false;
-            self.cpu.step();
+            if let Some(stop) = self.step() {
+                return stop;
+            }
             if self.strict && !self.cpu.m.unmodelled.is_empty() {
                 return Stop::Unmodelled;
             }
@@ -266,6 +274,21 @@ impl Machine {
             }
         }
         Stop::Cycles
+    }
+
+    /// Execute one instruction, observing data changes and recording waveforms when enabled.
+    pub fn step(&mut self) -> Option<Stop> {
+        if !self.debugger.active() {
+            self.cpu.step();
+            return None;
+        }
+        self.cpu.settle();
+        let before = self.debugger.snapshot(|a| self.cpu.peek(a));
+        self.debugger.sample(self.cpu.p.board.time_ns(self.cpu.cycles) as u64, |a| self.cpu.peek(a));
+        self.cpu.step();
+        self.cpu.settle();
+        self.debugger.sample(self.cpu.p.board.time_ns(self.cpu.cycles) as u64, |a| self.cpu.peek(a));
+        self.debugger.changed(&before, |a| self.cpu.peek(a)).map(Stop::Watchpoint)
     }
 
     /// Bytes of a variable (little endian) as the CPU would read them, without side effects.

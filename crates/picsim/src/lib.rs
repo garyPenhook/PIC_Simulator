@@ -3,6 +3,7 @@
 pub mod config;
 mod oscillator;
 pub mod debuginfo;
+pub mod debugger;
 pub mod disasm;
 pub mod drive;
 pub mod hex;

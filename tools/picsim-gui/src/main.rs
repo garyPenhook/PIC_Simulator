@@ -1,6 +1,7 @@
 //! `pic-sim [prog.hex] [--device 18F16Q41|16F18056]`: run, step and inspect a program on a simulated PIC18 or PIC16 (enhanced mid-range).
 
 mod terminal;
+mod debugger;
 use terminal::Terminal;
 
 use eframe::egui;
@@ -144,6 +145,7 @@ struct App {
     sw: Stopwatch,
     sw_time: Stopwatch,
     terminal: Terminal,
+    debugger_tools: debugger::Tools,
 }
 
 fn list_devices(dir: &PathBuf) -> Vec<String> {
@@ -203,6 +205,7 @@ impl App {
             sw: Stopwatch::default(),
             sw_time: Stopwatch::default(),
             terminal: Terminal::default(),
+            debugger_tools: debugger::Tools::default(),
         };
         if hex.is_some() {
             a.load();
@@ -600,10 +603,10 @@ impl eframe::App for App {
                 if ui.add_enabled(loaded && idle, egui::Button::new("Step")).clicked() {
                     self.snapshot();
                     if let Some(m) = &mut self.m {
-                        m.cpu.step();
+                        self.last_stop = m.step();
                     }
                     if let Some(m) = &mut self.m16 {
-                        m.cpu.step();
+                        self.last_stop = m.step();
                     }
                 }
                 if ui.add_enabled(loaded && idle, egui::Button::new("Step over")).clicked() {
@@ -614,7 +617,7 @@ impl eframe::App for App {
                         if w >> 11 == 4 || w == 0x000A {
                             self.job = Some(Job::Until((m.cpu.pc + 1) % (m.cpu.prog.len() as u32 / 2)));
                         } else {
-                            m.cpu.step();
+                            self.last_stop = m.step();
                         }
                     }
                     if let Some(m) = &mut self.m {
@@ -628,7 +631,7 @@ impl eframe::App for App {
                         match next {
                             Some(t) => self.job = Some(Job::Until(t)),
                             None => {
-                                m.cpu.step();
+                                self.last_stop = m.step();
                             }
                         }
                     }
@@ -685,6 +688,7 @@ impl eframe::App for App {
             ui.label(match (&self.last_stop, self.running) {
                 (_, true) => format!("running at {:.1}% of real time ({:.2} Mcycles/s); a wait on a UART or timer flag shows as one line for a long time", 100.0 * self.rate.2 / real, self.rate.2 / 1e6),
                 _ if self.job.is_some() => "stepping... (Pause cancels)".to_string(),
+                (Some(Stop::Watchpoint(c)), _) => format!("{} — data watchpoint at 0x{:04X}: {:02X} → {:02X}", self.msg, c.addr, c.before, c.after),
                 (Some(s), _) => format!("{} — stopped: {s:?}", self.msg),
                 _ => self.msg.clone(),
             });
@@ -723,7 +727,10 @@ impl eframe::App for App {
             egui::Panel::bottom("board").show(ui, |ui| board_strip(ui, &m.cpu.p.board, &self.led_duty));
         }
         egui::Panel::left("regs").default_size(230.0).show(ui, |ui| {
-            ui.heading("CPU");
+            ui.horizontal(|ui| {
+                ui.heading("CPU");
+                if ui.small_button("Edit…").clicked() { self.tab = 6; }
+            });
             let r = m.cpu.m.regs.clone();
             let mem = &m.cpu.m.mem;
             let g = |a: u32| mem[a as usize];
@@ -791,7 +798,7 @@ impl eframe::App for App {
         });
         egui::Panel::right("data").default_size(360.0).show(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
-                for (i, t) in ["Memory", "SFRs", "Watch", "Board", "Variables", "UART"].iter().enumerate() {
+                for (i, t) in ["Memory", "SFRs", "Watch", "Board", "Variables", "UART", "Debugger"].iter().enumerate() {
                     ui.selectable_value(&mut self.tab, i, *t);
                 }
             });
@@ -813,10 +820,17 @@ impl eframe::App for App {
                     let f = self.mem_filter.to_uppercase();
                     let mut list: Vec<(u32, String)> = m.cpu.m.names.iter().enumerate().filter_map(|(a, n)| n.as_ref().map(|n| (a as u32, n.clone()))).filter(|(_, n)| f.is_empty() || n.to_uppercase().contains(&f)).collect();
                     list.sort_by(|x, y| x.1.cmp(&y.1));
-                    egui::ScrollArea::vertical().show_rows(ui, 14.0, list.len(), |ui, range| {
+                    egui::ScrollArea::vertical().show_rows(ui, 20.0, list.len(), |ui, range| {
                         for (a, n) in &list[range] {
-                            let v = m.cpu.peek(*a);
-                            ui.monospace(format!("{n:<14} {a:04X}  {v:02X}  {v:08b}"));
+                            let mut v = m.cpu.peek(*a);
+                            ui.horizontal(|ui| {
+                                ui.monospace(format!("{n:<14} {a:04X}"));
+                                if ui.add_enabled(!self.running && self.job.is_none(), egui::DragValue::new(&mut v).hexadecimal(2, false, true)).on_hover_text("Edit hex value; normal register write semantics apply").changed() {
+                                    m.cpu.write(*a, v);
+                                    m.cpu.settle();
+                                }
+                                ui.monospace(format!("{v:08b}"));
+                            });
                         }
                     });
                 }
@@ -830,6 +844,32 @@ impl eframe::App for App {
                     }
                 }
                 4 => variables_ui(ui, &m.debug, pc, &m.frames(), &m.cpu.m.mem, &m.cpu.prog, self.snap.as_ref().map(|s| (s, self.snap_frames.as_slice()))),
+                6 => {
+                    let pins = m.cpu.p.pins(&m.cpu.m);
+                    let idle = !self.running && self.job.is_none();
+                    let actions = egui::ScrollArea::vertical().show(ui, |ui| {
+                        self.debugger_tools.show(ui, &mut m.debugger, idle, &pins,
+                            |n| debugger_addr(&m.debug, &m.syms, &m.dev, n, m.cpu.pc).filter(|&a| a < m.cpu.m.size),
+                            |a| m.cpu.peek(a), m.cpu.pc)
+                    }).inner;
+                    for action in actions {
+                        match action {
+                            debugger::Action::Write(a, v) => { m.cpu.write(a, v); m.cpu.settle(); }
+                            debugger::Action::Pc(pc) => {
+                                m.cpu.pc = (pc & !1) % m.cpu.prog.len() as u32;
+                                m.cpu.note_entry();
+                            }
+                            debugger::Action::Pin((letter, bit), high) => {
+                                let ok = m.cpu.p.pin_feed(letter, m.cpu.cycles, 1 << bit, u8::from(high) << bit);
+                                self.debugger_tools.input_result(ok);
+                            }
+                            debugger::Action::Adc(ch, code) => {
+                                let ok = m.cpu.p.adc_feed(ch, m.cpu.cycles, code);
+                                self.debugger_tools.input_result(ok);
+                            }
+                        }
+                    }
+                }
                 5 => {
                     let ports: Vec<u8> = (1..=3).filter(|&n| m.cpu.p.has_uart(n)).collect();
                     if let Some((port, stream)) = self.terminal.ui(ui, &m.cpu.p.tx, &ports, m.cpu.cycles) {
@@ -1013,6 +1053,12 @@ fn watch_addr(debug: &picsim::debuginfo::DebugInfo, syms: &std::collections::BTr
     syms.get(name).map(|&a| (a, false, None)).or_else(|| debug.path_ref_at(name, Some(pc)).map(at)).or_else(|| dev.find_sfr(name).map(|s| (s.addr, false, None)))
 }
 
+/// Data names and numeric addresses for mutation/capture; ROM symbols cannot be written.
+fn debugger_addr(debug: &picsim::debuginfo::DebugInfo, syms: &BTreeMap<String, u32>, dev: &devdesc::Device, name: &str, pc: u32) -> Option<u32> {
+    hex_u32(name).or_else(|| watch_addr(debug, syms, dev, name, pc).filter(|(_, rom, _)| !rom).map(|(a, _, _)| a))
+        .filter(|&a| a < if dev.device.family == "pic18" { 0x10000 } else { 0x3000 })
+}
+
 /// The Watch tab: symbols (or SFR names) with a byte count, shown as unsigned, signed and hex. `addr` resolves a name,
 /// `peek` reads bytes without side effects.
 fn watch_ui(ui: &mut egui::Ui, watch: &mut Vec<(String, usize)>, input: &mut String, addr: impl Fn(&str) -> Option<(u32, bool, Option<String>)>, peek: impl Fn(u32, usize, bool) -> Vec<u8>) {
@@ -1059,7 +1105,10 @@ impl App {
             egui::Panel::bottom("board").show(ui, |ui| board_strip(ui, &m.cpu.board, &self.led_duty));
         }
         egui::Panel::left("regs").default_size(230.0).show(ui, |ui| {
-            ui.heading("CPU");
+            ui.horizontal(|ui| {
+                ui.heading("CPU");
+                if ui.small_button("Edit…").clicked() { self.tab = 6; }
+            });
             let g = |a: usize| m.cpu.mem[a];
             // Core registers sit at the same addresses on every enhanced mid-range part: STATUS 03h, FSR0 04h/05h, FSR1 06h/07h, BSR 08h, WREG 09h, PCLATH 0Ah, INTCON 0Bh.
             let st = g(3);
@@ -1123,7 +1172,7 @@ impl App {
         });
         egui::Panel::right("data").default_size(360.0).show(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
-                for (i, t) in ["Memory", "SFRs", "Watch", "Board", "Variables", "UART"].iter().enumerate() {
+                for (i, t) in ["Memory", "SFRs", "Watch", "Board", "Variables", "UART", "Debugger"].iter().enumerate() {
                     ui.selectable_value(&mut self.tab, i, *t);
                 }
             });
@@ -1145,12 +1194,19 @@ impl App {
                 1 => {
                     ui.add(egui::TextEdit::singleline(&mut self.mem_filter).hint_text("filter"));
                     let f = self.mem_filter.to_uppercase();
-                    let mut list: Vec<(&str, u32)> = m.dev.sfr.iter().filter(|s| f.is_empty() || s.name.to_uppercase().contains(&f)).map(|s| (s.name.as_str(), s.addr)).collect();
+                    let mut list: Vec<(String, u32)> = m.dev.sfr.iter().filter(|s| f.is_empty() || s.name.to_uppercase().contains(&f)).map(|s| (s.name.clone(), s.addr)).collect();
                     list.sort();
-                    egui::ScrollArea::vertical().show_rows(ui, 14.0, list.len(), |ui, range| {
+                    egui::ScrollArea::vertical().show_rows(ui, 20.0, list.len(), |ui, range| {
                         for (n, a) in &list[range] {
-                            let v = m.cpu.peek(*a);
-                            ui.monospace(format!("{n:<14} {a:04X}  {v:02X}  {v:08b}"));
+                            let mut v = m.cpu.peek(*a);
+                            ui.horizontal(|ui| {
+                                ui.monospace(format!("{n:<14} {a:04X}"));
+                                if ui.add_enabled(!self.running && self.job.is_none(), egui::DragValue::new(&mut v).hexadecimal(2, false, true)).on_hover_text("Edit hex value; normal register write semantics apply").changed() {
+                                    m.cpu.write(*a, v);
+                                    m.cpu.settle();
+                                }
+                                ui.monospace(format!("{v:08b}"));
+                            });
                         }
                     });
                 }
@@ -1164,6 +1220,36 @@ impl App {
                     }
                 }
                 4 => variables_ui(ui, &m.debug, pc, &m.frames(), &m.cpu.mem, &m.cpu.prog, self.snap.as_ref().map(|s| (s, self.snap_frames.as_slice()))),
+                6 => {
+                    let pins = m.cpu.pins();
+                    let idle = !self.running && self.job.is_none();
+                    let actions = egui::ScrollArea::vertical().show(ui, |ui| {
+                        self.debugger_tools.show(ui, &mut m.debugger, idle, &pins,
+                            |n| debugger_addr(&m.debug, &m.syms, &m.dev, n, m.cpu.pc).and_then(|a| {
+                                if (0x2000..m.cpu.linear_end()).contains(&a) { Some(picsim::pic16::linear_to_data(a - 0x2000) as u32) }
+                                else if a < 0x2000 { let offset = a & 0x7f; Some(if offset < 12 || offset >= 0x70 { offset } else { a }) }
+                                else { None }
+                            }),
+                            |a| m.cpu.peek(a), m.cpu.pc)
+                    }).inner;
+                    for action in actions {
+                        match action {
+                            debugger::Action::Write(a, v) => { m.cpu.write(a, v); m.cpu.settle(); }
+                            debugger::Action::Pc(pc) => {
+                                m.cpu.pc = pc % (m.cpu.prog.len() as u32 / 2);
+                                m.cpu.note_entry();
+                            }
+                            debugger::Action::Pin((letter, bit), high) => {
+                                let ok = m.cpu.pin_feed(letter, m.cpu.cycles, 1 << bit, u8::from(high) << bit);
+                                self.debugger_tools.input_result(ok);
+                            }
+                            debugger::Action::Adc(ch, code) => {
+                                let ok = m.cpu.adc_feed(ch, m.cpu.cycles, code);
+                                self.debugger_tools.input_result(ok);
+                            }
+                        }
+                    }
+                }
                 5 => {
                     let ports: Vec<u8> = (1..=3).filter(|&n| m.cpu.has_uart(n)).collect();
                     if let Some((port, stream)) = self.terminal.ui(ui, &m.cpu.tx, &ports, m.cpu.cycles) {
