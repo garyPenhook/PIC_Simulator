@@ -1,4 +1,5 @@
-//! Windowed watchdog timer of the PIC18F27Q10 (DS40002043F ch.10 p.96-106, resets 9.5-9.12 p.88-90).
+//! Shared windowed watchdog timer of the PIC18 Q10 and Q41 (Q10: DS40002043F ch.10 p.96-106,
+//! resets 9.5-9.12 p.88-90; Q41: DS40002214G ch.15 p.236-246, Table 14-1 p.223-224).
 //!
 //! Rules relied on:
 //! * Modes (Table 10-1 p.98) by the WDTE configuration field: 3 always on, 2 on while awake, 1 on when WDTCON0.SEN = 1, 0 off. Off means the

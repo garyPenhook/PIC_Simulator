@@ -312,7 +312,7 @@ const CWG_END: u8 = CWG0 + cwg::HOOKS - 1;
 const CMP0: u8 = 184;
 const CMP_END: u8 = CMP0 + 2 * cmp::HOOKS;
 const CMOUT_HOOK: u8 = 222;
-/// Q10 WWDT registers (sub-codes of `wdt.rs`) use the codes that are left over: 157..=159 and 238, 239.
+/// Q10/Q41 WWDT registers (sub-codes of `wdt.rs`) use the codes that are left over: 157..=159 and 238, 239.
 fn wdt_hook(sub: u8) -> u8 {
     [157, 158, 159, 238, 239][usize::from(sub)]
 }
@@ -866,18 +866,19 @@ impl Periph {
                 p.clcin = (0..8).map(|k| addr(dev, &format!("CLCIN{k}PPS")).unwrap_or(usize::MAX)).collect();
                 p.clcdata = addr(dev, "CLCDATA");
             }
-            if let Some(w) = Wdt::find(dev) {
-                for (reg, sub) in [(w.con0, wdt::CON0), (w.con1, wdt::CON1), (w.psl, wdt::PSL), (w.psh, wdt::PSH), (w.tmr, wdt::TMR)] {
-                    hook(reg, wdt_hook(sub));
-                }
-                p.wdt = Some(w);
-            }
             for n in 3..=4u8 {
                 if let Some(w) = Pwm::find(dev, n) {
                     hook(w.con, PWM0 + p.pwms.len() as u8);
                     p.pwms.push(w);
                 }
             }
+        }
+        // Q10 and Q41 share the windowed watchdog register layout.
+        if let Some(w) = Wdt::find(dev) {
+            for (reg, sub) in [(w.con0, wdt::CON0), (w.con1, wdt::CON1), (w.psl, wdt::PSL), (w.psh, wdt::PSH), (w.tmr, wdt::TMR)] {
+                hook(reg, wdt_hook(sub));
+            }
+            p.wdt = Some(w);
         }
         // Output codes of the bus pins: Q10 MSSPn SCL 0x0F + 2(n-1), SDA 0x10 + 2(n-1) (DS40002043F Table 18-2 p.287);
         // Q41 I2C1 SCL 0x21, SDA 0x22 (DS40002214G Table 21-2 p.323).
