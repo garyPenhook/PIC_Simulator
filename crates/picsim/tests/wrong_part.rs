@@ -30,11 +30,11 @@ fn a_pic18_hex_on_a_pic16_part_gives_a_note_that_survives_a_reset() {
 }
 
 #[test]
-fn the_right_part_gives_no_note_and_another_pic18_part_names_the_elf() {
+fn the_right_part_gives_no_file_note_and_another_pic18_part_names_the_elf() {
     let mut m = Machine::new(dev("18F27Q10")).unwrap();
     m.load_hex(&hex()).unwrap();
     m.load_elf(&sim("blink_q10.elf")).unwrap();
-    assert!(m.cpu.notes.is_empty(), "{:?}", m.cpu.notes);
+    assert!(m.cpu.notes.iter().all(|n| n.starts_with("Fosc:")), "no file mismatch notes: {:?}", m.cpu.notes);
     let mut q = Machine::new(dev("18F16Q41")).unwrap();
     q.load_hex(&hex()).unwrap();
     q.load_elf(&sim("blink_q10.elf")).unwrap();

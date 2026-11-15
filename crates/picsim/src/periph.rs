@@ -197,8 +197,8 @@ fn t1_clk(q41: bool, cs: u8) -> Clk {
 enum How {
     /// `r` ticks per cycle, evenly.
     Ratio(u64),
-    /// An oscillator: edge number `e0 + k` falls on the cycle `ceil((e0 + k) * fosc / (4 * hz))`.
-    Time { hz: u64, fosc: u64, e0: u64 },
+    /// Independent oscillator, with elapsed time `ns` at `base`; preserve its phase across Fosc changes.
+    Time { hz: u64, fosc: u64, e0: u64, base: u64, ns: f64 },
     /// The cycles of the pin edges, in order.
     List(Vec<u64>),
 }
@@ -214,18 +214,13 @@ impl Edges {
     fn at(&self, base: u64, pre0: u64, sh: u32, j: u64) -> u64 {
         match &self.how {
             How::Ratio(r) => at(base, pre0, sh, j, *r),
-            How::Time { hz, fosc, e0 } => {
+            How::Time { hz, fosc, e0, base, ns } => {
                 let k = e0 + (j << sh) - pre0;
-                (u128::from(k) * u128::from(*fosc)).div_ceil(4 * u128::from(*hz)) as u64
+                base + (((k as f64 * 1e9 / *hz as f64 - ns) * *fosc as f64 / 4e9) - 1e-9).ceil().max(0.0) as u64
             }
             How::List(l) => l[((j << sh) - pre0 - 1) as usize],
         }
     }
-}
-
-/// Edge number of an oscillator at cycle `t`: edges since cycle 0.
-fn osc_edges(t: u64, hz: u64, fosc: u64) -> u64 {
-    (u128::from(t) * 4 * u128::from(hz) / u128::from(fosc)) as u64
 }
 
 // Hook codes stored in `Special::Hook`.
@@ -1477,16 +1472,16 @@ impl Periph {
         self.reset_req.take()
     }
 
-    fn wdt_fosc(&mut self) {
-        let f = if self.board.fosc_mhz > 0.0 { self.board.fosc_mhz } else { 64.0 };
+    pub(crate) fn wdt_fosc(&mut self, now: u64) {
+        let f = self.board.effective_fosc_mhz();
         if let Some(w) = &mut self.wdt {
-            w.fosc_mhz = f;
+            w.set_fosc(f, now);
         }
     }
 
     /// The watchdog at cycle `now`: held clear while off, a time-out asks for a reset.
     fn wdt_tick(&mut self, m: &DataMem, now: u64) {
-        self.wdt_fosc();
+        self.wdt_fosc(now);
         let sleeping = self.sleeping;
         let Some(w) = &mut self.wdt else { return };
         let (c0, c1) = (m.mem[w.con0], m.mem[w.con1]);
@@ -1642,7 +1637,7 @@ impl Periph {
 
     /// CLRWDT at cycle `now`: a valid one clears the watchdog, one in a closed window (or unarmed in windowed mode) asks for a reset.
     pub fn clrwdt(&mut self, m: &DataMem, now: u64) {
-        self.wdt_fosc();
+        self.wdt_fosc(now);
         let Some(w) = &mut self.wdt else { return };
         let (c0, c1) = (m.mem[w.con0], m.mem[w.con1]);
         if !w.on(c0) {
@@ -2022,9 +2017,9 @@ impl Periph {
         }
     }
 
-    /// Fosc in Hz (the board's `fosc_mhz`, 64 MHz until the stimulus says otherwise).
+    /// Effective Fosc in Hz, from firmware unless the board supplies an override.
     fn fosc_hz(&self) -> u64 {
-        (if self.board.fosc_mhz > 0.0 { self.board.fosc_mhz } else { 64.0 } * 1e6) as u64
+        (self.board.effective_fosc_mhz() * 1e6) as u64
     }
 
     /// The Q41 family (its timers select SOSC with other codes).
@@ -2073,8 +2068,10 @@ impl Periph {
             Clk::Cyc(r) => Edges { n: (to - from) * r, how: How::Ratio(r) },
             Clk::Hz(hz) => {
                 let fosc = self.fosc_hz();
-                let e0 = osc_edges(from, hz, fosc);
-                Edges { n: osc_edges(to, hz, fosc) - e0, how: How::Time { hz, fosc, e0 } }
+                let ns = self.board.time_ns(from);
+                let e0 = (ns * hz as f64 / 1e9 + 1e-9).floor() as u64;
+                let e1 = (self.board.time_ns(to) * hz as f64 / 1e9 + 1e-9).floor() as u64;
+                Edges { n: e1.saturating_sub(e0), how: How::Time { hz, fosc, e0, base: from, ns } }
             }
             Clk::Pin(inv) => {
                 let mut l: Vec<u64> = Vec::new();
@@ -2122,7 +2119,11 @@ impl Periph {
                 hzs.push(h);
             }
         }
-        hzs.into_iter().map(|hz| (u128::from(osc_edges(after, hz, fosc) + 1) * u128::from(fosc)).div_ceil(4 * u128::from(hz)) as u64).min()
+        hzs.into_iter().map(|hz| {
+            let ns = self.board.time_ns(after);
+            let edge = (ns * hz as f64 / 1e9 + 1e-9).floor() + 1.0;
+            after + (((edge * 1e9 / hz as f64 - ns) * fosc as f64 / 4e9) - 1e-9).ceil().max(1.0) as u64
+        }).min()
     }
 
     /// The next cycle after `after` that a stimulus analog level changes.

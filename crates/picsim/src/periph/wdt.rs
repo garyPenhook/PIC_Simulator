@@ -42,6 +42,7 @@ pub struct Wdt {
     pub was_on: bool,
     /// PIC clock for the conversion of the 31 kHz time base to instruction cycles `[A88]`.
     pub fosc_mhz: f64,
+    clock: super::board::Board,
 }
 
 impl Wdt {
@@ -61,6 +62,7 @@ impl Wdt {
             armed: false,
             was_on: false,
             fosc_mhz: 64.0,
+            clock: Default::default(),
         })
     }
 
@@ -68,7 +70,18 @@ impl Wdt {
     /// on the PIC16F152xx, CS (bit 7). There is no window and no WDTPSL/H, WDTTMR; their fields are unused (`usize::MAX`).
     pub fn find_simple(dev: &Device) -> Option<Wdt> {
         let con0 = dev.find_sfr("WDTCON")?.addr as usize;
-        Some(Wdt { con0, con1: usize::MAX, psl: usize::MAX, psh: usize::MAX, tmr: usize::MAX, wdte: 0, ps_fixed: false, win_fixed: false, cs_fixed: false, start: 0, armed: false, was_on: false, fosc_mhz: 64.0 })
+        Some(Wdt { con0, con1: usize::MAX, psl: usize::MAX, psh: usize::MAX, tmr: usize::MAX, wdte: 0, ps_fixed: false, win_fixed: false, cs_fixed: false, start: 0, armed: false, was_on: false, fosc_mhz: 64.0, clock: Default::default() })
+    }
+
+    pub fn set_fosc(&mut self, fosc: f64, now: u64) {
+        self.clock.fosc_mhz = fosc;
+        self.clock.clock_changed(now);
+        self.fosc_mhz = fosc;
+    }
+
+    fn elapsed_cycles(&self, now: u64) -> f64 {
+        if self.clock.clock_segments.is_empty() { now.saturating_sub(self.start) as f64 }
+        else { (self.clock.time_ns(now) - self.clock.time_ns(self.start)).max(0.0) * self.fosc_mhz / 4000.0 }
     }
 
     /// n of WDTPS: the period is 2^(n + 5) clocks.
@@ -103,13 +116,14 @@ impl Wdt {
 
     /// Clocks elapsed since the last clear at cycle `now`.
     pub fn clocks(&self, now: u64, con1: u8) -> u64 {
-        (now.saturating_sub(self.start) as f64 / self.cycles_per_clock(con1)) as u64
+        (self.elapsed_cycles(now) / self.cycles_per_clock(con1) + 1e-9) as u64
     }
 
     /// Cycle of the time-out for the current clear.
     pub fn deadline(&self, con0: u8, con1: u8) -> u64 {
         let period = (1u64 << (Self::n(con0) + 5)) as f64;
-        self.start + (period * self.cycles_per_clock(con1)).ceil() as u64
+        let now = self.clock.clock_segments.last().map_or(self.start, |(c, _, _)| (*c).max(self.start));
+        now + (period * self.cycles_per_clock(con1) - self.elapsed_cycles(now) - 1e-9).ceil().max(0.0) as u64
     }
 
     /// WDTTMR[4:0]: elapsed time in 32nds of the period.

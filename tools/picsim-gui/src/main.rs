@@ -56,11 +56,12 @@ impl Stopwatch {
 }
 
 /// Stopwatch controls and readout under the CPU registers. `now` is the part's cycle count.
-fn stopwatch_ui(ui: &mut egui::Ui, sw: &mut Stopwatch, now: u64, fosc_mhz: f32) {
-    let us = |c: u64| c as f64 / (f64::from(fosc_mhz) / 4.0); // instruction clock is Fosc/4
+fn stopwatch_ui(ui: &mut egui::Ui, sw: &mut Stopwatch, time: &mut Stopwatch, now: u64, ns: u64) {
+    let us = |t: u64| t as f64 / 1000.0;
     // A reset of the CPU rewinds the cycle counter: the interval no longer means anything.
     if now < sw.base || sw.stopped.is_some_and(|s| s > now) {
         sw.clear();
+        time.clear();
     }
     ui.separator();
     ui.heading("Stopwatch");
@@ -68,22 +69,26 @@ fn stopwatch_ui(ui: &mut egui::Ui, sw: &mut Stopwatch, now: u64, fosc_mhz: f32) 
         if sw.counting {
             if ui.button("Stop").clicked() {
                 sw.stop(now);
+                time.stop(ns);
             }
         } else if ui.button("Start").clicked() {
             sw.start(now);
+            time.start(ns);
         }
         if ui.add_enabled(sw.counting, egui::Button::new("Lap")).clicked() {
             sw.laps.push(sw.elapsed(now));
+            time.laps.push(time.elapsed(ns));
         }
         if ui.button("Clear").clicked() {
             sw.clear();
+            time.clear();
         }
     });
     let e = sw.elapsed(now);
     ui.monospace(format!("{e} cycles"));
-    ui.monospace(format!("{:.3} us", us(e)));
+    ui.monospace(format!("{:.3} us", us(time.elapsed(ns))));
     let mut prev = 0;
-    for (i, &l) in sw.laps.iter().enumerate() {
+    for (i, &l) in time.laps.iter().enumerate() {
         ui.monospace(format!("Lap {}: {:.3} us  (+{:.3})", i + 1, us(l), us(l - prev)));
         prev = l;
     }
@@ -137,6 +142,7 @@ struct App {
     /// (time, cycles) at the last rate sample, and the measured simulated cycles per second.
     rate: (std::time::Instant, u64, f64),
     sw: Stopwatch,
+    sw_time: Stopwatch,
     terminal: Terminal,
 }
 
@@ -170,7 +176,7 @@ impl App {
             speed: 6.0,
             speed_idx: 0,
             pace: picsim::pace::Pace::new(0.0, 64.0),
-            fosc_mhz: 64.0,
+            fosc_mhz: 0.0,
             view_addr: 0,
             follow: true,
             stay_home: true,
@@ -195,6 +201,7 @@ impl App {
             job: None,
             rate: (std::time::Instant::now(), 0, 0.0),
             sw: Stopwatch::default(),
+            sw_time: Stopwatch::default(),
             terminal: Terminal::default(),
         };
         if hex.is_some() {
@@ -212,6 +219,7 @@ impl App {
     fn load(&mut self) {
         self.running = false;
         self.sw.clear();
+        self.sw_time.clear();
         self.terminal.clear();
         self.job = None; // a step over from the previous program must not run on the new one
         self.last_stop = None;
@@ -250,7 +258,7 @@ impl App {
                 let text = std::fs::read_to_string(&f).map_err(|e| format!("{}: {e}", f.display()))?;
                 m.load_stimulus(&text).map_err(|e| format!("{}: {e}", f.display()))?;
                 // The file's clock goes into the Fosc box, which sets the board's clock every frame (G1).
-                stim_fosc = picsim::stimulus::Stimulus::parse(&text).ok().map(|s| s.board.fosc_mhz).filter(|f| *f > 0.0);
+                stim_fosc = picsim::stimulus::Stimulus::parse(&text).ok().and_then(|s| s.fosc_given.then_some(s.board.fosc_mhz));
             }
             // Routines, variables and source lines from the ELF: <stem>.elf beside the hex, or one folder up (basil writes the hex into dist/).
             let note = match picsim::debuginfo::elf_for(std::path::Path::new(self.hex_path.trim())) {
@@ -329,7 +337,7 @@ impl App {
                 let text = std::fs::read_to_string(&f).map_err(|e| format!("{}: {e}", f.display()))?;
                 m.load_stimulus(&text).map_err(|e| format!("{}: {e}", f.display()))?;
                 // The file's clock goes into the Fosc box, which sets the board's clock every frame (G1).
-                stim_fosc = picsim::stimulus::Stimulus::parse(&text).ok().map(|s| s.board.fosc_mhz).filter(|f| *f > 0.0);
+                stim_fosc = picsim::stimulus::Stimulus::parse(&text).ok().and_then(|s| s.fosc_given.then_some(s.board.fosc_mhz));
             }
             let note = match picsim::debuginfo::elf_for(std::path::Path::new(self.hex_path.trim())) {
                 Some(e) => match m.load_elf(&e) {
@@ -372,6 +380,13 @@ impl App {
                 self.labels.clear();
             }
         }
+    }
+
+    /// Effective firmware or overridden clock of the loaded part.
+    fn effective_fosc_mhz(&self) -> f64 {
+        self.m.as_ref().map(|m| m.cpu.p.board.effective_fosc_mhz())
+            .or_else(|| self.m16.as_ref().map(|m| m.cpu.board.effective_fosc_mhz()))
+            .unwrap_or(64.0)
     }
 
     /// Instruction cycles executed so far by whichever part is loaded.
@@ -479,9 +494,9 @@ impl eframe::App for App {
         if self.running {
             // A changed speed or Fosc re-bases the clock (it would otherwise jump); the Run button does the same.
             let ratio = picsim::pace::SPEEDS[self.speed_idx].1;
-            if ratio != self.pace.ratio || f64::from(self.fosc_mhz) != self.pace.fosc_mhz {
+            if ratio != self.pace.ratio || self.effective_fosc_mhz() != self.pace.fosc_mhz {
                 self.pace.ratio = ratio;
-                self.pace.fosc_mhz = f64::from(self.fosc_mhz);
+                self.pace.fosc_mhz = self.effective_fosc_mhz();
                 let c = self.cycles();
                 self.pace.restart(c);
             }
@@ -572,7 +587,7 @@ impl eframe::App for App {
                     self.snapshot();
                     self.rate = (std::time::Instant::now(), self.cycles(), 0.0);
                     self.pace.ratio = picsim::pace::SPEEDS[self.speed_idx].1;
-                    self.pace.fosc_mhz = f64::from(self.fosc_mhz);
+                    self.pace.fosc_mhz = self.effective_fosc_mhz();
                     let c = self.cycles();
                     self.pace.restart(c);
                     self.running = true;
@@ -634,6 +649,7 @@ impl eframe::App for App {
                     self.job = None;
                     self.snap = None;
                     self.sw.clear();
+                    self.sw_time.clear();
                     self.terminal.clear();
                     if let Some(m) = &mut self.m {
                         m.reset();
@@ -652,10 +668,10 @@ impl eframe::App for App {
                 if self.speed_idx == 0 {
                     ui.add(egui::Slider::new(&mut self.speed, 0.0..=7.0).text("cycles/frame (10^x)"));
                 }
-                ui.label("Fosc MHz");
+                ui.label("Fosc override MHz (0 = firmware)");
                 // the family's highest clock (G2): 32 MHz on a PIC16, 64 on a PIC18
                 let fmax = self.m16.as_ref().map(|m| m.dev.fosc_max_mhz()).or(self.m.as_ref().map(|m| m.dev.fosc_max_mhz())).unwrap_or(64.0);
-                ui.add(egui::DragValue::new(&mut self.fosc_mhz).range(0.03..=fmax as f32));
+                ui.add(egui::DragValue::new(&mut self.fosc_mhz).range(0.0..=fmax as f32));
             });
             // Simulated cycles per second while running, against what the part does at the chosen Fosc.
             if self.running {
@@ -665,7 +681,7 @@ impl eframe::App for App {
                     self.rate = (std::time::Instant::now(), cycles, cycles.saturating_sub(self.rate.1) as f64 / dt);
                 }
             }
-            let real = f64::from(self.fosc_mhz) * 1e6 / 4.0;
+            let real = self.effective_fosc_mhz() * 1e6 / 4.0;
             ui.label(match (&self.last_stop, self.running) {
                 (_, true) => format!("running at {:.1}% of real time ({:.2} Mcycles/s); a wait on a UART or timer flag shows as one line for a long time", 100.0 * self.rate.2 / real, self.rate.2 / 1e6),
                 _ if self.job.is_some() => "stepping... (Pause cancels)".to_string(),
@@ -732,9 +748,10 @@ impl eframe::App for App {
                 row(ui, "STKPTR", format!("{:02X}", g(r.stkptr)));
                 row(ui, "Cycles", m.cpu.cycles.to_string());
                 row(ui, "Instr", m.cpu.icount.to_string());
-                row(ui, "Time", format!("{:.3} ms", m.cpu.cycles as f64 / (f64::from(self.fosc_mhz) * 1e6 / 4.0) * 1e3));
+                row(ui, "Fosc", format!("{} MHz", m.cpu.p.board.effective_fosc_mhz()));
+                row(ui, "Time", format!("{:.3} ms", m.cpu.p.board.time_ns(m.cpu.cycles) / 1e6));
             });
-            stopwatch_ui(ui, &mut self.sw, m.cpu.cycles, self.fosc_mhz);
+            stopwatch_ui(ui, &mut self.sw, &mut self.sw_time, m.cpu.cycles, m.cpu.p.board.time_ns(m.cpu.cycles) as u64);
             ui.separator();
             ui.heading(if m.debug.funcs.is_empty() { "Return stack" } else { "Call stack" });
             let sp = (m.cpu.stack_level() as usize).min(m.cpu.stack.len() - 1); // STKPTR without its flag bits
@@ -1062,9 +1079,10 @@ impl App {
                 row(ui, "FSR1", format!("{:02X}{:02X}", g(7), g(6)));
                 row(ui, "Cycles", m.cpu.cycles.to_string());
                 row(ui, "Instr", m.cpu.icount.to_string());
-                row(ui, "Time", format!("{:.3} ms", m.cpu.cycles as f64 / (f64::from(self.fosc_mhz) * 1e6 / 4.0) * 1e3));
+                row(ui, "Fosc", format!("{} MHz", m.cpu.board.effective_fosc_mhz()));
+                row(ui, "Time", format!("{:.3} ms", m.cpu.board.time_ns(m.cpu.cycles) / 1e6));
             });
-            stopwatch_ui(ui, &mut self.sw, m.cpu.cycles, self.fosc_mhz);
+            stopwatch_ui(ui, &mut self.sw, &mut self.sw_time, m.cpu.cycles, m.cpu.board.time_ns(m.cpu.cycles) as u64);
             ui.separator();
             let dbg = &m.debug;
             ui.heading(if dbg.funcs.is_empty() { "Return stack" } else { "Call stack" });

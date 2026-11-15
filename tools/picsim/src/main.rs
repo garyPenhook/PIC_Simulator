@@ -1,5 +1,5 @@
 //! `basil-sim prog.hex|prog.elf --device 18F16Q41 [--asm prog.S] [--until __halt] [--dump T_R1:2,T_R2] [--bp SYM,SYM] [--bp-max N] [--config] [--stim FILE]`
-//! `--speed max|R` limits the run to a fraction R of real time (`1` = real time, `0.5`, `1/10`...) at `--fosc MHZ` (default the family's highest clock: 32 on a PIC16, 64 on a PIC18); the default is `max`.
+//! `--speed max|R` limits the run to a fraction R of real time (`1` = real time, `0.5`, `1/10`...) at `--fosc MHZ` (default derived from firmware oscillator settings); the default is `max`.
 //! `--bp` prints the cycle count each time one of the symbols is reached (at most `--bp-max`, default 20).
 
 use picsim::pace::{parse_ratio, Pace};
@@ -33,8 +33,8 @@ usage: basil-sim prog.hex|prog.elf [--device PART] [--devices DIR]
   --strict              fail on the first access to an unmodelled SFR (exit 3)
   --config              print the configuration words (PIC18 only)
   --speed max|R         run at a fraction R of real time (default max)
-  --fosc MHZ            the clock --speed uses, up to the family's highest (32 MHz PIC16,
-                        64 MHz PIC18), which is the default
+  --fosc MHZ            override firmware Fosc, up to the family's highest (32 MHz PIC16,
+                        64 MHz PIC18); default follows firmware
   -h, --help            print this help and exit
   -V, --version         print the version and exit
 ";
@@ -115,17 +115,16 @@ fn run() -> Result<ExitCode, String> {
     let hex = hex.ok_or_else(|| HELP.split("\n\n").next().unwrap_or(HELP).to_string() + "\n(see --help)")?;
     let path = root.join(format!("{device}.toml"));
     let dev = devdesc::Device::load(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-    // The family's highest clock is the default and the limit (G2): 32 MHz on a PIC16, 64 on a PIC18.
-    let fosc = fosc.unwrap_or(dev.fosc_max_mhz());
-    if fosc > dev.fosc_max_mhz() {
-        return Err(format!("--fosc {fosc}: the {} runs at most at {} MHz", dev.device.name, dev.fosc_max_mhz()));
+    // Explicit clocks are limited to the device maximum; otherwise follow firmware.
+    if fosc.is_some_and(|f| f > dev.fosc_max_mhz()) {
+        return Err(format!("--fosc {}: the {} runs at most at {} MHz", fosc.unwrap(), dev.device.name, dev.fosc_max_mhz()));
     }
-    let mut pace = if speed > 0.0 { Some(Pace::new(speed, fosc)) } else { None };
+    let mut pace = if speed > 0.0 { Some(Pace::new(speed, fosc.unwrap_or(dev.fosc_max_mhz()))) } else { None };
     if dev.device.family == "pic16e" {
         if show_cfg {
             return Err("--config is not supported for PIC16 parts yet".into());
         }
-        return run16(dev, &hex, asm, stim, until, until_given, &dump, max, trace, trace_regs, &bps, bp_max, &mut pace, strict);
+        return run16(dev, &hex, asm, stim, until, until_given, &dump, max, trace, trace_regs, &bps, bp_max, &mut pace, strict, fosc);
     }
     let mut m = Machine::new(dev)?;
     m.strict = strict;
@@ -144,6 +143,7 @@ fn run() -> Result<ExitCode, String> {
     if let Some(f) = &stim {
         m.load_stimulus(&std::fs::read_to_string(f).map_err(|e| format!("{}: {e}", f.display()))?).map_err(|e| format!("{}: {e}", f.display()))?;
     }
+    if let Some(f) = fosc { m.cpu.p.board.fosc_mhz = f; }
     let asm = asm.unwrap_or_else(|| hex.with_extension("S"));
     if let Ok(t) = std::fs::read_to_string(&asm) {
         m.load_symbols_from_asm(&t);
@@ -188,7 +188,7 @@ fn run() -> Result<ExitCode, String> {
     if let Some(p) = pace.as_mut() {
         p.restart(m.cpu.cycles);
     }
-    let mut stop = paced_run(&mut pace, max, &mut m, |m| m.cpu.cycles, |m, n| m.run(stop_at, n));
+    let mut stop = paced_run(&mut pace, max, &mut m, |m| (m.cpu.cycles, m.cpu.p.board.effective_fosc_mhz()), |m, n| m.run(stop_at, n));
     let mut n = 0;
     while let Stop::Breakpoint(pc) = stop {
         n += 1;
@@ -199,7 +199,7 @@ fn run() -> Result<ExitCode, String> {
             break;
         }
         let left = max.saturating_sub(m.cpu.cycles);
-        stop = paced_run(&mut pace, left, &mut m, |m| m.cpu.cycles, |m, n| m.run(stop_at, n));
+        stop = paced_run(&mut pace, left, &mut m, |m| (m.cpu.cycles, m.cpu.p.board.effective_fosc_mhz()), |m, n| m.run(stop_at, n));
     }
     println!("stop: {stop:?}  cycles: {}  instructions: {}", m.cpu.cycles, m.cpu.icount);
     for d in &dump {
@@ -311,6 +311,7 @@ fn run16(
     bp_max: usize,
     pace: &mut Option<Pace>,
     strict: bool,
+    fosc: Option<f64>,
 ) -> Result<ExitCode, String> {
     let mut m = picsim::machine16::Machine16::new(dev)?;
     m.strict = strict;
@@ -320,6 +321,7 @@ fn run16(
     if let Some(f) = &stim {
         m.load_stimulus(&std::fs::read_to_string(f).map_err(|e| format!("{}: {e}", f.display()))?).map_err(|e| format!("{}: {e}", f.display()))?;
     }
+    if let Some(f) = fosc { m.cpu.board.fosc_mhz = f; }
     let asm = asm.unwrap_or_else(|| hex.with_extension("S"));
     if let Ok(t) = std::fs::read_to_string(&asm) {
         m.load_symbols_from_asm(&t);
@@ -362,7 +364,7 @@ fn run16(
     if let Some(p) = pace.as_mut() {
         p.restart(m.cpu.cycles);
     }
-    let mut stop = paced_run(pace, max, &mut m, |m| m.cpu.cycles, |m, n| m.run(stop_at, n));
+    let mut stop = paced_run(pace, max, &mut m, |m| (m.cpu.cycles, m.cpu.board.effective_fosc_mhz()), |m, n| m.run(stop_at, n));
     let mut n = 0;
     while let Stop::Breakpoint(pc) = stop {
         n += 1;
@@ -372,7 +374,7 @@ fn run16(
             break;
         }
         let left = max.saturating_sub(m.cpu.cycles);
-        stop = paced_run(pace, left, &mut m, |m| m.cpu.cycles, |m, n| m.run(stop_at, n));
+        stop = paced_run(pace, left, &mut m, |m| (m.cpu.cycles, m.cpu.board.effective_fosc_mhz()), |m, n| m.run(stop_at, n));
     }
     println!("stop: {stop:?}  cycles: {}  instructions: {}", m.cpu.cycles, m.cpu.icount);
     for d in dump {
@@ -457,20 +459,22 @@ fn default_until(until: Option<String>, given: bool, has_halt: bool) -> Option<S
 
 /// `run(budget)` limited to the `--speed` fraction of real time: the budget is spent in slices as the clock allows. Stops as `run` does
 /// (halt, breakpoint, ...) or with `Stop::Cycles` when `budget` cycles have run.
-fn paced_run<M>(pace: &mut Option<Pace>, budget: u64, m: &mut M, cycles: impl Fn(&M) -> u64, mut run: impl FnMut(&mut M, u64) -> Stop) -> Stop {
+fn paced_run<M>(pace: &mut Option<Pace>, budget: u64, m: &mut M, cycles: impl Fn(&M) -> (u64, f64), mut run: impl FnMut(&mut M, u64) -> Stop) -> Stop {
     let Some(p) = pace.as_mut() else {
         return run(m, budget);
     };
-    let start = cycles(m);
+    let start = cycles(m).0;
     if p.is_max() {
         return run(m, budget);
     }
     loop {
-        let left = budget.saturating_sub(cycles(m) - start);
+        let left = budget.saturating_sub(cycles(m).0 - start);
         if left == 0 {
             return Stop::Cycles;
         }
-        let due = p.due(cycles(m)).min(left).min(20_000);
+        let (now, fosc) = cycles(m);
+        if p.fosc_mhz != fosc { p.fosc_mhz = fosc; p.restart(now); }
+        let due = p.due(now).min(left).min(20_000);
         if due == 0 {
             std::thread::sleep(std::time::Duration::from_millis(1));
             continue;

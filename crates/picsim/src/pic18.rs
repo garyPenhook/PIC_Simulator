@@ -107,6 +107,7 @@ pub struct Pic18 {
     pcon1: Option<usize>,
     /// PIC18(L)F2x/4xK22 oscillator status (`osc_status`): OSCCON, OSCCON2, OSCTUNE, and the FOSC and PLLCFG configuration fields.
     osc: Option<(usize, usize, usize)>,
+    oscillator: crate::oscillator::Oscillator,
     fosc_cfg: u8,
     pllcfg: bool,
     /// TO and PD of STATUS (`[A129]`): read only, 1 after a power-on reset, set by CLRWDT. 0 on a part whose STATUS has neither.
@@ -238,6 +239,7 @@ impl Pic18 {
             rcon_ipen,
             core_irq,
             osc,
+            oscillator: crate::oscillator::Oscillator::new(dev),
             fosc_cfg: 0,
             pllcfg: false,
             vic: dev.find_sfr("SHADCON").is_some(),
@@ -302,6 +304,11 @@ impl Pic18 {
             p.osc_status();
             p.p.route_k22_ccp(p.cfg.get("CCP2MX").is_none_or(|v| v != 0), p.cfg.get("CCP3MX").is_none_or(|v| v != 0));
         }
+        for a in p.oscillator.addresses() { p.m.special[a] = Special::Core; }
+        for (name, v) in crate::config::reset_sfrs(&p.cfg, p.vic) {
+            if let Some(&a) = p.cfg_sfrs.get(name) { p.m.mem[a] = v & p.m.implemented[a]; }
+        }
+        p.update_clock();
         Ok(p)
     }
 
@@ -359,6 +366,7 @@ impl Pic18 {
         self.fosc_cfg = self.cfg.get("FOSC").unwrap_or(0) as u8;
         self.pllcfg = self.cfg.get("PLLCFG").is_some_and(|v| v != 0);
         self.osc_status();
+        self.update_clock();
         // PIC18(L)F2x/4xK22: CONFIG3H CCP2MX and CCP3MX move CCP2 and CCP3 (both 1 when unprogrammed, DS40001412H Table 24-1 p.344).
         self.p.route_k22_ccp(self.cfg.get("CCP2MX").is_none_or(|v| v != 0), self.cfg.get("CCP3MX").is_none_or(|v| v != 0));
         // The value the part's description calls ON: 0 on the Q10 and Q41 (DS40002043F 38.2 p.681), 1 on the PIC18(L)F2x/4xK22
@@ -374,6 +382,18 @@ impl Pic18 {
         if !modelled && self.cfg.get("WDTE").is_some_and(|w| w != 0) {
             self.notes.insert("watchdog enabled by WDTE: a timeout reset is not modelled (CLRWDT does nothing)".into());
         }
+    }
+
+    fn update_clock(&mut self) {
+        self.oscillator.status(&mut self.m.mem);
+        let f = self.oscillator.mhz(&self.m.mem, &self.cfg);
+        self.notes.retain(|n| !n.starts_with("Fosc:"));
+        self.p.board.firmware_fosc_mhz = f.unwrap_or(self.dev.fosc_max_mhz());
+        if f.is_none() && self.p.board.fosc_mhz == 0.0 {
+            self.notes.insert("Fosc: external or reserved oscillator selection; without an explicit override timing uses the family maximum".into());
+        }
+        self.p.board.clock_changed(self.cycles);
+        self.p.wdt_fosc(self.cycles);
     }
 
     // ----- data memory ---------------------------------------------------------------------------------------
@@ -513,7 +533,7 @@ impl Pic18 {
         if i >= self.m.mem.len() {
             return;
         }
-        let model_reg = match self.m.special[i] {
+        let model_reg = self.oscillator.contains(i) || match self.m.special[i] {
             Special::None => self.m.is_sfr[i],
             Special::Hook(_) | Special::Crc(_) | Special::Sync => true,
             Special::Core | Special::Pcl | Special::Tos(_) | Special::Indirect(..) => false,
@@ -523,13 +543,16 @@ impl Pic18 {
             self.p.catch_up(&mut self.m);
             self.p.invalidate();
         }
+        if self.oscillator.contains(i) {
+            self.oscillator.write(&mut self.m.mem, i, v & self.m.implemented[i], &self.cfg);
+            self.osc_status();
+            self.update_clock();
+            return;
+        }
         match self.m.special[i] {
             Special::None | Special::Core => {
                 let keep = if i == self.m.regs.status as usize { self.status_ro } else { 0 };
                 self.m.mem[i] = (v & !keep | self.m.mem[i] & keep) & self.m.implemented[i];
-                if self.osc.is_some_and(|(a, b, c)| i == a || i == b || i == c) {
-                    self.osc_status();
-                }
             }
             Special::Sync => {
                 if self.p.watching(&self.m) {
@@ -659,6 +682,8 @@ impl Pic18 {
 
     /// Execute one instruction; returns the cycles it took (also added to `self.cycles`).
     pub fn step(&mut self) -> u32 {
+        self.p.board.clock_changed(self.cycles);
+        self.p.wdt_fosc(self.cycles);
         let n = self.step_inner();
         if crate::periph::check_lazy() {
             // Check mode: every step predicts and checks its skip (`Periph::tick`), then syncs anyway, so a test that

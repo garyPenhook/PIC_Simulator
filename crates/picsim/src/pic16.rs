@@ -138,7 +138,7 @@ pub enum Reset {
     WdtWindow,
 }
 
-/// The clock a PIC16 runs at when no stimulus or window gives one: the family maximum, OS20 = 32 MHz (`Device::fosc_max_mhz`).
+/// Fallback when the firmware selects an external or unknown clock: OS20 = 32 MHz (`Device::fosc_max_mhz`).
 pub const FOSC_DEFAULT_MHZ: f64 = 32.0;
 
 #[derive(Clone)]
@@ -177,6 +177,7 @@ pub struct Pic16 {
     pub entry_watch: Vec<u32>,
     pub cfg: Config,
     cfg_regs: Vec<devdesc::ConfigRegister>,
+    oscillator: crate::oscillator::Oscillator,
     /// Messages about things the model does not do, deduplicated.
     pub notes: BTreeSet<String>,
     words: u32,
@@ -405,6 +406,7 @@ impl Pic16 {
             entry_watch: Vec::new(),
             cfg: Config::decode_words(&dev.config, &BTreeMap::new()),
             cfg_regs: dev.config.clone(),
+            oscillator: crate::oscillator::Oscillator::new(dev),
             notes: BTreeSet::new(),
             words: dev.memory.program.size,
             bsr5: false,
@@ -465,7 +467,7 @@ impl Pic16 {
             pps_reg: vec![false; MEM],
             pps_out: Vec::new(),
             mclr_pin: None,
-            board: Board { fosc_mhz: FOSC_DEFAULT_MHZ, ..Board::default() },
+            board: Board { firmware_fosc_mhz: FOSC_DEFAULT_MHZ, ..Board::default() },
             pullup: Vec::new(),
             forced: Vec::new(),
             ioc: Vec::new(),
@@ -869,6 +871,8 @@ impl Pic16 {
             })
             .filter(|&(a, set, clr)| set | clr != 0 && a != 3)
             .collect();
+        for a in p.oscillator.addresses() { p.core[a] = true; }
+        p.reset_clock();
         Ok(p)
     }
 
@@ -883,11 +887,28 @@ impl Pic16 {
         }
         self.cfg = Config::decode_words(&self.cfg_regs, &self.aux);
         self.wdt_reset_regs();
+        self.reset_clock();
         if let (Some(n), Some(b)) = (self.nvm.as_mut(), self.ee_base) {
             for (i, v) in n.eeprom.iter_mut().enumerate() {
                 *v = self.aux.get(&(b + 2 * i as u32)).copied().unwrap_or(0xFF);
             }
         }
+    }
+
+    fn reset_clock(&mut self) {
+        self.oscillator.reset(&mut self.mem, &self.cfg);
+        self.update_clock();
+    }
+
+    fn update_clock(&mut self) {
+        let f = self.oscillator.mhz(&self.mem, &self.cfg);
+        self.notes.retain(|n| !n.starts_with("Fosc:"));
+        self.board.firmware_fosc_mhz = f.unwrap_or(FOSC_DEFAULT_MHZ);
+        if f.is_none() && self.board.fosc_mhz == 0.0 {
+            self.notes.insert("Fosc: external or reserved oscillator selection; without an explicit override timing uses the family maximum".into());
+        }
+        self.board.clock_changed(self.cycles);
+        self.wdt_fosc();
     }
 
     // ----- registers -------------------------------------------------------------------------------------------
@@ -1062,6 +1083,11 @@ impl Pic16 {
                     self.catch_up();
                     self.due = 0;
                 }
+                if self.oscillator.contains(a) {
+                    self.oscillator.write(&mut self.mem, a, v & self.implemented[a], &self.cfg);
+                    self.update_clock();
+                    return;
+                }
                 if a == 2 {
                     self.mem[2] = v;
                     self.pc = (u32::from(self.mem[self.a_pclath] & 0x7F) << 8 | u32::from(v)) % self.words;
@@ -1111,7 +1137,7 @@ impl Pic16 {
                     self.sync_nvm();
                     let (now, v) = (self.cycles, v & self.implemented[a]);
                     let wrtd = self.cfg.get("WRTD") == Some(0);
-                    let f = if self.board.fosc_mhz > 0.0 { self.board.fosc_mhz } else { FOSC_DEFAULT_MHZ };
+                    let f = self.board.effective_fosc_mhz();
                     if let Some(n) = self.nvm.as_mut() {
                         n.fosc_mhz = f;
                         self.extra += n.write(k, v, now, &mut self.mem, &mut self.prog, wrtd, &mut self.notes);
@@ -1253,7 +1279,7 @@ impl Pic16 {
     /// that MSSP as a client.
     pub fn set_board(&mut self, b: Board) {
         let f = if b.fosc_mhz > 0.0 { b.fosc_mhz } else { self.board.fosc_mhz };
-        self.board = Board { fosc_mhz: f, ..b.fresh() };
+        self.board = Board { fosc_mhz: f, firmware_fosc_mhz: self.board.firmware_fosc_mhz, clock_segments: self.board.clock_segments.clone(), ..b.fresh() };
         self.board_wiring();
     }
 
@@ -2458,6 +2484,7 @@ impl Pic16 {
             _ => {}
         }
         self.wdt_reset_regs();
+        self.reset_clock();
         self.mem[self.a_stkptr] = EMPTY;
         if let Some(t) = self.t0.as_mut() {
             (t.cnt, t.pre, t.post, t.last) = (0, 0, 0, self.cycles);
@@ -2536,9 +2563,9 @@ impl Pic16 {
     }
 
     fn wdt_fosc(&mut self) {
-        let f = if self.board.fosc_mhz > 0.0 { self.board.fosc_mhz } else { FOSC_DEFAULT_MHZ };
+        let f = self.board.effective_fosc_mhz();
         if let Some(w) = self.wdt.as_mut() {
-            w.fosc_mhz = f;
+            w.set_fosc(f, self.cycles);
         }
     }
 
@@ -2846,6 +2873,8 @@ impl Pic16 {
     }
 
     pub fn step(&mut self) -> u32 {
+        self.board.clock_changed(self.cycles);
+        self.wdt_fosc();
         let n = self.step_core();
         if crate::periph::check_lazy() {
             // Check mode: every step predicts and checks its skip (`tick`), then syncs anyway, so a test that steps by

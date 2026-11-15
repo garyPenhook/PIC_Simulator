@@ -46,7 +46,7 @@ impl Drop for Firmware {
 #[test]
 fn strict_fails_on_unmodelled_reads_and_writes_in_both_families() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../devices");
-    for (part, name, pic16) in [("18F16Q41", "PWM3CON", false), ("16F18326", "OSCFRQ", true)] {
+    for (part, name, pic16) in [("18F16Q41", "PWM3CON", false), ("16F18326", "CLC1CON", true)] {
         let dev = devdesc::Device::load(&root.join(format!("{part}.toml"))).unwrap();
         let a = dev.find_sfr(name).unwrap().addr as u16;
         for write in [false, true] {

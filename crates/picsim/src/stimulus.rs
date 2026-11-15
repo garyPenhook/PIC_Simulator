@@ -60,7 +60,7 @@
 //! level = 0           # 0 or 1; from `at` on, later entries replace earlier ones; the pin is high until driven
 //! at = 20000
 //!
-//! fosc_mhz = 64       # optional: the PIC clock, for the OLED's scrolling time and the watchdog (default the family's highest: 32 on a PIC16, 64 on a PIC18)
+//! fosc_mhz = 64       # optional: the PIC clock, for the OLED's scrolling time and the watchdog (default follows firmware oscillator settings)
 //!
 //! [[led]]             # an LED on a pin: on while the pin is an output at the active level
 //! pin = "RB0"         # the PIC pin the LED is wired to
@@ -102,6 +102,8 @@ pub struct Stimulus {
     pub mclr: Vec<(u64, u8)>,
     /// LEDs and OLEDs on the board.
     pub board: crate::periph::Board,
+    /// An explicit clock key, including zero to restore firmware timing.
+    pub fosc_given: bool,
     /// The CLB netlist (`[clb]`, PIC16F131xx and PIC16F132xx).
     pub clb: Option<crate::periph::clb::Cfg>,
 }
@@ -193,7 +195,8 @@ impl Stimulus {
                 continue;
             }
             if k == "fosc_mhz" {
-                let f = v.as_float().or_else(|| v.as_integer().map(|i| i as f64)).filter(|f| *f > 0.0 && *f <= 64.0);
+                st.fosc_given = true;
+                let f = v.as_float().or_else(|| v.as_integer().map(|i| i as f64)).filter(|f| *f >= 0.0 && *f <= 64.0);
                 st.board.fosc_mhz = f.ok_or("fosc_mhz must be a number in 0..64")?;
                 continue;
             }
@@ -431,11 +434,13 @@ impl Stimulus {
         if self.board.fosc_mhz > dev.fosc_max_mhz() {
             return Err(format!("{}: fosc_mhz = {} is above the part's {} MHz", dev.device.name, self.board.fosc_mhz, dev.fosc_max_mhz()));
         }
+        let clock = self.fosc_given.then_some(self.board.fosc_mhz);
         if !self.board.is_empty() {
             cpu.set_board(self.board);
         } else if self.board.fosc_mhz > 0.0 {
             cpu.board.fosc_mhz = self.board.fosc_mhz; // a clock without parts still sets the timing
         }
+        if let Some(f) = clock { cpu.board.fosc_mhz = f; }
         if let Some(c) = self.clb {
             cpu.clb_set(c);
         }
@@ -471,6 +476,7 @@ impl Stimulus {
                 return Err(format!("{}: no MSSP{port} in the simulator", dev.device.name));
             }
         }
+        let clock = self.fosc_given.then_some(self.board.fosc_mhz);
         if !self.board.is_empty() {
             // the pin itself, not only its port letter: a bit the port does not implement would never light (as `apply16`)
             for pin in self.board.leds.iter().map(|l| l.pin).chain(self.board.oleds.iter().flat_map(|o| [o.scl, o.sda])) {
@@ -486,6 +492,7 @@ impl Stimulus {
         } else if self.board.fosc_mhz > 0.0 {
             p.board.fosc_mhz = self.board.fosc_mhz; // a clock without parts still sets the timing
         }
+        if let Some(f) = clock { p.board.fosc_mhz = f; }
         if let Some(&pin) = self.bounce_pins.iter().find(|&&pin| !p.has_pin(m, pin)) {
             return Err(format!("{}: [[bounce]] on {}: no such pin on this part", dev.device.name, crate::periph::pin_name(pin)));
         }

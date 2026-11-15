@@ -597,8 +597,12 @@ pub struct Board {
     pub oleds: Vec<Oled>,
     /// How much of `Periph::i2c_log` has been read.
     pub(crate) log_pos: u64,
-    /// The PIC clock in MHz (0 = 64 MHz): the OLED's scrolling runs on real time.
+    /// Explicit Fosc override in MHz. Zero follows the firmware oscillator settings.
     pub fosc_mhz: f64,
+    /// Nominal clock derived by the core; zero uses the standalone board's 64 MHz default.
+    pub firmware_fosc_mhz: f64,
+    /// Clock segments: (starting cycle, elapsed ns, MHz). Changes preserve elapsed time.
+    pub clock_segments: Vec<(u64, f64, f64)>,
 }
 
 /// What the parts on the board see of the PIC's pins; each core (`Periph` for the PIC18 parts, `Pic16`) implements it.
@@ -621,12 +625,34 @@ impl Board {
             oleds: self.oleds.iter().map(Oled::fresh).collect(),
             log_pos: 0,
             fosc_mhz: self.fosc_mhz,
+            firmware_fosc_mhz: self.firmware_fosc_mhz,
+            clock_segments: Vec::new(),
         }
     }
 
     /// Length of one instruction cycle in ns (Fosc / 4).
     pub fn cycle_ns(&self) -> f64 {
-        4000.0 / if self.fosc_mhz > 0.0 { self.fosc_mhz } else { 64.0 }
+        4000.0 / self.effective_fosc_mhz()
+    }
+
+    pub fn effective_fosc_mhz(&self) -> f64 {
+        if self.fosc_mhz > 0.0 { self.fosc_mhz }
+        else if self.firmware_fosc_mhz > 0.0 { self.firmware_fosc_mhz }
+        else { 64.0 }
+    }
+
+    pub fn time_ns(&self, cycle: u64) -> f64 {
+        let i = self.clock_segments.partition_point(|(c, _, _)| *c <= cycle);
+        if i == 0 { cycle as f64 * self.cycle_ns() }
+        else { let (c, ns, mhz) = self.clock_segments[i - 1]; ns + (cycle - c) as f64 * 4000.0 / mhz }
+    }
+
+    pub(crate) fn clock_changed(&mut self, cycle: u64) {
+        let mhz = self.effective_fosc_mhz();
+        if self.clock_segments.last().is_none_or(|(_, _, f)| *f != mhz) {
+            let ns = self.time_ns(cycle);
+            self.clock_segments.push((cycle, ns, mhz));
+        }
     }
 
     /// Updates the LEDs and the bit-banged OLEDs after an instruction ended at cycle `now`, and moves every OLED's clock on.
@@ -717,7 +743,13 @@ impl Board {
 impl Periph {
     /// Replace the parts on the board (their states start at power-on) and register the OLEDs on the hardware I2C buses.
     pub fn set_board(&mut self, b: Board) {
+        let fosc_mhz = if b.fosc_mhz > 0.0 { b.fosc_mhz } else { self.board.fosc_mhz };
+        let firmware_fosc_mhz = self.board.firmware_fosc_mhz;
+        let clock_segments = std::mem::take(&mut self.board.clock_segments);
         self.board = b.fresh();
+        self.board.fosc_mhz = fosc_mhz;
+        self.board.firmware_fosc_mhz = firmware_fosc_mhz;
+        self.board.clock_segments = clock_segments;
         self.board_wiring();
     }
 
