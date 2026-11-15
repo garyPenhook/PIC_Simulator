@@ -56,8 +56,10 @@ impl Uart {
         let reg = addr(dev, &format!("TX{n}REG"))?;
         let sta = addr(dev, &format!("TX{n}STA"))?;
         let baud = addr(dev, &format!("BAUD{n}CON"))?;
-        let brgl = addr(dev, &format!("SP{n}BRGL"))?;
-        let brgh = addr(dev, &format!("SP{n}BRGH"))?;
+        // SPnBRGL/H, or SPBRGn/SPBRGHn on the PIC18(L)F2x/4xK22, whose EUSART has the same TXSTAx, RCSTAx and BAUDCONx bits
+        // (DS40001412H Registers 16-1 to 16-3 p.269-271; the pack's aliases give the TXnREG, TXnSTA, BAUDnCON, RCnREG, RCnSTA names).
+        let brgl = addr(dev, &format!("SP{n}BRGL")).or_else(|| addr(dev, &format!("SPBRG{n}")))?;
+        let brgh = addr(dev, &format!("SP{n}BRGH")).or_else(|| addr(dev, &format!("SPBRGH{n}")))?;
         let flag = Flag::find(dev, &format!("TX{n}IF"))?;
         let rcreg = addr(dev, &format!("RC{n}REG"))?;
         let rcsta = addr(dev, &format!("RC{n}STA"))?;

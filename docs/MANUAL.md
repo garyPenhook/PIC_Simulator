@@ -1,6 +1,6 @@
 # pic-sim Manual
 
-Revision for **pic-sim 0.2.9** and **basil-sim 0.2.9** (one workspace version). Simulated families: **PIC18** (PIC18F27Q10 and the PIC18F04/05/06/14/15/16Q41) and **PIC16 enhanced mid-range** (PIC16F131xx, 132xx, 152xx, 171xx, 180x6 and 183xx).
+Revision for **pic-sim 0.2.10** and **basil-sim 0.2.10** (one workspace version). Simulated families: **PIC18** (PIC18F27Q10, the PIC18F04/05/06/14/15/16Q41 and the PIC18(L)F23/24/25/26/43/44/45/46K22) and **PIC16 enhanced mid-range** (PIC16F131xx, 132xx, 152xx, 171xx, 180x6 and 183xx).
 
 This manual describes what the simulator does today. It is organised in the order you meet the tools: what the simulator is, how to build and start it, how to prepare a program for it, the graphical front end `pic-sim`, the command-line front end `basil-sim`, the stimulus file that describes the outside world, the simulated board (LEDs and OLED), and finally what is and is not modelled. Anything not listed here is not supported.
 
@@ -170,6 +170,7 @@ The parts the simulator can load are the files in `devices/`:
 |---|---|---|---|
 | PIC18-Q10 | 18F27Q10 | PIC18 | The 28-pin part; the 40-pin variant is not separately described |
 | PIC18-Q41 | 18F04Q41, 18F05Q41, 18F06Q41, 18F14Q41, 18F15Q41, 18F16Q41 | PIC18 | Interrupts with `MVECEN` on (vector table, as XC8 `__interrupt(irq(...))` builds it) or off (see section 9) |
+| PIC18-K22 | 18F23K22, 24K22, 25K22, 26K22 (28 pins), 43K22, 44K22, 45K22, 46K22 (40/44 pins) and the **LF** variants 18LF23K22 … 18LF46K22 | PIC18 | No PPS: the peripheral pins are fixed (CCP2 and CCP3 move with Config CCP2MX/CCP3MX); IPEN in RCON; the older Timer0/1/2, ADC and EECON1 memory controller (DS40001412H; `docs/FACTS-SIM.md`, "PIC18(L)F2x/4xK22") |
 | PIC16F131xx | 16F13113, 13114, 13115, 13123, 13124, 13125, 13143, 13144, 13145 | PIC16 enhanced | |
 | PIC16F132xx | 16F13214, 13215, 13224, 13225, 13244, 13245 | PIC16 enhanced | 8-, 14- and 20-pin parts (DS40002686B); 256 bytes of data EEPROM; the 10-bit ADC converts in 12 TAD + 2 TCY (the PIC16F131xx takes 14 TAD) |
 | PIC16F152xx | 16F15213, 15214, 15223, 15224, 15243, 15244 | PIC16 enhanced | |
@@ -177,7 +178,7 @@ The parts the simulator can load are the files in `devices/`:
 | PIC16F180x6 | 16F18056, 16F18076 | PIC16 enhanced | |
 | PIC16F183xx | 16F18313, 18323, 18324, 18325, 18326, 18344, 18345, 18346 and the **LF** variants 16LF18313 … 16LF18346 | PIC16 enhanced (5-bit BSR) | |
 
-The window's device box lists only the parts whose file name starts `18F` or `16F`, so the `16LF…` parts can be used with `basil-sim --device 16LF18346` but are not offered by `pic-sim`'s box.
+The window's device box lists only the parts whose file name starts `18F` or `16F`, so the `16LF…` and `18LF…` parts can be used with `basil-sim --device 16LF18346` but are not offered by `pic-sim`'s box.
 
 Device files are generated from Microchip's device packs by `tools/devgen` and cross-checked against the data sheets; they are never edited by hand (`docs/DEVICE-FORMAT.md`). Each carries the memory map, the special function registers with reset values and read/write masks, the configuration words, the interrupt vectors and the pin list.
 
@@ -657,16 +658,16 @@ See section 8.
 
 ## What each family accepts
 
-| Section | PIC18 Q10 | PIC18 Q41 | PIC16 |
-|---|---|---|---|
-| `[[pin]]`, `[[port]]` | yes | yes | yes |
-| `[[uart]]` | yes | yes | yes |
-| `[[adc]]` | yes | yes | yes |
-| `[[led]]`, `[[oled]]` | yes | yes | yes |
-| `[[i2c]]`, `[[spi]]` | yes | yes | **no** |
-| `[[analog]]` (comparators) | yes | — | **no** |
-| `[[mclr]]` | yes | yes | **no** |
-| `[clb]` | **no** | **no** | PIC16F131xx and PIC16F132xx only (an error on any other part) |
+| Section | PIC18 Q10 | PIC18 Q41 | PIC18 K22 | PIC16 |
+|---|---|---|---|---|
+| `[[pin]]`, `[[port]]` | yes | yes | yes | yes |
+| `[[uart]]` | yes | yes | yes | yes |
+| `[[adc]]` | yes | yes | yes (`channel` is the AN number, the CHS value) | yes |
+| `[[led]]`, `[[oled]]` | yes | yes | yes | yes |
+| `[[i2c]]`, `[[spi]]` | yes | yes | yes | **no** |
+| `[[analog]]` (comparators) | yes | — | — | **no** |
+| `[[mclr]]` | yes | yes | yes | **no** |
+| `[clb]` | **no** | **no** | **no** | PIC16F131xx and PIC16F132xx only (an error on any other part) |
 
 On a PIC16 part a section marked *no* is an **error** (`[[spi]] is not modelled on PIC16 parts yet…`) rather than being ignored. A PIC16 stimulus is also an error if it names a pin or port the part lacks, an EUSART it does not have, or an OLED on an I2C module the simulator does not model for that part (use `bus = "gpio"` instead).
 
@@ -707,7 +708,7 @@ external_vcc = false  # true: the module has its own VCC and lights without the 
 
 The display is 128 columns by 64 or 32 rows. **The pins you give must be the pins the program uses.**
 
-**Hardware bus (`i2c1`, `i2c2`).** The OLED acknowledges only when the program has set up the module's pin selection as it would have to on a real part: the input selectors (`SSPxCLKPPS`, `SSPxDATPPS` on the Q10 and PIC16; `I2CxSCLPPS`, `I2CxSDAPPS` on the Q41) must select the OLED's SCL and SDA pins, and the output selector `RxyPPS` of **both** pins must hold the bus output code (Q10 MSSP1: SCL `0x0F`, SDA `0x10`; MSSP2: `0x11`, `0x12`; Q41 I2C1: SCL `0x21`, SDA `0x22`). Otherwise the address gets a NACK, the display does not draw, and the Board tab or `basil-sim` says which register is wrong (`NOT WIRED: …`). A PIC16 part must have the MSSP in I2C host mode for this.
+**Hardware bus (`i2c1`, `i2c2`).** The OLED acknowledges only when the program has set up the module's pin selection as it would have to on a real part: the input selectors (`SSPxCLKPPS`, `SSPxDATPPS` on the Q10 and PIC16; `I2CxSCLPPS`, `I2CxSDAPPS` on the Q41) must select the OLED's SCL and SDA pins, and the output selector `RxyPPS` of **both** pins must hold the bus output code (Q10 MSSP1: SCL `0x0F`, SDA `0x10`; MSSP2: `0x11`, `0x12`; Q41 I2C1: SCL `0x21`, SDA `0x22`). The PIC18(L)F2x/4xK22 has no PPS: the OLED must be on the module's own pins (MSSP1: SCL RC3, SDA RC4; MSSP2: RB1, RB2 on the 28-pin parts, RD0, RD1 on the 40/44-pin parts). Otherwise the address gets a NACK, the display does not draw, and the Board tab or `basil-sim` says which register is wrong (`NOT WIRED: …`). A PIC16 part must have the MSSP in I2C host mode for this.
 
 **Bit-banged (`gpio`).** The two pins are watched after every instruction. A start or stop is a change of SDA while SCL is high, a bit is SDA at the rising edge of SCL, and the display pulls SDA low for the acknowledge. A line is low when the PIC drives it low or the display holds it; external pull-ups are assumed, so a released line reads high.
 
@@ -735,36 +736,37 @@ The display is 128 columns by 64 or 32 rows. **The pins you give must be the pin
 |---|---|---|
 | Instruction set | Base set plus the Q41 additions (`MOVFFL` …) | The 50-instruction set including `MOVIW`, `MOVWI`, `BRW`, `CALLW`, `ADDFSR` |
 | Program counter | Bytes, 21 bits | Words, 15 bits |
-| Stack | Hardware, 31 levels (Q10), overflow/underflow reset with `STVREN` | 16 levels; the 17th push overflows; `STKPTR` as the data sheet |
-| Interrupts | Q10: legacy, optional two priorities, vectors 0008h and 0018h. Q41: vector table (`MVECEN` = 1) or the two legacy vectors at `IVTBASE` (`MVECEN` = 0), hardware context save | Single vector 0004h, automatic save of W, STATUS, BSR, FSRs and PCLATH to the shadow registers |
+| Stack | Hardware, 31 levels (Q10, K22), overflow/underflow reset with `STVREN` | 16 levels; the 17th push overflows; `STKPTR` as the data sheet |
+| Interrupts | Q10 and K22: legacy, optional two priorities, vectors 0008h and 0018h (K22: IPEN in RCON, TMR0/INT0/RB/INT1/INT2 in INTCON and INTCON3). Q41: vector table (`MVECEN` = 1) or the two legacy vectors at `IVTBASE` (`MVECEN` = 0), hardware context save | Single vector 0004h, automatic save of W, STATUS, BSR, FSRs and PCLATH to the shadow registers |
 | Data memory | Banked with Access Bank, FSR0–2 | Banked (6-bit or 5-bit BSR), linear memory through the FSRs, flash read through an FSR |
 
 ## Peripherals
 
 Models exist for the following; a register of anything else is plain storage that honours the data sheet's implemented-bit and read-only masks and is reported as "unmodelled SFRs touched" when the program uses it.
 
-| Peripheral | PIC18-Q10 | PIC18-Q41 | PIC16 |
-|---|---|---|---|
-| Ports, `PORTx/LATx/TRISx/ANSELx`, PPS and `PPSLOCK` | yes | yes | yes |
-| Interrupts, `SLEEP` and wake-up | yes | yes | yes |
-| Timer0, Timer1, Timer2 (Timer3–6 where present) | yes | yes | yes. Timer0 and Timer1/3/5 can count the edges of their clock pin (`T0CKIPPS`, `TxCKIPPS`) and Timer1/3/5 can be gated by `TxGPPS`; the pin is driven by the stimulus file |
-| EUSART / UART | EUSART1/2, asynchronous | UART1–3 | EUSART, asynchronous |
-| ADC | yes | yes (12-bit) | yes (several variants) |
-| Data EEPROM | yes | yes | yes |
-| Program flash self-write | yes | yes | yes |
-| MSSP (SPI and I2C host) | yes | — | I2C host mode, to drive the OLED |
-| SPI host | via MSSP | yes | — |
-| I2C host | via MSSP | yes | — |
-| CCP1/2 and PWM3/4 | yes | — | CCP1 to CCP4 (capture, compare, standard PWM) on PIC16F131xx, 132xx, 152xx, 171xx and 183xx; the separate PWM modules (PWM3 to PWM6, the PWM1/2 of the 171xx) are not modelled |
-| CWG1 | yes | — | — |
-| Comparators C1/C2 | yes | — | — |
-| CLC1–CLC8 | yes | — | — |
-| CLB (PIC16F131xx, 132xx) | — | — | yes: 32 BLEs, input edge detectors, 3-bit counter, software inputs and outputs, PPS outputs and interrupts, driven by a `[clb]` netlist in the stimulus file (section 10); the Synthesizer's bitstream is not read; no clock, gate or trigger connections to other peripherals |
-| Watchdog (windowed on the Q10) and the resets it causes | yes | — | yes: windowed WWDT (PIC16F131xx, PIC16F132xx, PIC16F171xx) or single-register WDT (PIC16F152xx, PIC16F183xx, PIC16F180x6) |
-| CRC and memory scanner | yes | — | — |
-| External interrupts INT0–2, interrupt-on-change | yes | — | the INT pin and interrupt-on-change |
-| MCLR pin reset | yes | yes | the MCLR pin is part of the port model |
-| LEDs and SSD1306 OLED | yes | yes | yes |
+| Peripheral | PIC18-Q10 | PIC18-Q41 | PIC18-K22 | PIC16 |
+| --- | --- | --- | --- | --- |
+| Ports, `PORTx/LATx/TRISx/ANSELx`, PPS and `PPSLOCK` | yes | yes | ports (no PPS) | yes |
+| Interrupts, `SLEEP` and wake-up | yes | yes | yes | yes |
+| Timer0, Timer1, Timer2 (Timer3–6 where present) | yes | yes | yes: the older Timer0 (FOSC/4), Timer1/3/5 (FOSC/4, FOSC, SOSC; Timer1 also its T1CKI pin RC0 and gate pin T1G RB5), Timer2/4/6 | yes. Timer0 and Timer1/3/5 can count the edges of their clock pin (`T0CKIPPS`, `TxCKIPPS`) and Timer1/3/5 can be gated by `TxGPPS`; the pin is driven by the stimulus file |
+| EUSART / UART | EUSART1/2, asynchronous | UART1–3 | EUSART1/2, asynchronous | EUSART, asynchronous |
+| ADC | yes | yes (12-bit) | yes (10-bit, ACQT acquisition) | yes (several variants) |
+| Data EEPROM | yes | yes | yes (EECON1) | yes |
+| Program flash self-write | yes | yes | yes (64-byte blocks, TBLWT holding registers) | yes |
+| MSSP (SPI and I2C host) | yes | — | MSSP1/2 | I2C host mode, to drive the OLED |
+| SPI host | via MSSP | yes | via MSSP | — |
+| I2C host | via MSSP | yes | via MSSP | — |
+| CCP1/2 and PWM3/4 | yes | — | CCP1 to CCP5, PWM mode only (single output) | CCP1 to CCP4 (capture, compare, standard PWM) on PIC16F131xx, 132xx, 152xx, 171xx and 183xx; the separate PWM modules (PWM3 to PWM6, the PWM1/2 of the 171xx) are not modelled |
+| CWG1 | yes | — | — | — |
+| Comparators C1/C2 | yes | — | — | — |
+| CLC1–CLC8 | yes | — | — | — |
+| CLB (PIC16F131xx, 132xx) | — | — | — | yes: 32 BLEs, input edge detectors, 3-bit counter, software inputs and outputs, PPS outputs and interrupts, driven by a `[clb]` netlist in the stimulus file (section 10); the Synthesizer's bitstream is not read; no clock, gate or trigger connections to other peripherals |
+| Watchdog (windowed on the Q10) and the resets it causes | yes | — | — | yes: windowed WWDT (PIC16F131xx, PIC16F132xx, PIC16F171xx) or single-register WDT (PIC16F152xx, PIC16F183xx, PIC16F180x6) |
+| CRC and memory scanner | yes | — | — | — |
+| External interrupts INT0–2, interrupt-on-change | yes | — | the INT0..2 flags set by software; pin edges are not modelled | the INT pin and interrupt-on-change |
+| MCLR pin reset | yes | yes | yes | the MCLR pin is part of the port model |
+| LEDs and SSD1306 OLED | yes | yes | yes | yes |
+| Oscillator status (OSTS, HFIOFS, PLLRDY) | — | — | yes | — |
 
 Where this table says "—", `docs/FACTS-SIM.md` documents no model for that peripheral on that family: its registers are plain storage and the program is reported as touching unmodelled SFRs. (The watchdog, CRC, comparator, CLC, CWG, CCP and external-interrupt models are written and cited against the Q10 data sheet.) `docs/FACTS-SIM.md` is the authoritative list, section by section, with the data sheet page for each rule; peripherals are added over time.
 

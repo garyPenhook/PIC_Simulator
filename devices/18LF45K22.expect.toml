@@ -1,0 +1,31 @@
+# Numbers read BY HAND from the PIC18(L)F2X/4XK22 data sheet, used by `devgen check` to cross-check the
+# description generated from the Microchip pack. Do not generate this file.
+# PIC18LF45K22: 40/44-pin part of the family.
+
+[source]
+datasheet = "DS40001412H"
+reference = "Table 1 (p.2), 5.1 and Fig. 5-1 (p.64-65), Figs. 5-5 to 5-8 (p.72-75), Table 24-1 (p.344), 24.6 (p.359)"
+
+[memory]
+program_bytes   = 32768    # program flash                                (Table 1, p.2; Fig. 5-1, p.65)
+sram_bytes      = 1536     # data SRAM                                    (Table 1, p.2)
+eeprom_bytes    = 256      # data EEPROM                                  (Table 1, p.2; 7.1, p.99)
+hw_stack_levels = 31       # 31-level return address stack                (5.1.2, p.65)
+config_bytes    = 14       # CONFIG1L .. CONFIG7H, 30 0000h-30 000Dh      (Table 24-1, p.344)
+user_id_bytes   = 8        # eight ID locations, 20 0000h-20 0007h       (24.6, p.359)
+
+[vectors]
+reset          = 0        # 0000h  (5.1, p.64; Fig. 5-1, p.65)
+interrupt_high = 8        # 0008h  (5.1, p.64)
+interrupt_low  = 24       # 0018h  (5.1, p.64)
+
+# Peripheral counts from Table 1 (p.2), checked by counting SFRs whose name matches the pattern
+# ('#' = one digit). Adjust a pattern only after confirming the register naming in the pack.
+[counts]
+"TXSTA#"    = 2   # EUSART                                   (Table 1: EUSART 2)
+"SSP#CON1"  = 2   # MSSP (SPI / I2C)                         (Table 1: MSSP SPI 2, I2C 2)
+"CCP#CON"   = 5   # CCP + ECCP                               (Table 1: CCP 2, ECCP full-bridge 2, half-bridge 1)
+"PSTR#CON"  = 3   # ECCP steering, one per ECCP               (Table 1: ECCP 2 + 1)
+"CM#CON0"   = 2   # comparators                              (Table 1: Comparator 2)
+"PR#"       = 3   # 8-bit timers Timer2/4/6                  (Table 1: 8-bit Timer 3)
+"T#GCON"    = 3   # 16-bit timers with gate Timer1/3/5        (Table 1: 16-bit Timer 4, with Timer0)

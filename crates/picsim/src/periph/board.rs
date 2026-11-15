@@ -785,6 +785,13 @@ impl Periph {
     }
 
     fn hw_wiring(&self, m: &DataMem, o: &Oled, num: u8) -> Result<(), String> {
+        // A host with fixed pins (no PPS): the OLED must be on them.
+        if let Some(&(_, scl, sda)) = self.i2c_fixed.iter().find(|f| f.0 == num) {
+            if (o.scl, o.sda) != (scl, sda) {
+                return Err(format!("MSSP{num}'s bus is SCL {} and SDA {}, the OLED is on {} and {}", pin_name(scl), pin_name(sda), pin_name(o.scl), pin_name(o.sda)));
+            }
+            return Ok(());
+        }
         let Some(pp) = self.i2c_pps.iter().find(|p| p.num == num) else {
             return Err(format!("the part has no I2C host {num}"));
         };

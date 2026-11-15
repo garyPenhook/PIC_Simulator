@@ -101,7 +101,8 @@ pub(crate) struct Flag {
 
 impl Flag {
     fn find(dev: &Device, bit: &str) -> Option<Flag> {
-        for s in dev.sfr.iter().filter(|s| s.name.starts_with("PIR")) {
+        // PIRx first; then INTCON, which holds TMR0IF on the PIC18(L)F2x/4xK22 (DS40001412H Register 9-1 p.109).
+        for s in dev.sfr.iter().filter(|s| s.name.starts_with("PIR")).chain(dev.sfr.iter().filter(|s| s.name == "INTCON")) {
             if let Some(f) = s.fields.iter().chain(s.legacy.iter()).find(|f| f.name == bit) {
                 return Some(Flag { addr: s.addr as usize, mask: 1 << f.pos });
             }
@@ -120,6 +121,16 @@ impl Flag {
     fn clear_in(self, mem: &mut [u8]) {
         mem[self.addr] &= !self.mask;
     }
+}
+
+/// A pin that has no PPS input register stands in its place as `FIXED_PIN + PORT * 8 + PIN` (the PPS code of the pin), beyond
+/// every data address: `pps_pin` decodes it, and it is never a register to hook or watch. Used for the fixed T1CKI (RC0) and
+/// T1G (RB5) of the PIC18(L)F2x/4xK22 (DS40001412H Tables 2 and 3 p.6-7).
+pub(crate) const FIXED_PIN: usize = 1 << 20;
+
+/// The output source code of an RxyPPS register, or of a fixed routing `FIXED_PIN + code`.
+fn out_code(m: &DataMem, reg: usize) -> u8 {
+    if reg >= FIXED_PIN { (reg - FIXED_PIN) as u8 } else { m.mem[reg] & 31 }
 }
 
 fn addr(dev: &Device, name: &str) -> Option<usize> {
@@ -289,6 +300,14 @@ const I2CQ0: u8 = 202;
 const I2CQ_END: u8 = I2CQ0 + 2 * i2cq::HOOKS;
 /// Q10 CCP n (0-based) uses hook code CCP0 + n (CCPxCON only, see `ccp.rs`); at most 2.
 const CCP0: u8 = 224;
+/// The third to fifth CCP (CCP3..CCP5 of the PIC18(L)F2x/4xK22) use CCPK0 + n - 2 (free codes after the Timer2-type hooks).
+const CCPK0: u8 = 74;
+const CCPK_END: u8 = CCPK0 + 2;
+
+/// The hook code of the CCP with index `i` (0-based).
+fn ccp_hook(i: usize) -> u8 {
+    if i < 2 { CCP0 + i as u8 } else { CCPK0 + i as u8 - 2 }
+}
 /// Q10 PWM3/PWM4 (PWMxCON only) use hook codes PWM0 + n.
 const PWM0: u8 = 236;
 /// Q10 CWG1 registers use hook codes CWG0 + cwg sub-code (see `cwg.rs`).
@@ -344,6 +363,36 @@ struct Timer0 {
     cki: Option<usize>,
     /// Set at SLEEP when the clock keeps this timer running in Sleep `[A102]`.
     sleep_run: bool,
+    /// The older Timer0 of the PIC18(L)F2x/4xK22: one T0CON (here both `c0` and `c1`) = TMR0ON (7) | T08BIT (6) | T0CS (5) | T0SE (4) |
+    /// PSA (3) | T0PS<2:0>; 8-bit mode counts to FFh (no period register), no postscaler, no T0OUT, prescaler 1:2..1:256 or none
+    /// (DS40001412H Register 11-1 p.154, 11.2-11.5 p.155-156).
+    classic: bool,
+}
+
+impl Timer0 {
+    /// 16-bit mode: MD16 (T0CON0 bit 4), or T08BIT = 0 on the classic timer.
+    fn wide(&self, m: &DataMem) -> bool {
+        if self.classic { m.mem[self.c0] & 0x40 == 0 } else { m.mem[self.c0] & 0x10 != 0 }
+    }
+    /// Prescaler shift: T0CKPS (T0CON1 bits 3:0, 1:2^n), or on the classic timer 0 with PSA = 1 and T0PS + 1 otherwise.
+    fn shift(&self, m: &DataMem) -> u32 {
+        let c = m.mem[self.c1];
+        if !self.classic {
+            u32::from(c & 15)
+        } else if c & 8 != 0 {
+            0
+        } else {
+            u32::from(c & 7) + 1
+        }
+    }
+    /// Postscaler count (T0OUTPS); the classic timer has none.
+    fn outps(&self, m: &DataMem) -> u8 {
+        if self.classic { 0 } else { m.mem[self.c0] & 15 }
+    }
+    /// The 8-bit count that ends a period: TMR0H, or FFh on the classic timer.
+    fn top8(&self, m: &DataMem) -> u8 {
+        if self.classic { 0xFF } else { m.mem[self.h] }
+    }
 }
 
 /// What the Timer1 gate does over one window of cycles: the stretches in which the timer counts, the falling edges of the
@@ -397,6 +446,11 @@ struct Timer1 {
     cki: Option<usize>,
     /// Set at SLEEP when the clock keeps this timer running in Sleep `[A102]`.
     sleep_run: bool,
+    /// The older Timer1/3/5 of the PIC18(L)F2x/4xK22: no TxCLK and no TxGATE; the clock is TMRxCS<1:0> of TxCON (bits 7:6, 00
+    /// FOSC/4, 01 FOSC, 10 the TxCKI pin or with TxSOSCEN the secondary oscillator, 11 reserved), the gate source TxGSS<1:0> of
+    /// TxGCON (00 the TxG pin, 01 the Timer2/4/6 match, 10 and 11 the comparators) (DS40001412H Registers 12-1, 12-2 p.166-167).
+    /// `clk` and `gate` then hold TxCON and TxGCON.
+    classic: bool,
 }
 
 #[derive(Clone)]
@@ -413,6 +467,32 @@ struct Timer2 {
     pre: u64,
     post: u8,
     last: u64,
+    /// The older Timer2/4/6 of the PIC18(L)F2x/4xK22: TMRx/PRx, TxCON = TxOUTPS<3:0> (6:3) | TMRxON (2) | TxCKPS<1:0> (prescaler 1, 4,
+    /// 16), FOSC/4 only, no TxHLT or TxCLKCON (`hlt` and `clk` hold TxCON) (DS40001412H Register 13-1 p.171, 13.1 p.170).
+    classic: bool,
+}
+
+impl Timer2 {
+    fn on(&self, m: &DataMem) -> bool {
+        m.mem[self.con] & if self.classic { 0x04 } else { 0x80 } != 0
+    }
+    /// Prescaler shift: TxCKPS (6:4, 1:2^n), or on the classic timer 0, 2, 4 for 1, 4, 16 (1x is 16).
+    fn shift(&self, m: &DataMem) -> u32 {
+        let c = m.mem[self.con];
+        if self.classic { [0, 2, 4, 4][usize::from(c & 3)] } else { u32::from((c >> 4) & 7) }
+    }
+    fn outps(&self, m: &DataMem) -> u8 {
+        let c = m.mem[self.con];
+        if self.classic { (c >> 3) & 15 } else { c & 15 }
+    }
+    /// Clock source: TxCLKCON CS (1 = FOSC/4, 2 = FOSC), FOSC/4 on the classic timer.
+    fn cs(&self, m: &DataMem) -> u8 {
+        if self.classic { 1 } else { m.mem[self.clk] & 0x1F }
+    }
+    /// Hardware-limit mode (TxHLT), none on the classic timer.
+    fn mode(&self, m: &DataMem) -> u8 {
+        if self.classic { 0 } else { m.mem[self.hlt] & 0x1F }
+    }
 }
 
 /// A port with pins: PORTx reads the pins, a write goes to LATx (DS40002043F 17.1: the pin level is read, the
@@ -489,7 +569,9 @@ pub struct Periph {
     /// Stimulus: (from cycle, port letter, pin, volts), stable-sorted by cycle.
     analog: Vec<(u64, u8, u8, f64)>,
     /// A compare match with TMR1 clearing happened on the last clock: TMR1 goes to 0 on the next one `[A61]`.
-    ccptmrs: Option<usize>,
+    ccptmrs: ccp::TmrSel,
+    /// PIC18(L)F2x/4xK22: the part has ports D and E (the 40/44-pin parts), for the fixed CCP pins (`route_k22_ccp`).
+    k22_ccp: Option<bool>,
     /// RxyPPS registers: (register, index into `ports`, pin).
     ppsout: Vec<(usize, usize, u8)>,
     /// `ppsout` per port index: (RxyPPS address, bit). Built once at the end of `bind`, like `ppsout`.
@@ -498,6 +580,8 @@ pub struct Periph {
     sig_src: u32,
     /// Hardware I2C hosts: the PPS input registers and the output codes of SCL and SDA.
     i2c_pps: Vec<I2cPps>,
+    /// MSSP hosts with fixed I2C pins (no PPS, the PIC18(L)F2x/4xK22): (module number, SCL pin, SDA pin).
+    i2c_fixed: Vec<(u8, (u8, u8), (u8, u8))>,
     /// The parts on the board (LEDs, OLED).
     pub board: Board,
     /// Pins with an external pull-up (bit-banged I2C lines) and pins the OLED holds low, per port.
@@ -593,6 +677,34 @@ impl Periph {
     }
 
     /// Data memory address of the holding registers / buffer RAM that `TBLWT` writes, when the part has them.
+    /// The fixed CCP output pins of the PIC18(L)F2x/4xK22, by the CONFIG3H CCP2MX and CCP3MX settings (1 = the default pin):
+    /// replaces the fixed entries of the pin-output layer (DS40001412H Tables 2, 3 p.6-8, Register 24-4 p.348).
+    pub fn route_k22_ccp(&mut self, ccp2mx: bool, ccp3mx: bool) {
+        let Some(big) = self.k22_ccp else { return };
+        self.ppsout.retain(|o| o.0 < FIXED_PIN);
+        let pins: [(u8, u8, u8); 5] = [
+            (1, b'C', 2),
+            (2, if ccp2mx { b'C' } else { b'B' }, if ccp2mx { 1 } else { 3 }),
+            (3, if ccp3mx { b'B' } else if big { b'E' } else { b'C' }, if ccp3mx { 5 } else if big { 0 } else { 6 }),
+            (4, if big { b'D' } else { b'B' }, if big { 1 } else { 0 }),
+            (5, if big { b'E' } else { b'A' }, if big { 2 } else { 4 }),
+        ];
+        for (n, port, bit) in pins {
+            if let (Some(c), Some(pi)) = (self.ccps.iter().find(|c| c.n == n), self.ports.iter().position(|p| p.letter == port)) {
+                self.ppsout.push((FIXED_PIN + usize::from(c.sig), pi, bit));
+            }
+        }
+        self.pps_by_port = vec![Vec::new(); self.ports.len()];
+        for &(reg, pi, bit) in &self.ppsout {
+            self.pps_by_port[pi].push((reg, bit));
+        }
+    }
+
+    /// TBLWT into holding registers that are not RAM (the PIC18(L)F2x/4xK22, `Nvm::latch`): true when the part has them.
+    pub fn tblwt_latch(&mut self, p: u32, v: u8) -> bool {
+        self.nvm.as_mut().is_some_and(|n| n.latch(p, v))
+    }
+
     pub fn hold_base(&self) -> Option<usize> {
         self.nvm.as_ref().and_then(|n| n.hold()).or_else(|| self.nvmq.as_ref().and_then(|n| n.hold()))
     }
@@ -611,7 +723,7 @@ impl Periph {
 
     /// Find the timers the part has and mark their registers as hooked in `m`.
     pub fn bind(dev: &Device, m: &mut DataMem) -> Periph {
-        let mut p = Periph { ports: Vec::new(), drive: Default::default(), t0: None, t1: Vec::new(), t2: Vec::new(), uarts: Vec::new(), quarts: Vec::new(), spis: Vec::new(), mssps: Vec::new(), i2cqs: Vec::new(), adc: None, nvm: None, nvmq: None, stall: 0, fvr: None, tx: Log::new(), spi_tx: Log::new(), i2c_log: Log::new(), notes: BTreeSet::new(), ccps: Vec::new(), pwms: Vec::new(), cwg: None, cmps: Vec::new(), cmout: None, clcs: Vec::new(), clcin: Vec::new(), clcdata: None, in_clc: false, clc_scan: 0, crc: None, wdt: None, reset_req: None, sleeping: false, sleep_at: 0, fosc_off: false, wdt_wake: false, analog: Vec::new(), ccptmrs: None, ppsout: Vec::new(), pps_by_port: Vec::new(), sig_src: 0, i2c_pps: Vec::new(), board: Board::default(), pullup: Vec::new(), forced: Vec::new(), sig: 0, sig_log: Vec::new(), sched: Vec::new(), pin_log: Log::new(), event: None, ioc: Ioc::default(), sb: SyncBufs::default(), due: 0, owed: None };
+        let mut p = Periph { ports: Vec::new(), drive: Default::default(), t0: None, t1: Vec::new(), t2: Vec::new(), uarts: Vec::new(), quarts: Vec::new(), spis: Vec::new(), mssps: Vec::new(), i2cqs: Vec::new(), adc: None, nvm: None, nvmq: None, stall: 0, fvr: None, tx: Log::new(), spi_tx: Log::new(), i2c_log: Log::new(), notes: BTreeSet::new(), ccps: Vec::new(), pwms: Vec::new(), cwg: None, cmps: Vec::new(), cmout: None, clcs: Vec::new(), clcin: Vec::new(), clcdata: None, in_clc: false, clc_scan: 0, crc: None, wdt: None, reset_req: None, sleeping: false, sleep_at: 0, fosc_off: false, wdt_wake: false, analog: Vec::new(), ccptmrs: ccp::TmrSel::Q10(None), k22_ccp: None, ppsout: Vec::new(), pps_by_port: Vec::new(), sig_src: 0, i2c_pps: Vec::new(), i2c_fixed: Vec::new(), board: Board::default(), pullup: Vec::new(), forced: Vec::new(), sig: 0, sig_log: Vec::new(), sched: Vec::new(), pin_log: Log::new(), event: None, ioc: Ioc::default(), sb: SyncBufs::default(), due: 0, owed: None };
         let mut hook = |a: usize, k: u8| m.special[a] = Special::Hook(k);
         if let (Some(l), Some(h), Some(c0), Some(c1), Some(flag)) =
             (addr(dev, "TMR0L"), addr(dev, "TMR0H"), addr(dev, "T0CON0"), addr(dev, "T0CON1"), Flag::find(dev, "TMR0IF"))
@@ -619,7 +731,13 @@ impl Periph {
             for (a, k) in [(l, T0L), (h, T0H), (c0, T0C0), (c1, T0C1)] {
                 hook(a, k);
             }
-            p.t0 = Some(Timer0 { l, h, c0, c1, flag, cnt: 0, pre: 0, post: 0, last: 0, cki: addr(dev, "T0CKIPPS"), sleep_run: false });
+            p.t0 = Some(Timer0 { l, h, c0, c1, flag, cnt: 0, pre: 0, post: 0, last: 0, cki: addr(dev, "T0CKIPPS"), sleep_run: false, classic: false });
+        } else if let (Some(l), Some(h), Some(c), Some(flag)) = (addr(dev, "TMR0L"), addr(dev, "TMR0H"), addr(dev, "T0CON"), Flag::find(dev, "TMR0IF")) {
+            // PIC18(L)F2x/4xK22: one control register, T0CON (DS40001412H Register 11-1 p.154).
+            for (a, k) in [(l, T0L), (h, T0H), (c, T0C0)] {
+                hook(a, k);
+            }
+            p.t0 = Some(Timer0 { l, h, c0: c, c1: c, flag, cnt: 0, pre: 0, post: 0, last: 0, cki: None, sleep_run: false, classic: true });
         }
         for (i, n) in [1u8, 3, 5].into_iter().enumerate() {
             if let (Some(l), Some(h), Some(con), Some(clk), Some(gcon), Some(flag)) = (
@@ -633,7 +751,22 @@ impl Periph {
                 for (sub, a) in [l, h, con, clk, gcon].into_iter().enumerate() {
                     hook(a, t1_hook(i, sub as u8));
                 }
-                p.t1.push(Timer1 { n, clr: false, gate: addr(dev, &format!("T{n}GATE")), gpps: addr(dev, &format!("T{n}GPPS")), gif: Flag::find(dev, &format!("TMR{n}GIF")), gff: false, grun: false, gb: None, l, h, con, clk, gcon, flag, cnt: 0, pre: 0, last: 0, cki: addr(dev, &format!("T{n}CKIPPS")), sleep_run: false });
+                p.t1.push(Timer1 { n, clr: false, gate: addr(dev, &format!("T{n}GATE")), gpps: addr(dev, &format!("T{n}GPPS")), gif: Flag::find(dev, &format!("TMR{n}GIF")), gff: false, grun: false, gb: None, l, h, con, clk, gcon, flag, cnt: 0, pre: 0, last: 0, cki: addr(dev, &format!("T{n}CKIPPS")), sleep_run: false, classic: false });
+            } else if let (Some(l), Some(h), Some(con), Some(gcon), Some(flag), None) = (
+                addr(dev, &format!("TMR{n}L")),
+                addr(dev, &format!("TMR{n}H")),
+                addr(dev, &format!("T{n}CON")),
+                addr(dev, &format!("T{n}GCON")),
+                Flag::find(dev, &format!("TMR{n}IF")),
+                addr(dev, &format!("T{n}CLK")),
+            ) {
+                // PIC18(L)F2x/4xK22 (see `Timer1::classic`). Timer1's clock pin is T1CKI = RC0 and its gate pin T1G = RB5; Timer3 and
+                // Timer5 have pins moved by Config bits (T3CMX) and are given none here (their pin sources do not count).
+                for (sub, a) in [(0u8, l), (1, h), (2, con), (4, gcon)] {
+                    hook(a, t1_hook(i, sub));
+                }
+                let (cki, gpps) = if n == 1 { (Some(FIXED_PIN + (2 << 3)), Some(FIXED_PIN + (1 << 3 | 5))) } else { (None, None) };
+                p.t1.push(Timer1 { n, clr: false, gate: Some(gcon), gpps, gif: Flag::find(dev, &format!("TMR{n}GIF")), gff: false, grun: false, gb: None, l, h, con, clk: con, gcon, flag, cnt: 0, pre: 0, last: 0, cki, sleep_run: false, classic: true });
             }
         }
         for (i, n) in [2u8, 4, 6].into_iter().enumerate() {
@@ -648,7 +781,15 @@ impl Periph {
                 for (sub, a) in [tmr, pr, con, hlt, clk].into_iter().enumerate() {
                     hook(a, t2_hook(i, sub as u8));
                 }
-                p.t2.push(Timer2 { n, tmr, pr, con, hlt, clk, flag, cnt: 0, pre: 0, post: 0, last: 0 });
+                p.t2.push(Timer2 { n, tmr, pr, con, hlt, clk, flag, cnt: 0, pre: 0, post: 0, last: 0, classic: false });
+            } else if let (Some(tmr), Some(pr), Some(con), Some(flag), None) =
+                (addr(dev, &format!("TMR{n}")), addr(dev, &format!("PR{n}")), addr(dev, &format!("T{n}CON")), Flag::find(dev, &format!("TMR{n}IF")), addr(dev, &format!("T{n}HLT")))
+            {
+                // PIC18(L)F2x/4xK22 (see `Timer2::classic`).
+                for (sub, a) in [(0u8, tmr), (1, pr), (2, con)] {
+                    hook(a, t2_hook(i, sub));
+                }
+                p.t2.push(Timer2 { n, tmr, pr, con, hlt: con, clk: con, flag, cnt: 0, pre: 0, post: 0, last: 0, classic: true });
             }
         }
         if let Some(a) = adc::Adc::find(dev) {
@@ -665,7 +806,8 @@ impl Periph {
                 p.ports.push(Port { letter, port, lat, tris, ansel: addr(dev, &format!("ANSEL{l}")) });
             }
         }
-        if addr(dev, "NVMCON2").is_some() && addr(dev, "NVMLOCK").is_none()
+        // The Q10's NVMCON registers, or the EECON1/EECON2 of the PIC18(L)F2x/4xK22 (`Nvm::find_k22`).
+        if (addr(dev, "NVMCON2").is_some() || addr(dev, "EECON2").is_some()) && addr(dev, "NVMLOCK").is_none()
             && let Some(n) = Nvm::find(dev)
         {
             hook(n.con1, NVM0 + nvm::CON1);
@@ -681,11 +823,22 @@ impl Periph {
             p.nvmq = Some(n);
         }
         if addr(dev, "ADCPCON").is_none() && addr(dev, "PRODL").is_some() {
-            p.ccptmrs = addr(dev, "CCPTMRS");
+            p.ccptmrs = ccp::TmrSel::Q10(addr(dev, "CCPTMRS"));
             for n in 1..=2u8 {
                 if let Some(c) = Ccp::find(dev, n) {
                     hook(c.con, CCP0 + p.ccps.len() as u8 * ccp::HOOKS);
                     p.ccps.push(c);
+                }
+            }
+            // PIC18(L)F2x/4xK22: CCP1..CCP5, CCPTMRS0/1 (ccp.rs); CCP3..CCP5 take the hook codes CCPK0.. (`ccp_hook`).
+            if let (Some(t0), Some(t1), true) = (addr(dev, "CCPTMRS0"), addr(dev, "CCPTMRS1"), addr(dev, "PSTR1CON").is_some()) {
+                p.ccptmrs = ccp::TmrSel::K22(t0, t1);
+                p.k22_ccp = Some(addr(dev, "LATD").is_some());
+                for n in 1..=5u8 {
+                    if let Some(c) = Ccp::find_k22(dev, n) {
+                        hook(c.con, ccp_hook(p.ccps.len()));
+                        p.ccps.push(c);
+                    }
                 }
             }
             for n in 1..=2u8 {
@@ -743,6 +896,16 @@ impl Periph {
                 && n == 1
             {
                 p.i2c_pps.push(I2cPps { num: n, scl_in: a, sda_in: b, scl_name: sc, sda_name: sd, scl_code: 0x21, sda_code: 0x22 });
+            }
+        }
+        // PIC18(L)F2x/4xK22: SCL1 = RC3, SDA1 = RC4; SCL2/SDA2 = RB1/RB2 on the 28-pin parts, RD0/RD1 on the 40/44-pin parts
+        // (DS40001412H Tables 2, 3 p.6-7).
+        if p.i2c_pps.is_empty() && addr(dev, "PSTR1CON").is_some() {
+            let big = addr(dev, "LATD").is_some();
+            for (n, scl, sda) in [(1u8, (b'C', 3), (b'C', 4)), (2, if big { (b'D', 0) } else { (b'B', 1) }, if big { (b'D', 1) } else { (b'B', 2) })] {
+                if addr(dev, &format!("SSP{n}CON1")).is_some() {
+                    p.i2c_fixed.push((n, scl, sda));
+                }
             }
         }
         p.pullup = vec![0; p.ports.len()];
@@ -835,7 +998,7 @@ impl Periph {
         regs.extend(p.ppsout.iter().map(|o| o.0));
         // the baud rate registers the EUSART model reads from the stored bytes (not unmodelled)
         regs.extend(p.uarts.iter().flat_map(|u| [u.brgl, u.brgh]));
-        for a in regs {
+        for a in regs.into_iter().filter(|&a| a < FIXED_PIN) {
             if m.special[a] == Special::None {
                 m.special[a] = Special::Sync;
             }
@@ -1026,10 +1189,9 @@ impl Periph {
             Clk::Pin(_) | Clk::Other => None,
         };
         if let (Some(t), Some(clk)) = (&self.t0, self.t0_clock(m)) {
-            let (c0, c1) = (m.mem[t.c0], m.mem[t.c1]);
-            if c0 & 0x80 != 0 {
-                let d = if c0 & 0x10 != 0 { 65536 - u64::from(t.cnt) } else { u64::from(m.mem[t.h].wrapping_sub(t.cnt as u8)) + 1 };
-                if let Some(c) = clock_at(clk, t.cki, t.last, t.pre, u32::from(c1 & 15), d) {
+            if m.mem[t.c0] & 0x80 != 0 {
+                let d = if t.wide(m) { 65536 - u64::from(t.cnt) } else { u64::from(t.top8(m).wrapping_sub(t.cnt as u8)) + 1 };
+                if let Some(c) = clock_at(clk, t.cki, t.last, t.pre, t.shift(m), d) {
                     at(c);
                 }
             }
@@ -1044,7 +1206,7 @@ impl Periph {
                 d = 1;
             }
             for c in &self.ccps {
-                if c.en(m) && matches!(c.mode(m), 1 | 2 | 8 | 9 | 10 | 11) && ccp::timer_of(self.ccptmrs, m, c.n, false) == t.n {
+                if c.en(m) && !c.k22 && matches!(c.mode(m), 1 | 2 | 8 | 9 | 10 | 11) && ccp::timer_of(self.ccptmrs, m, c.n, false) == t.n {
                     let k = u64::from(c.ccpr(m).wrapping_sub(t.cnt));
                     d = d.min(if k == 0 { 65536 } else { k });
                 }
@@ -1054,13 +1216,12 @@ impl Periph {
             }
         }
         for t in &self.t2 {
-            let con = m.mem[t.con];
-            let cs = m.mem[t.clk] & 0x1F;
-            if con & 0x80 == 0 || (cs != 1 && cs != 2) {
+            let cs = t.cs(m);
+            if !t.on(m) || (cs != 1 && cs != 2) {
                 continue;
             }
             let d = u64::from(m.mem[t.pr].wrapping_sub(t.cnt)) + 1;
-            at(self::at(t.last, t.pre, u32::from((con >> 4) & 7), d, if cs == 2 { 4 } else { 1 }));
+            at(self::at(t.last, t.pre, t.shift(m), d, if cs == 2 { 4 } else { 1 }));
         }
         due
     }
@@ -1179,14 +1340,14 @@ impl Periph {
         }
         self.sig ^= 1 << code;
         self.sig_log.push((tick, code, new));
-        for c in self.ccps.iter().filter(|c| c.sig == code) {
+        for c in self.ccps.iter().filter(|c| c.sig == code && !c.k22) {
             if new { m.mem[c.con] |= 0x20 } else { m.mem[c.con] &= !0x20 }
         }
         for w in self.pwms.iter().filter(|w| w.sig == code) {
             if new { m.mem[w.con] |= 0x20 } else { m.mem[w.con] &= !0x20 }
         }
         for &(reg, pi, bit) in &self.ppsout {
-            if m.mem[reg] & 31 == code && m.mem[self.ports[pi].tris] >> bit & 1 == 0 {
+            if out_code(m, reg) == code && m.mem[self.ports[pi].tris] >> bit & 1 == 0 {
                 self.pin_log.push((tick, self.ports[pi].letter, bit, new));
             }
         }
@@ -1867,18 +2028,31 @@ impl Periph {
 
     /// Clock of Timer0 now.
     fn t0_clock(&self, m: &DataMem) -> Option<Clk> {
-        self.t0.as_ref().map(|t| t0_clk(self.q41(), m.mem[t.c1] >> 5))
+        // Classic T0CON: T0CS = 0 is the instruction clock FOSC/4; the T0CKI pin (RA4) is not modelled there (DS40001412H Register 11-1).
+        self.t0.as_ref().map(|t| if t.classic { if m.mem[t.c0] & 0x20 == 0 { Clk::Cyc(1) } else { Clk::Other } } else { t0_clk(self.q41(), m.mem[t.c1] >> 5) })
     }
 
     /// Clock of Timer1-type timer `i` now.
     fn t1_clock(&self, m: &DataMem, i: usize) -> Clk {
-        t1_clk(self.q41(), m.mem[self.t1[i].clk] & 0x1F)
+        let t = &self.t1[i];
+        if t.classic {
+            let con = m.mem[t.con];
+            return match con >> 6 {
+                0 => Clk::Cyc(1),
+                1 => Clk::Cyc(4),
+                2 if con & 8 != 0 => Clk::Hz(SOSC_HZ),
+                2 => Clk::Pin(false),
+                _ => Clk::Other,
+            };
+        }
+        t1_clk(self.q41(), m.mem[t.clk] & 0x1F)
     }
 
     /// Timer0 counts without Fosc/4: ON, T0ASYNC = 1 and a pin or an oscillator that runs in Sleep `[A102]`.
     fn t0_sleep_ok(&self, m: &DataMem) -> bool {
         let Some(t) = &self.t0 else { return false };
-        m.mem[t.c0] & 0x80 != 0 && m.mem[t.c1] & 0x10 != 0 && matches!(self.t0_clock(m), Some(Clk::Pin(_) | Clk::Hz(_)))
+        // The classic Timer0 is shut down in Sleep (DS40001412H 11.5 p.156).
+        !t.classic && m.mem[t.c0] & 0x80 != 0 && m.mem[t.c1] & 0x10 != 0 && matches!(self.t0_clock(m), Some(Clk::Pin(_) | Clk::Hz(_)))
     }
 
     /// Timer1-type timer `i` counts without Fosc/4: ON, SYNC = 1 and a pin or an oscillator that runs in Sleep `[A102]`.
@@ -2023,7 +2197,7 @@ impl Periph {
         let wins: &[(u64, Edges)] = if p.clk.is_some() { &p.wins } else { &[] };
         for &(base, ref ed) in wins {
             let pre0 = t.pre;
-            let cs = m.mem[t.clk] & 0x1F;
+            let cs = if t.classic { m.mem[t.con] >> 6 } else { m.mem[t.clk] & 0x1F };
             if clk == Clk::Other {
                 self.notes.insert(format!("Timer{} clock source CS={cs} is not modelled (Fosc/4, Fosc, the TxCKIPPS pin, LFINTOSC and SOSC are); it does not count", t.n));
             } else {
@@ -2115,7 +2289,7 @@ impl Periph {
             .ccps
             .iter()
             .enumerate()
-            .filter(|(_, c)| c.en(m) && matches!(c.mode(m), 1 | 2 | 8 | 9 | 10 | 11))
+            .filter(|(_, c)| c.en(m) && !c.k22 && matches!(c.mode(m), 1 | 2 | 8 | 9 | 10 | 11))
             .filter_map(|(i, c)| {
                 let n = ccp::timer_of(self.ccptmrs, m, c.n, false);
                 if self.t1.iter().any(|t| t.n == n) {
@@ -2161,20 +2335,26 @@ impl Periph {
         if let Some(t) = self.t0.as_mut().filter(|_| t0_run) {
             let (base, pre0) = (t.last, t.pre);
             t.last = now;
-            let c0 = m.mem[t.c0];
             let c1 = m.mem[t.c1];
             if let Some((clk, ed)) = t0_in {
                 if clk == Clk::Other {
-                    self.notes.insert(format!("Timer0 clock source T0CS={} is not modelled (Fosc/4, the T0CKIPPS pin, LFINTOSC and SOSC are); it does not count", c1 >> 5));
+                    if t.classic {
+                        self.notes.insert("Timer0 clock T0CS = 1 (the T0CKI pin) is not modelled on this part (FOSC/4 is); it does not count".into());
+                    } else {
+                        self.notes.insert(format!("Timer0 clock source T0CS={} is not modelled (Fosc/4, the T0CKIPPS pin, LFINTOSC and SOSC are); it does not count", c1 >> 5));
+                    }
                 } else {
-                    let clocks = prescale(&mut t.pre, u32::from(c1 & 15), ed.n);
-                    let outps = c0 & 15;
-                    let wide = c0 & 0x10 != 0;
+                    let sh = t.shift(m);
+                    let clocks = prescale(&mut t.pre, sh, ed.n);
+                    let outps = t.outps(m);
+                    let wide = t.wide(m);
+                    let top = t.top8(m);
+                    let classic = t.classic;
                     for j in 1..=clocks {
                         let wrap = if wide {
                             t.cnt = t.cnt.wrapping_add(1);
                             t.cnt == 0
-                        } else if t.cnt as u8 == m.mem[t.h] {
+                        } else if t.cnt as u8 == top {
                             t.cnt = 0;
                             true
                         } else {
@@ -2185,9 +2365,11 @@ impl Periph {
                         if wrap {
                             if t.post >= outps {
                                 t.post = 0;
-                                m.mem[t.c0] ^= 0x20; // T0OUT toggles
+                                if !classic {
+                                    m.mem[t.c0] ^= 0x20; // T0OUT toggles
+                                }
                                 t.flag.set(m);
-                                ev.push(ed.at(base, pre0, u32::from(c1 & 15), j));
+                                ev.push(ed.at(base, pre0, sh, j));
                             } else {
                                 t.post += 1;
                             }
@@ -2218,10 +2400,9 @@ impl Periph {
             let (base, pre0) = (t.last, t.pre);
             let dt = now - t.last;
             t.last = now;
-            let con = m.mem[t.con];
-            if con & 0x80 != 0 && dt > 0 {
-                let cs = m.mem[t.clk] & 0x1F;
-                let mode = m.mem[t.hlt] & 0x1F;
+            if t.on(m) && dt > 0 {
+                let cs = t.cs(m);
+                let mode = t.mode(m);
                 if cs != 1 && cs != 2 {
                     self.notes.insert(format!("Timer{} clock source CS={cs} is not modelled (only FOSC/4 and FOSC); it does not count", t.n));
                 } else {
@@ -2240,11 +2421,11 @@ impl Periph {
                         }
                     }
                     let ticks = if cs == 2 { dt * 4 } else { dt };
-                    let clocks = prescale(&mut t.pre, u32::from((con >> 4) & 7), ticks);
-                    let outps = con & 15;
+                    let sh = t.shift(m);
+                    let clocks = prescale(&mut t.pre, sh, ticks);
+                    let outps = t.outps(m);
                     let pr = m.mem[t.pr];
                     let mut left = clocks;
-                    let sh = u32::from((con >> 4) & 7);
                     let ratio = if cs == 2 { 4 } else { 1 };
                     while left > 0 {
                         // Jump straight to the next period end when no event can happen before it.
@@ -2304,9 +2485,10 @@ impl Periph {
                 if duty == 0 {
                     continue;
                 }
-                hits.push(Sched { tick: 4 * c, code: ccp.sig, act: 1, flag: None, pwm: true });
+                let (on, off) = if ccp.inverted(m) { (0, 1) } else { (1, 0) };
+                hits.push(Sched { tick: 4 * c, code: ccp.sig, act: on, flag: None, pwm: true });
                 if pulse < period {
-                    hits.push(Sched { tick: 4 * c + pulse, code: ccp.sig, act: 0, flag: Some(ccp.flag), pwm: true }); // [A62]
+                    hits.push(Sched { tick: 4 * c + pulse, code: ccp.sig, act: off, flag: Some(ccp.flag), pwm: true }); // [A62]
                 }
             }
         }
@@ -2392,7 +2574,7 @@ impl Periph {
             }
             T0L => {
                 let t = self.t0.as_ref().unwrap();
-                if m.mem[t.c0] & 0x10 != 0 {
+                if t.wide(m) {
                     m.mem[t.h] = (t.cnt >> 8) as u8;
                 }
                 t.cnt as u8
@@ -2530,7 +2712,7 @@ impl Periph {
                 let t = self.t0.as_mut().unwrap();
                 t.pre = 0;
                 t.post = 0;
-                if m.mem[t.c0] & 0x10 != 0 {
+                if t.wide(m) {
                     t.cnt = u16::from(m.mem[t.h]) << 8 | u16::from(v);
                 } else {
                     t.cnt = u16::from(v);
@@ -2543,8 +2725,12 @@ impl Periph {
             }
             T0C0 => {
                 let t = self.t0.as_mut().unwrap();
-                let out = m.mem[t.c0] & 0x20; // T0OUT is read only
-                m.mem[t.c0] = v & !0x20 | out;
+                if t.classic {
+                    m.mem[t.c0] = v;
+                } else {
+                    let out = m.mem[t.c0] & 0x20; // T0OUT is read only
+                    m.mem[t.c0] = v & !0x20 | out;
+                }
                 t.pre = 0;
                 t.post = 0;
             }
@@ -2587,13 +2773,20 @@ impl Periph {
                 t.post = 0;
                 m.mem[t.tmr] = v;
             }
-            CCP0..=225 => {
-                let i = usize::from(k - CCP0) / usize::from(ccp::HOOKS);
-                let (con, sig) = (self.ccps[i].con, self.ccps[i].sig);
+            CCP0..=225 | CCPK0..=CCPK_END => {
+                let i = if k >= CCP0 { usize::from(k - CCP0) / usize::from(ccp::HOOKS) } else { 2 + usize::from(k - CCPK0) };
+                let (con, sig, k22) = (self.ccps[i].con, self.ccps[i].sig, self.ccps[i].k22);
                 let old = m.mem[con];
-                m.mem[con] = v & 0xDF | old & 0x20; // OUT is read only
+                // Q10: OUT (bit 5) is read only. K22: bit 5 is DCxB1 and there is no EN, CCPxM = 0 is off (ccp.rs).
+                m.mem[con] = if k22 { v } else { v & 0xDF | old & 0x20 };
                 self.ccps[i].edges = 0;
-                if v & 0x80 == 0 || v & 15 == 0 {
+                if k22 && v & 15 != 0 && v & 12 != 12 {
+                    self.notes.insert(format!("CCP{} capture and compare (CCP{}M = {:04b}) are not modelled on this part; only PWM is", self.ccps[i].n, self.ccps[i].n, v & 15));
+                }
+                if k22 && v & 0xC0 != 0 && v & 12 == 12 && self.ccps[i].ecc {
+                    self.notes.insert(format!("CCP{} half- or full-bridge PWM (P{}M = {}) is not modelled: only P{}A is driven", self.ccps[i].n, self.ccps[i].n, v >> 6, self.ccps[i].n));
+                }
+                if (!k22 && v & 0x80 == 0) || v & 15 == 0 {
                     // Clearing the module forces the output latch low (22.3.1).
                     self.sched.retain(|s| s.code != sig);
                     self.set_sig(m, sig, 0, 4 * now);
@@ -2628,7 +2821,7 @@ impl Periph {
             }
             k if matches!(t2_dec(k), Some((_, 2))) => {
                 let ti = t2_dec(k).unwrap().0;
-                if v & 0x80 == 0 {
+                if v & if self.t2[ti].classic { 0x04 } else { 0x80 } == 0 {
                     // A stopped Timer2/4/6 freezes the PWM pins of the CCPs that use it.
                     let n = self.t2[ti].n;
                     let mut off: Vec<u8> = self.ccps.iter().filter(|c| ccp::timer_of(self.ccptmrs, m, c.n, true) == n).map(|c| c.sig).collect();
@@ -2654,7 +2847,7 @@ impl Periph {
         let mut v = m.mem[p.lat] & !tris | ext & tris & !ana;
         for &(reg, bit) in &self.pps_by_port[i] {
             // A pin driven by a modelled peripheral source (RxyPPS, TRIS clear) shows the source level, not the latch.
-            let code = m.mem[reg] & 31;
+            let code = out_code(m, reg);
             if tris >> bit & 1 == 0 && (self.sig_src >> code & 1 != 0 || ((1..=4).contains(&code) && self.cwg.as_ref().is_some_and(|c| c.hiz >> (code - 1) & 1 == 0))) {
                 v = v & !(1 << bit) | u8::from(self.sig >> code & 1 != 0) << bit;
             }
@@ -2667,7 +2860,7 @@ impl Periph {
 
     /// Level of the pin a PPS input register selects (PORT field at bits 5:3, PIN at 2:0).
     fn pps_pin(&self, m: &DataMem, reg: usize, now: u64) -> bool {
-        let v = m.mem[reg];
+        let v = if reg >= FIXED_PIN { (reg - FIXED_PIN) as u8 } else { m.mem[reg] };
         let letter = b'A' + (v >> 3 & 7);
         self.ports.iter().position(|p| p.letter == letter).is_some_and(|i| self.port_levels(i, m, now) >> (v & 7) & 1 != 0)
     }
@@ -2721,6 +2914,10 @@ impl Periph {
     fn gate_src(&self, m: &DataMem, i: usize) -> GSrc {
         let t = &self.t1[i];
         let Some(g) = t.gate else { return GSrc::None };
+        if t.classic {
+            // TxGSS: 00 the TxG pin; the Timer2 match and the comparators are not modelled on this part.
+            return if m.mem[g] & 3 == 0 { t.gpps.map_or(GSrc::None, GSrc::Pin) } else { GSrc::None };
+        }
         let gss = m.mem[g] & 31;
         if gss == 0 {
             return t.gpps.map_or(GSrc::None, GSrc::Pin);

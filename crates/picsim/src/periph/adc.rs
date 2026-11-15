@@ -21,6 +21,15 @@
 //!   Table 22-1). A SLEEP aborts a running conversion unless ADCRC is the clock (27.2.3 p.323, 22.2.3 p.240)
 //!   `[A114]`: GO is cleared, ADRES and ADIF are left alone, and the converter works again afterwards (the data
 //!   sheets say only "turned off, ON remains set").
+//! * The 10-bit ADC of the PIC18(L)F2x/4xK22 (DS40001412H ch.17 p.288-301) is the simple one with ADCON2 in place of ADCON1:
+//!   ADCON0 = CHS<4:0> (6:2, an AN number), GO/DONE (1), ADON (0); ADCON2 = ADFM (7), ACQT<2:0> (5:3: 0, 2, 4, 6, 8, 12, 16, 20 TAD),
+//!   ADCS<2:0> (2:0, the same TAD codes as CS<2:0> above, x11 = FRC) [Registers 17-1, 17-3 p.295, 297]. GO starts ACQT TAD of
+//!   automatic acquisition (the input keeps being sampled), then the 11 TAD conversion (TCNV, parameter 131 p.452); ADRES, GO and
+//!   ADIF change on the cycle after it (Figures 17-3, 17-4 p.292). `[A141]` the conversion ends (ACQT + 11) TAD after GO plus one
+//!   cycle, rounded up to a cycle; with ACQT = 0 it starts TCY - TAD after GO (Figure 17-3), so it ends 10 TAD + 2 TCY after GO.
+//!   The input is the one at the end of the acquisition (Figure 17-4: the holding capacitor is disconnected when the conversion
+//!   starts). GO may not be set by the instruction that turns the ADC on (17.2.1 note p.292). MDB takes one TAD more (D-SIM-12 in
+//!   docs/FACTS-SIM.md).
 //! * Not modelled, with a note: the ADCRC clock (CS = 1; simple ADC CS = x11), computation (filter, threshold,
 //!   ADPREV/ADACC), triggers (ADACT) and double sampling.
 //! * `[A12]` The conversion starts in the cycle of the instruction that sets ADGO. `[A13]` ADGO written 1 while
@@ -47,6 +56,8 @@ pub(crate) struct Adc {
     pub simple: Option<usize>,
     /// ADNCH, the negative channel of the differential mode (PIC16F17126/46).
     pub nch: Option<usize>,
+    /// The PIC18(L)F2x/4xK22 ADC: `simple` is ADCON2 (ADCS in bits 2:0, ACQT in 5:3), not ADCON1.
+    pub k22: bool,
     pub resl: usize,
     pub resh: usize,
     pub flag: Flag,
@@ -95,10 +106,10 @@ impl Adc {
         if wide {
             let (pre, acq) = (addr(dev, "ADPREL")?, addr(dev, "ADACQL")?);
             let hi = (addr(dev, "ADPREH")?, addr(dev, "ADACQH")?);
-            Some(Adc { con, clk, pre, acq, wide: Some(hi), go_needs_on: true, simple: None, pch, nch: addr(dev, "ADNCH"), resl, resh, flag, bits, conv_tad, end: None, feed: Vec::new() })
+            Some(Adc { con, clk, pre, acq, wide: Some(hi), go_needs_on: true, simple: None, pch, nch: addr(dev, "ADNCH"), k22: false, resl, resh, flag, bits, conv_tad, end: None, feed: Vec::new() })
         } else {
             let (pre, acq) = (addr(dev, "ADPRE")?, addr(dev, "ADACQ")?);
-            Some(Adc { con, clk, pre, acq, wide: None, go_needs_on: false, simple: None, pch, nch: None, resl, resh, flag, bits, conv_tad, end: None, feed: Vec::new() })
+            Some(Adc { con, clk, pre, acq, wide: None, go_needs_on: false, simple: None, pch, nch: None, k22: false, resl, resh, flag, bits, conv_tad, end: None, feed: Vec::new() })
         }
     }
 
@@ -106,12 +117,17 @@ impl Adc {
     /// in the device descriptions, DS40001839E covers the PIC16(L)F18326/18346 and the others are taken to match.
     fn find_simple(dev: &Device) -> Option<Adc> {
         let name = dev.device.name.as_str();
+        if dev.find_sfr("ADCON2").is_some_and(|s| s.fields.iter().any(|f| f.name == "ACQT")) {
+            let (con, con2, resl, resh) = (addr(dev, "ADCON0")?, addr(dev, "ADCON2")?, addr(dev, "ADRESL")?, addr(dev, "ADRESH")?);
+            let flag = Flag::find(dev, "ADIF")?;
+            return Some(Adc { con, clk: 0, pre: 0, acq: 0, wide: None, go_needs_on: true, simple: Some(con2), pch: 0, nch: None, k22: true, resl, resh, flag, bits: 10, conv_tad: 0, end: None, feed: Vec::new() });
+        }
         if !(name.starts_with("PIC16F152") || name.starts_with("PIC16F183") || name.starts_with("PIC16LF183")) {
             return None;
         }
         let (con, con1, resl, resh) = (addr(dev, "ADCON0")?, addr(dev, "ADCON1")?, addr(dev, "ADRESL")?, addr(dev, "ADRESH")?);
         let flag = Flag::find(dev, "ADIF")?;
-        Some(Adc { con, clk: 0, pre: 0, acq: 0, wide: None, go_needs_on: true, simple: Some(con1), pch: 0, nch: None, resl, resh, flag, bits: 10, conv_tad: 0, end: None, feed: Vec::new() })
+        Some(Adc { con, clk: 0, pre: 0, acq: 0, wide: None, go_needs_on: true, simple: Some(con1), pch: 0, nch: None, k22: false, resl, resh, flag, bits: 10, conv_tad: 0, end: None, feed: Vec::new() })
     }
 
     /// The addresses of the registers this model handles.
@@ -128,9 +144,10 @@ impl Adc {
         r
     }
 
-    /// TAD in Fosc periods for ADCON1's CS<2:0> of the simple ADC; None for ADCRC.
-    fn simple_tad(con1: u8) -> Option<u64> {
-        [Some(2), Some(8), Some(32), None, Some(4), Some(16), Some(64), None][usize::from(con1 >> 4 & 7)]
+    /// TAD in Fosc periods for the simple ADC's CS<2:0> (ADCON1 bits 6:4, or ADCON2 bits 2:0 on the K22); None for ADCRC/FRC.
+    fn simple_tad(&self, con1: u8) -> Option<u64> {
+        let cs = if self.k22 { con1 & 7 } else { con1 >> 4 & 7 };
+        [Some(2), Some(8), Some(32), None, Some(4), Some(16), Some(64), None][usize::from(cs)]
     }
 
     /// A write to ADCON0 (`v` already masked to the implemented bits) at cycle `now`.
@@ -143,7 +160,7 @@ impl Adc {
             self.end = None;
         } else {
             new |= go_bit;
-            if self.simple.is_some_and(|c1| Self::simple_tad(mem[c1]).is_none()) || (self.simple.is_none() && v & 0x10 != 0) {
+            if self.simple.is_some_and(|c1| self.simple_tad(mem[c1]).is_none()) || (self.simple.is_none() && v & 0x10 != 0) {
                 notes.insert("the ADC FRC clock (ADCS = 1) is not modelled; ADGO never clears".into());
             } else if self.end.is_none() {
                 mem[self.con] = new;
@@ -156,8 +173,18 @@ impl Adc {
     /// Start a conversion at cycle `t`: end cycle and the code it will load.
     fn start(&mut self, mem: &[u8], t: u64) {
         if let Some(con1) = self.simple {
+            let tad = self.simple_tad(mem[con1]).unwrap_or(2);
+            if self.k22 {
+                // [A141] ACQT TAD of acquisition, the input sampled at its end, then 11 TAD and one cycle.
+                let acq = [0u64, 2, 4, 6, 8, 12, 16, 20][usize::from(mem[con1] >> 3 & 7)];
+                let ch = mem[self.con] >> 2 & 31;
+                let sample = t + (tad * acq).div_ceil(4);
+                let code = i32::from(self.feed.iter().rfind(|(c, when, _)| *c == ch && *when <= sample).map_or(0, |f| f.2));
+                let len = if acq == 0 { (tad * 10).div_ceil(4) + 2 } else { (tad * (acq + 11)).div_ceil(4) + 1 };
+                self.end = Some((t + len, code.min(1023), false));
+                return;
+            }
             // the input is the one at the start; the acquisition time is the program's business
-            let tad = Self::simple_tad(mem[con1]).unwrap_or(2);
             let ch = mem[self.con] >> 2;
             let code = i32::from(self.feed.iter().rfind(|(c, when, _)| *c == ch && *when <= t).map_or(0, |f| f.2));
             self.end = Some((t + (23 * tad).div_ceil(8), code.min(1023), false)); // 11.5 TAD of tad Fosc periods, 4 to a cycle

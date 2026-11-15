@@ -65,6 +65,11 @@ pub struct Pic18 {
     /// PIRn/PIEn/IPRn addresses per interrupt register group n.
     irq: Vec<[usize; 3]>,
     intcon: usize,
+    /// RCON when it holds IPEN (bit 7) and INTCON does not (PIC18(L)F2x/4xK22, DS40001412H Register 4-1 p.56).
+    rcon_ipen: Option<usize>,
+    /// Interrupt sources outside the PIRn/PIEn groups, in INTCON and INTCON3 (K22: TMR0, INT0, RB, INT1, INT2; Fig. 9-1 p.107):
+    /// flag (register, mask), enable (register, mask), priority (register, mask), `None` for INT0, always high (9.2 p.106).
+    core_irq: Vec<((usize, u8), (usize, u8), Option<(usize, u8)>)>,
     vic: bool,
     vec_high: u32,
     vec_low: u32,
@@ -78,7 +83,7 @@ pub struct Pic18 {
     /// ADDFSR/SUBFSR are standard instructions (Q41, DS40002214G 45.2 p.864) rather than extended ones that need
     /// XINST (Q10, DS40002043F 38.2 p.681).
     std_addfsr: bool,
-    /// XINST = 0 in the configuration words: the extended instruction set is on.
+    /// XINST is ON in the configuration words (the setting named ON, 0 on the Q parts, 1 on the K22): the extended instruction set is on.
     xinst: bool,
     stk_mask: u8,
     /// A stack over- or underflow with STVREN = 1 during this step: the reset happens at its end `[A99]`.
@@ -100,6 +105,10 @@ pub struct Pic18 {
     mclr: Vec<(usize, u8, u8)>,
     pcon0: Option<usize>,
     pcon1: Option<usize>,
+    /// PIC18(L)F2x/4xK22 oscillator status (`osc_status`): OSCCON, OSCCON2, OSCTUNE, and the FOSC and PLLCFG configuration fields.
+    osc: Option<(usize, usize, usize)>,
+    fosc_cfg: u8,
+    pllcfg: bool,
     /// TO and PD of STATUS (`[A129]`): read only, 1 after a power-on reset, set by CLRWDT. 0 on a part whose STATUS has neither.
     status_ro: u8,
 }
@@ -172,6 +181,34 @@ impl Pic18 {
             }
         }
         m.special[intcon] = Special::Core;
+        // PIC18(L)F2x/4xK22: OSCCON has IRCF and no OSCCON1 (DS40001412H Register 2-1 p.30).
+        let osc = match (dev.find_sfr("OSCCON"), dev.find_sfr("OSCCON2"), dev.find_sfr("OSCTUNE")) {
+            (Some(a), Some(b), Some(c)) if a.fields.iter().any(|f| f.name == "IRCF") && dev.find_sfr("OSCCON1").is_none() => {
+                for x in [a, b, c] {
+                    if m.special[x.addr as usize] == Special::None {
+                        m.special[x.addr as usize] = Special::Core;
+                    }
+                }
+                Some((a.addr as usize, b.addr as usize, c.addr as usize))
+            }
+            _ => None,
+        };
+        let field = |reg: &str, f: &str| dev.find_sfr(reg).and_then(|s| s.fields.iter().chain(&s.legacy).find(|x| x.name == f).map(|x| (s.addr as usize, 1u8 << x.pos)));
+        // By register name: another register can have an IPEN field (the Q41's ADCON1.IPEN is the ADC's).
+        let rcon_ipen = (field("INTCON", "IPEN").is_none() && field("INTCON0", "IPEN").is_none()).then(|| field("RCON", "IPEN").map(|(a, _)| a)).flatten();
+        let mut core_irq = Vec::new();
+        if rcon_ipen.is_some() {
+            for (fl, en, pr) in [("TMR0IF", "TMR0IE", Some(("INTCON2", "TMR0IP"))), ("INT0IF", "INT0IE", None), ("RBIF", "RBIE", Some(("INTCON2", "RBIP")))] {
+                if let (Some(f), Some(e)) = (field("INTCON", fl), field("INTCON", en)) {
+                    core_irq.push((f, e, pr.and_then(|(r, b)| field(r, b))));
+                }
+            }
+            for (fl, en, pr) in [("INT1IF", "INT1IE", "INT1IP"), ("INT2IF", "INT2IE", "INT2IP")] {
+                if let (Some(f), Some(e)) = (field("INTCON3", fl), field("INTCON3", en)) {
+                    core_irq.push((f, e, field("INTCON3", pr)));
+                }
+            }
+        }
         let depth = dev.memory.hw_stack.max(1);
         let hi = m.regs.fsr[0] + 1;
         let wide_fsr = m.implemented[hi as usize] > 0x0F;
@@ -198,6 +235,11 @@ impl Pic18 {
             ctx: Vec::new(),
             irq,
             intcon,
+            rcon_ipen,
+            core_irq,
+            osc,
+            fosc_cfg: 0,
+            pllcfg: false,
             vic: dev.find_sfr("SHADCON").is_some(),
             vec_high: dev.vectors.interrupt_high,
             vec_low: dev.vectors.interrupt_low,
@@ -252,6 +294,14 @@ impl Pic18 {
         // The pack gives the PIC18F16Q41's STATUS as `-xxxxxxx`; the data sheet has TO = PD = 1 at POR/BOR (DS40002214G 7.7.7 p.40).
         let st = p.m.regs.status as usize;
         p.m.mem[st] |= p.status_ro;
+        // PIC18(L)F2x/4xK22: the oscillator status and the CCP pins as the unprogrammed configuration words give them, until a program's
+        // configuration is loaded (`apply_decoded_config`).
+        if p.osc.is_some() {
+            p.fosc_cfg = p.cfg.get("FOSC").unwrap_or(0) as u8;
+            p.pllcfg = p.cfg.get("PLLCFG").is_some_and(|v| v != 0);
+            p.osc_status();
+            p.p.route_k22_ccp(p.cfg.get("CCP2MX").is_none_or(|v| v != 0), p.cfg.get("CCP3MX").is_none_or(|v| v != 0));
+        }
         Ok(p)
     }
 
@@ -276,6 +326,25 @@ impl Pic18 {
         self.apply_decoded_config();
     }
 
+    /// The read-only status bits of the K22 oscillator (DS40001412H Registers 2-1, 2-2 p.30-31; PLL selection Table 2-1 p.28):
+    /// OSCCON.OSTS (bit 3) = 1 while the part runs from the FOSC clock (SCS = 00), OSCCON.HFIOFS (bit 2) = 1 while the internal block
+    /// clocks it (SCS = 1x, or SCS = 00 with FOSC = 100x), OSCCON2.PLLRDY (bit 7) = 1 when the system clock comes from the 4x PLL: SCS =
+    /// 00 and PLLEN with an INTOSC or EC primary clock (FOSC 1000-1111), or PLLCFG with an oscillator on OSC1/OSC2 (FOSC 0000-0111).
+    /// `[A145]` the oscillators are stable at once (no start-up or lock time is modelled).
+    /// `[A146]` Table 2-1 is followed for the PLL: FOSC 0000-0111 by PLLCFG only, 1000-1111 by PLLEN only; 2.8.1 p.37 says PLLEN also
+    /// works for "any of the external oscillator modes", which the table does not show for 0000-0111.
+    fn osc_status(&mut self) {
+        let Some((con, con2, tune)) = self.osc else { return };
+        let c = self.m.mem[con];
+        let scs = c & 3;
+        let intio = self.fosc_cfg & 0x0E == 8;
+        let internal = scs >= 2 || (scs == 0 && intio);
+        let pllen = self.m.mem[tune] & 0x40 != 0;
+        let pll = scs == 0 && if self.fosc_cfg >= 8 { pllen } else { self.pllcfg };
+        self.m.mem[con] = c & !0x0C | if scs == 0 { 8 } else { 0 } | if internal { 4 } else { 0 };
+        self.m.mem[con2] = self.m.mem[con2] & !0x80 | if pll { 0x80 } else { 0 };
+    }
+
     /// `apply_config` without the decoding: the configuration words do not change across a warm reset, and
     /// decoding them allocates a string per field (REVIEW-2026-11-11 P2).
     fn apply_decoded_config(&mut self) {
@@ -287,7 +356,15 @@ impl Pic18 {
         let (wdte, cps, cws, ccs) = (self.cfg.get("WDTE"), self.cfg.get("WDTCPS"), self.cfg.get("WDTCWS"), self.cfg.get("WDTCCS"));
         let modelled = self.p.wdt_config(wdte.unwrap_or(0) as u8, cps.unwrap_or(0x1F) as u8, cws.unwrap_or(7) as u8, ccs.unwrap_or(7) as u8);
         self.p.scan_config(self.cfg.get("SCANE").is_none_or(|v| v != 0));
-        self.xinst = self.cfg.get("XINST") == Some(0);
+        self.fosc_cfg = self.cfg.get("FOSC").unwrap_or(0) as u8;
+        self.pllcfg = self.cfg.get("PLLCFG").is_some_and(|v| v != 0);
+        self.osc_status();
+        // PIC18(L)F2x/4xK22: CONFIG3H CCP2MX and CCP3MX move CCP2 and CCP3 (both 1 when unprogrammed, DS40001412H Table 24-1 p.344).
+        self.p.route_k22_ccp(self.cfg.get("CCP2MX").is_none_or(|v| v != 0), self.cfg.get("CCP3MX").is_none_or(|v| v != 0));
+        // The value the part's description calls ON: 0 on the Q10 and Q41 (DS40002043F 38.2 p.681), 1 on the PIC18(L)F2x/4xK22
+        // (CONFIG4L bit 6, DS40001412H Table 24-1 p.344; the pack's XINST settings ON = 1, OFF = 0).
+        let on = self.cfg_regs.iter().flat_map(|r| r.fields.iter()).find(|f| f.name == "XINST").and_then(|f| f.settings.iter().find(|s| s.name == "ON")).map_or(0, |s| s.value);
+        self.xinst = self.cfg.get("XINST") == Some(on);
         if self.xinst {
             self.notes.insert(format!(
                 "XINST set: of the extended instruction set only {} modelled; ADDULNK, SUBULNK, CALLW, MOVSF, MOVSFL, MOVSS, PUSHL and Indexed Literal Offset addressing are not (they run as undefined opcodes or as the standard instructions)",
@@ -450,6 +527,9 @@ impl Pic18 {
             Special::None | Special::Core => {
                 let keep = if i == self.m.regs.status as usize { self.status_ro } else { 0 };
                 self.m.mem[i] = (v & !keep | self.m.mem[i] & keep) & self.m.implemented[i];
+                if self.osc.is_some_and(|(a, b, c)| i == a || i == b || i == c) {
+                    self.osc_status();
+                }
             }
             Special::Sync => {
                 if self.p.watching(&self.m) {
@@ -977,10 +1057,25 @@ impl Pic18 {
         if c & 0x80 == 0 {
             return;
         }
-        let ipen = c & 0x20 != 0;
+        let ipen = match self.rcon_ipen {
+            Some(r) => self.m.mem[r] & 0x80 != 0,
+            None => c & 0x20 != 0,
+        };
         let giel = c & 0x40 != 0;
         // The lowest vector number pending at each priority (natural order priority `DS40002214G 11.4.2 p.116`).
         let (mut hi, mut lo): (Option<u32>, Option<u32>) = (None, None);
+        // K22 core sources: GIE alone enables them without priorities (PEIE gates only the peripherals, 9.1 p.106); with
+        // IPEN their priority bit chooses the level, INT0 being always high (9.2).
+        for &((fa, fm), (ea, em), pr) in &self.core_irq {
+            if self.m.mem[fa] & fm == 0 || self.m.mem[ea] & em == 0 {
+                continue;
+            }
+            let high = !ipen || pr.is_none_or(|(pa, pm)| self.m.mem[pa] & pm != 0);
+            let slot = if high { &mut hi } else { &mut lo };
+            if slot.is_none() {
+                *slot = Some(0);
+            }
+        }
         for (n, g) in self.irq.iter().enumerate() {
             if g[0] == 0 {
                 continue;
@@ -1139,9 +1234,14 @@ impl Pic18 {
             if s {
                 self.shadow_restore();
             }
+            // IPEN: RCON bit 7 on the K22 (DS40001412H 9.3 p.106), INTCON bit 5 on the Q10.
+            let ipen = match self.rcon_ipen {
+                Some(r) => self.m.mem[r] & 0x80 != 0,
+                None => self.m.mem[self.intcon] & 0x20 != 0,
+            };
             let c = &mut self.m.mem[self.intcon];
-            // RETFIE sets GIE/GIEH, or GIEL when returning from a low-priority handler `DS40002043F p.194`.
-            *c |= if level == Some(false) && *c & 0x20 != 0 { 0x40 } else { 0x80 };
+            // RETFIE sets GIE/GIEH, or GIEL when returning from a low-priority handler `DS40002043F p.194`, DS40001412H 9.3 p.106.
+            *c |= if level == Some(false) && ipen { 0x40 } else { 0x80 };
         }
     }
 
@@ -1365,7 +1465,10 @@ impl Pic18 {
                 self.m.mem[base + (p & 0xFF) as usize] = t;
             }
             None => {
-                self.notes.insert("TBLWT on a part without holding registers is not modelled".into());
+                let t = self.m.mem[self.m.regs.tablat as usize];
+                if !self.p.tblwt_latch(p, t) {
+                    self.notes.insert("TBLWT on a part without holding registers is not modelled".into());
+                }
             }
         }
         match mode {

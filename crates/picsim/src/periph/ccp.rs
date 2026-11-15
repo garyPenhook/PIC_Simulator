@@ -24,6 +24,16 @@
 //! * `[A63]` Pulse output compare modes (MODE 1010, 1011) only set the flag and clear TMR1; the pulse width is not
 //!   documented, so the pin is not driven.
 
+//! PIC18(L)F2x/4xK22 CCP1..CCP5 in PWM mode (DS40001412H ch.14 p.173-203; `Ccp::find_k22`):
+//! * CCPxCON = PxM<1:0> (7:6, ECCP only) | DCxB<1:0> (5:4, the duty's two LSbs) | CCPxM<3:0>; there is no EN bit, CCPxM = 0000 turns
+//!   the module off, 11xx is PWM (Registers 14-1, 14-2 p.198-200). The duty is CCPRxL:DCxB (Equation 14-2 p.181), latched at the
+//!   period match like the Q10's. On the ECCP modules CCP1..CCP3 CCPxM = 1110/1111 makes PxA active low; PxM other than 00 (half-
+//!   and full-bridge) is not modelled (a note), nor capture and compare.
+//! * Timer: CCPTMRS0 C1TSEL (1:0), C2TSEL (4:3), C3TSEL (7:6), CCPTMRS1 C4TSEL (1:0), C5TSEL (3:2): 00 = Timer1 / Timer2 (PWM),
+//!   01 = Timer3 / Timer4, 10 = Timer5 / Timer6, 11 reserved (Registers 14-3, 14-4 p.201).
+//! * Pins are fixed (Tables 2, 3 p.6-8): CCP1 RC2; CCP2 RC1 or RB3 by Config CCP2MX; CCP3 RB5 or (28 pins) RC6 / (40/44 pins) RE0 by
+//!   CCP3MX; CCP4 RB0 / RD1; CCP5 RA4 / RE2 (`Periph::route_k22_ccp`).
+
 use super::{addr, Flag};
 use crate::mem::DataMem;
 use devdesc::Device;
@@ -46,6 +56,9 @@ pub struct Ccp {
     pub scan: u64,
     /// Rising edges counted by the 1:4 / 1:16 capture prescaler.
     pub edges: u8,
+    /// The PIC18(L)F2x/4xK22 CCP (see the module comment); `ecc` for the ECCP modules CCP1..CCP3.
+    pub k22: bool,
+    pub ecc: bool,
 }
 
 impl Ccp {
@@ -61,11 +74,37 @@ impl Ccp {
             sig: 4 + n,
             scan: 0,
             edges: 0,
+            k22: false,
+            ecc: false,
+        })
+    }
+
+    /// CCPn of the PIC18(L)F2x/4xK22 (no CCPxCAP, no PPS).
+    pub fn find_k22(dev: &Device, n: u8) -> Option<Ccp> {
+        let con = addr(dev, &format!("CCP{n}CON"))?;
+        Some(Ccp {
+            n,
+            con,
+            cap: con,
+            rl: addr(dev, &format!("CCPR{n}L"))?,
+            rh: addr(dev, &format!("CCPR{n}H"))?,
+            pps: None,
+            flag: Flag::find(dev, &format!("CCP{n}IF"))?,
+            sig: 4 + n,
+            scan: 0,
+            edges: 0,
+            k22: true,
+            ecc: n <= 3,
         })
     }
 
     pub fn en(&self, m: &DataMem) -> bool {
-        m.mem[self.con] & 0x80 != 0
+        if self.k22 { m.mem[self.con] & 15 != 0 } else { m.mem[self.con] & 0x80 != 0 }
+    }
+
+    /// The PWM output is active low (an ECCP of the K22 with CCPxM = 111x, PxA active low).
+    pub fn inverted(&self, m: &DataMem) -> bool {
+        self.k22 && self.ecc && m.mem[self.con] & 14 == 14
     }
 
     pub fn mode(&self, m: &DataMem) -> u8 {
@@ -78,15 +117,39 @@ impl Ccp {
 
     /// The 10-bit PWM duty value after the FMT alignment.
     pub fn duty(&self, m: &DataMem) -> u32 {
+        if self.k22 {
+            return u32::from(m.mem[self.rl]) << 2 | u32::from(m.mem[self.con] >> 4 & 3);
+        }
         let (h, l) = (u32::from(m.mem[self.rh]), u32::from(m.mem[self.rl]));
         if m.mem[self.con] & 0x10 != 0 { h << 2 | l >> 6 } else { (h & 3) << 8 | l }
     }
 }
 
+/// Where the timer selection of the CCPs is: the Q10's CCPTMRS (two bits per CCP, 01 = Timer1/Timer2), or the K22's CCPTMRS0 and
+/// CCPTMRS1 (see the module comment).
+#[derive(Clone, Copy)]
+pub enum TmrSel {
+    Q10(Option<usize>),
+    K22(usize, usize),
+}
+
 /// Timer a CCP uses, from CCPTMRS (two bits per CCP, `pwm` selects the PWM timer): the data sheet number of the
 /// timer (1, 3, 5 for capture/compare, 2, 4, 6 for PWM), or 0 for the reserved code.
-pub fn timer_of(tmrs: Option<usize>, m: &DataMem, n: u8, pwm: bool) -> u8 {
-    let sel = tmrs.map_or(1, |a| m.mem[a] >> (2 * (n - 1)) & 3);
+pub fn timer_of(tmrs: TmrSel, m: &DataMem, n: u8, pwm: bool) -> u8 {
+    let sel = match tmrs {
+        TmrSel::Q10(t) => t.map_or(1, |a| m.mem[a] >> (2 * (n - 1)) & 3),
+        TmrSel::K22(t0, t1) => {
+            // 00 = Timer1/2 here; shifted to the Q10 codes (01 = Timer1/2) for the table below.
+            let v = match n {
+                1 => m.mem[t0] & 3,
+                2 => m.mem[t0] >> 3 & 3,
+                3 => m.mem[t0] >> 6 & 3,
+                4 => m.mem[t1] & 3,
+                _ => m.mem[t1] >> 2 & 3,
+            };
+            if v == 3 { 0 } else { v + 1 }
+        }
+    };
     match sel {
         1 => 1 + u8::from(pwm),
         2 => 3 + u8::from(pwm),

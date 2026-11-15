@@ -1,0 +1,36 @@
+{
+ "mask": [
+  {
+   "addr": 4034,
+   "desc": 127,
+   "name": "ADCON0",
+   "sheet": 63
+  },
+  {
+   "addr": 4007,
+   "desc": 255,
+   "name": "EECON2",
+   "sheet": 3
+  }
+ ],
+ "por": [
+  {
+   "addr": 4044,
+   "desc": "00000x00",
+   "name": "T1GCON",
+   "sheet": "0000xx00"
+  },
+  {
+   "addr": 4034,
+   "desc": "-0000000",
+   "name": "ADCON0",
+   "sheet": "--000000"
+  },
+  {
+   "addr": 4007,
+   "desc": "--------",
+   "name": "EECON2",
+   "sheet": "------00"
+  }
+ ]
+}

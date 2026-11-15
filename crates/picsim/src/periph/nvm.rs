@@ -30,6 +30,20 @@
 //! * Times, typical (39.3.5 p.697): word write 50 us (MEM37), sector write 6 ms (MEM35), sector erase 10 ms (MEM36).
 //!   `[A37]` the sector read takes no time (the data sheet gives none). Times are converted at Fosc as in A30.
 
+//! PIC18(L)F2x/4xK22 (DS40001412H ch.6 and 7, p.90-103; `Nvm::find_k22`), an older controller with the same interface:
+//! * EECON1 = EEPGD (7) | CFGS (6) | FREE (4) | WRERR (3) | WREN (2) | WR (1) | RD (0); WR and RD can only be set (Register 7-1 p.100).
+//!   EECON2 is not a register and reads 0; the unlock is 55h, AAh to EECON2, then WR (7.4, Example 7-2 p.101). WR is inhibited
+//!   unless WREN was already set: both cannot be set by one instruction (7.4). `[A142]` the unlock is tracked as for the Q10
+//!   (`[A31]`): AAh right after 55h, and the next EECON1 write.
+//! * Data EEPROM (EEPGD = CFGS = 0): RD loads EEDATA from EEADRH:EEADR at once (7.3 p.101); a write erases and programs the byte
+//!   while the CPU runs, then WR clears and EEIF (PIR2 bit 4) is set (7.4). `[A143]` it takes TDEW typical, 3 ms (D175 p.430).
+//!   The address wraps at the array size (EEADRH has 2 bits on the 1 KB parts, none on the 256-byte ones).
+//! * Program flash (EEPGD = 1, CFGS = 0): TBLPTR<21:6> picks a 64-byte block. FREE = 1 erases it (FFh), FREE then clears; FREE = 0
+//!   writes the 64 holding registers into it and puts them back to FFh, a holding byte of FFh leaving its flash byte as it is
+//!   (6.5, 6.6 and note p.95-96). The CPU stalls, `[A144]` for TIW typical, 2 ms (D183 p.430; 6.5.1 step 7 "about 2 ms"), and
+//!   EEIF is set (6.2.1 note p.91). TBLWT writes the holding register TBLPTR<5:0> (Figure 6-2, 6.3.2 p.93), see `Pic18::tblwt`.
+//! * Not modelled: CFGS = 1 (configuration writes, a note), write protection, WRERR after a Reset during a write.
+
 use super::flash::Flash as Pfm;
 use super::{Flag, addr};
 use crate::mem::DataMem;
@@ -68,7 +82,23 @@ pub struct Nvm {
     op: Option<(u64, usize, u8)>,
     /// Fosc in MHz, set by `Periph` before each write (operation times are taken at their start).
     pub fosc_mhz: f64,
+    /// The PIC18(L)F2x/4xK22 controller: its 64 holding registers and the program memory size (see the module comment).
+    k22: Option<K22>,
 }
+
+#[derive(Clone)]
+struct K22 {
+    hold: [u8; 64],
+    tblptr: usize,
+    prog_size: usize,
+}
+
+const K_RD: u8 = 0x01;
+const K_WR: u8 = 0x02;
+const K_WREN: u8 = 0x04;
+const K_FREE: u8 = 0x10;
+const K_CFGS: u8 = 0x40;
+const K_EEPGD: u8 = 0x80;
 
 impl Nvm {
     /// Something is under way that `sync` must follow cycle by cycle (`Periph::tick` does not skip a sync meanwhile).
@@ -76,7 +106,105 @@ impl Nvm {
         self.op.is_some()
     }
 
+    /// The EECON1/EECON2 controller of the PIC18(L)F2x/4xK22, or None.
+    pub fn find_k22(dev: &Device) -> Option<Nvm> {
+        let r = &dev.memory.eeprom;
+        let (con1, con2, adrl, dat) = (addr(dev, "EECON1")?, addr(dev, "EECON2")?, addr(dev, "EEADR")?, addr(dev, "EEDATA")?);
+        let adrh = addr(dev, "EEADRH").unwrap_or(usize::MAX);
+        let tblptr = addr(dev, "TBLPTRL")?;
+        Some(Nvm {
+            adr: [adrl, adrh, usize::MAX],
+            datl: dat,
+            con0: con1,
+            con1,
+            con2,
+            flag: Flag::find(dev, "EEIF")?,
+            start: r.start,
+            eeprom: vec![0xFF; r.size as usize],
+            first: None,
+            armed: None,
+            pfm: None,
+            datah: dat,
+            op: None,
+            fosc_mhz: 64.0,
+            k22: Some(K22 { hold: [0xFF; 64], tblptr, prog_size: dev.memory.program.size as usize }),
+        })
+    }
+
+    /// TBLWT: the holding register TBLPTR<5:0> on the K22. False on a part whose holding registers are RAM.
+    pub fn latch(&mut self, p: u32, v: u8) -> bool {
+        match &mut self.k22 {
+            Some(k) => {
+                k.hold[(p & 63) as usize] = v;
+                true
+            }
+            None => false,
+        }
+    }
+
+    fn k22_write(&mut self, k: u8, v: u8, now: u64, m: &mut DataMem, prog: &mut [u8], notes: &mut BTreeSet<String>) -> u64 {
+        if k == CON2 {
+            let (first, armed) = match (self.first, v) {
+                (_, 0x55) => (Some(v), None),
+                (Some(0x55), 0xAA) => (None, Some(K_WR)),
+                _ => (None, None),
+            };
+            self.first = first;
+            self.armed = armed;
+            return 0;
+        }
+        let armed = self.armed.take().is_some();
+        self.first = None;
+        let old = m.mem[self.con1];
+        // WR and RD cannot be cleared by software; RD completes at once.
+        m.mem[self.con1] = v & !(K_RD | K_WR) | old & K_WR;
+        let ee = v & (K_EEPGD | K_CFGS) == 0;
+        let size = self.eeprom.len().max(1);
+        let hi = if self.adr[1] == usize::MAX { 0 } else { usize::from(m.mem[self.adr[1]]) };
+        let off = (hi << 8 | usize::from(m.mem[self.adr[0]])) % size;
+        if v & K_RD != 0 && ee && self.op.is_none() {
+            m.mem[self.datl] = self.eeprom[off];
+        }
+        if v & K_WR == 0 || !armed || old & K_WREN == 0 || self.op.is_some() {
+            return 0;
+        }
+        if v & K_CFGS != 0 {
+            notes.insert("EECON1 writes to the configuration registers (CFGS = 1) are not modelled; the operation is ignored".into());
+            return 0;
+        }
+        if ee {
+            self.op = Some((now + self.us(3_000), off, m.mem[self.datl]));
+            m.mem[self.con1] |= K_WR;
+            return 0;
+        }
+        let k = self.k22.as_mut().unwrap();
+        let t = k.tblptr;
+        let a = (usize::from(m.mem[t]) | usize::from(m.mem[t + 1]) << 8 | usize::from(m.mem[t + 2] & 0x3F) << 16) & !63;
+        if a + 64 > k.prog_size {
+            notes.insert("a program flash erase or write outside the program memory (User ID or configuration space) is not modelled; ignored".into());
+            return 0;
+        }
+        if v & K_FREE != 0 {
+            prog[a..a + 64].fill(0xFF);
+            m.mem[self.con1] &= !K_FREE;
+        } else {
+            for i in 0..64 {
+                let w = k.hold[i];
+                if w & !prog[a + i] != 0 {
+                    notes.insert("a flash write needs bits to go from 0 to 1 without an erase; the model keeps them 0 (AND)".into());
+                }
+                prog[a + i] &= w;
+            }
+            k.hold = [0xFF; 64];
+        }
+        self.flag.set(m);
+        self.us(2_000)
+    }
+
     pub fn find(dev: &Device) -> Option<Nvm> {
+        if dev.find_sfr("EECON1").is_some() && dev.find_sfr("NVMCON1").is_none() {
+            return Self::find_k22(dev);
+        }
         let r = &dev.memory.eeprom;
         Some(Nvm {
             adr: [addr(dev, "NVMADRL")?, addr(dev, "NVMADRH")?, addr(dev, "NVMADRU")?],
@@ -93,6 +221,7 @@ impl Nvm {
             datah: addr(dev, "NVMDATH")?,
             op: None,
             fosc_mhz: 64.0,
+            k22: None,
         })
     }
 
@@ -110,7 +239,7 @@ impl Nvm {
         let (e, off, v) = self.op.filter(|o| o.0 <= now)?;
         self.op = None;
         self.eeprom[off] = v;
-        m.mem[self.con1] &= !WR;
+        m.mem[self.con1] &= if self.k22.is_some() { !K_WR } else { !WR };
         self.flag.set(m);
         Some(e)
     }
@@ -131,6 +260,9 @@ impl Nvm {
 
     /// A write to NVMCON1 or NVMCON2. Returns the cycles the CPU stalls (a program flash operation).
     pub fn write(&mut self, k: u8, v: u8, now: u64, m: &mut DataMem, prog: &mut [u8], notes: &mut BTreeSet<String>) -> u64 {
+        if self.k22.is_some() {
+            return self.k22_write(k, v, now, m, prog, notes);
+        }
         if k == CON2 {
             let (first, armed) = match (self.first, v) {
                 (_, 0x55 | 0xCC | 0xDD | 0xBB) => (Some(v), None),

@@ -9,12 +9,18 @@ PDFDIR=${PDFDIR:-$HOME/Documents/Microchip/PIC}
 w=$(mktemp -d); trap 'rm -rf "$w"' EXIT
 rc=0
 # part:data-sheet file pattern
-for pair in "18F27Q10:*DS40002043.pdf" "18F16Q41:*DS40002214.pdf"; do
-    part=${pair%%:*}; pat=${pair#*:}
+# part:data-sheet file pattern[:first-last page of the register file summary, for the older data sheets read by audit_summary.py]
+for pair in "18F27Q10:*DS40002043.pdf" "18F16Q41:*DS40002214.pdf" "18F25K22:*40001412*.pdf:79-83" "18F45K22:*40001412*.pdf:79-83"; do
+    part=${pair%%:*}; rest=${pair#*:}; pat=${rest%%:*}; pages=; [ "$rest" != "$pat" ] && pages=${rest#*:}
     pdf=$(find "$PDFDIR" -name "$pat" 2>/dev/null | head -1)
     [ -n "$pdf" ] || { echo "skip $part: no data sheet matching $pat in $PDFDIR"; continue; }
-    pdftotext -layout "$pdf" "$w/$part.txt"
-    python3 tools/audit/audit_sfr.py "$w/$part.txt" "devices/$part.toml" "$w/$part.json" >/dev/null
+    if [ -n "$pages" ]; then
+        pdftotext -layout -f "${pages%-*}" -l "${pages#*-}" "$pdf" "$w/$part.txt"
+        python3 tools/audit/audit_summary.py "$w/$part.txt" "devices/$part.toml" "$w/$part.json" >/dev/null
+    else
+        pdftotext -layout "$pdf" "$w/$part.txt"
+        python3 tools/audit/audit_sfr.py "$w/$part.txt" "devices/$part.toml" "$w/$part.json" >/dev/null
+    fi
     python3 - "$w/$part.json.diff" "tools/audit/baseline/$part.json" "${1:-}" <<'PY' || rc=1
 import json,sys
 new=json.load(open(sys.argv[1])); path=sys.argv[2]

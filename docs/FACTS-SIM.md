@@ -695,6 +695,64 @@ PIC16F183xx: `Basic_Compiler/scripts/exec-test.py --engine both --device 16F1834
 * `[A139]` **Interrupts** (29.7 p.370): CLB1IFn (PIR7) is set by a rising edge of the BLE the netlist names for it; PIE7 and the usual interrupt rules apply. DS40002686B says "if the CLB Interrupt Output is configured" (the Synthesizer): the netlist's `irq` stands for that.
 * `[A140]` **Not modelled:** a pin the CLB drives does not set IOCxF/INTF (the model sees only stimulus edges there, as for CCP outputs), and a pin level asked for at a past cycle shows the CLB output as of the last sync; the CLB as the clock, gate, capture or trigger source of Timer0/1/2/3/4, CCP1/2 and the ADC (Table 29-2 p.369), and the other way round for all but the sources in `[A134]`; the auto-configuration at start-up (CLBSU, CPUHALT, CLBSA configuration bits, 29.9); the scanner loading of the bitstream; the CLB Synthesizer's debug outputs beyond CLBDEBUG0. Tests: `tests/pic16_clb.rs` (16F13245, 16F13145).
 
+## PIC18(L)F2x/4xK22 (DS40001412H; `pic18.rs`, `periph.rs`, `periph/adc.rs`, `periph/nvm.rs`, `periph/ccp.rs`, `periph/uart.rs`)
+
+The sixteen parts PIC18(L)F23/24/25/26/43/44/45/46K22: an older PIC18 with no PPS, fixed peripheral pins and classic peripheral registers. The
+core, Access Bank (Access RAM 000h-05Fh, SFRs F60h-FFFh; F38h-F5Fh are banked SFRs, Figs. 5-5 to 5-8 p.72-75), 31-level stack and
+vectors 0008h/0018h are those of the Q10. Tests: `tests/exec_k22` of the basil repository (basil's `k22_programs_in_simulator`).
+
+* Interrupts: IPEN is RCON bit 7 (Register 4-1 p.56), not INTCON bit 5, which is TMR0IE here (Register 9-1 p.109). Besides the PIRn/PIEn/IPRn
+  groups there are core sources: TMR0 (INTCON 2/5, priority INTCON2 bit 2), INT0 (INTCON 1/4, always high), RB (INTCON 0/3, INTCON2 bit 0),
+  INT1 and INT2 (INTCON3 0/3 and 1/4, priorities INTCON3 6/7) (Registers 9-1 to 9-3 p.109-111). Without priorities GIE alone enables the
+  core sources and PEIE gates the peripheral ones (9.1 p.106); entry and RETFIE are the Q10's (9.3 p.106). `Pic18::core_irq`, `rcon_ipen`.
+* XINST: the setting named ON is 1 here (CONFIG4L bit 6, Table 24-1 p.344), 0 on the Q parts; the core looks the value up by name.
+* Timer0 (`Timer0::classic`): one T0CON = TMR0ON | T08BIT | T0CS | T0SE | PSA | T0PS<2:0>; 8-bit mode counts to FFh (no period register),
+  16-bit mode buffers TMR0H as on the Q10, prescaler 1:2..1:256 or none, no postscaler or T0OUT, FOSC/4 only (T0CS = 1, the RA4 pin, is
+  not modelled, a note), stopped in Sleep (Register 11-1 p.154, 11.2-11.5 p.155-156). TMR0IF is in INTCON (`Flag::find` looks there after PIRx).
+* Timer1/3/5 (`Timer1::classic`): no TxCLK or TxGATE; the clock is TMRxCS<1:0> of TxCON (00 FOSC/4, 01 FOSC, 10 the TxCKI pin or, with
+  TxSOSCEN, SOSC), the gate source TxGSS<1:0> of TxGCON (00 the TxG pin; 01 Timer2/4/6 match and 10/11 the comparators are not modelled)
+  (Registers 12-1, 12-2 p.166-167, Table 12-2 p.158). Timer1's pins are fixed, T1CKI = RC0 and T1G = RB5 (Tables 2, 3 p.6-7); the model
+  names a fixed pin as `FIXED_PIN + PPS code` where a PPS register would be. Timer3/5 get no pin (their pins move with T3CMX).
+* Timer2/4/6 (`Timer2::classic`): TMRx/PRx, TxCON = TxOUTPS<3:0> (6:3) | TMRxON (2) | TxCKPS<1:0> (1, 4, 16), FOSC/4 only (Register 13-1 p.171).
+* EUSART1/2: the Q10 model; the baud registers are SPBRGn/SPBRGHn (the pack's aliases give the other names) (Registers 16-1 to 16-3).
+* MSSP1/2: the Q10 model unchanged (the K22's SSPxSTAT/CON1/CON2/CON3/ADD/BUF have the same bits, Registers 15-2 to 15-7).
+* ADC (`Adc::k22`): the simple ADC with ADCON2 = ADFM | ACQT<2:0> | ADCS<2:0> and CHS<4:0> an AN number; `[A141]` (Figures 17-3, 17-4 p.292):
+  GO, ACQT TAD of acquisition (the input sampled at its end), 11 TAD and one cycle; with ACQT = 0, 10 TAD + 2 TCY. FRC is not modelled.
+* FVR: VREFCON0 is the pack's FVRCON alias and has FVREN/FVRST at the Q10's bits 7/6 (Register 21-1 p.332), so the FVR model applies.
+* Data EEPROM and program flash (`Nvm::find_k22`, `Pic18::tblwt`): EECON1/EECON2, EEADR(H), EEDATA; 55h, AAh, WR with WREN set before; a
+  data EEPROM write `[A143]` 3 ms (TDEW D175 p.430) with the CPU running, then WR clears and EEIF is set; flash: TBLPTR<21:6> picks a 64-byte
+  block, FREE erases it, otherwise the 64 holding registers (TBLWT, TBLPTR<5:0>) are written and go back to FFh, the CPU stalled `[A144]`
+  2 ms (TIW D183 p.430) (6.5, 6.6 p.95-97, 7.3, 7.4 p.101). `[A142]` the unlock is tracked as `[A31]`. CFGS = 1 is not modelled (a note).
+* CCP1..CCP5 in PWM mode (`Ccp::k22`): no EN bit (CCPxM = 0 is off), duty = CCPRxL:DCxB, CCPxM = 111x makes P1A..P3A active low on the
+  ECCPs, timer from CCPTMRS0/1 (00 = Timer2) (Registers 14-1 to 14-4 p.198-201); the pins are fixed and two move with CONFIG3H
+  (`Periph::route_k22_ccp`: CCP1 RC2; CCP2 RC1/RB3 by CCP2MX; CCP3 RB5 or RC6/RE0 by CCP3MX; CCP4 RB0/RD1; CCP5 RA4/RE2, Tables 2, 3 p.6-8).
+  Half- and full-bridge outputs, capture and compare are not modelled (a note).
+* Oscillator status (`Pic18::osc_status`): OSCCON.OSTS = 1 with SCS = 00, OSCCON.HFIOFS = 1 while the internal block clocks the part,
+  OSCCON2.PLLRDY = 1 when the 4x PLL runs (SCS = 00 and PLLEN with FOSC 1000-1111, or PLLCFG with FOSC 0000-0111) (Registers 2-1, 2-2
+  p.30-31, Table 2-1 p.28). `[A145]` the oscillators are stable at once (no start-up or PLL lock time). `[A146]` the PLL follows Table 2-1:
+  FOSC 0000-0111 by PLLCFG only, 1000-1111 by PLLEN only; 2.8.1 p.37 says PLLEN also works "for any of the external oscillator modes",
+  which the table does not show for 0000-0111 (to be settled on a part).
+* Device files: the PIC18F-K_DFP `impl` masks are wrong for these parts (PIR3, PIE3, WPUB 0; CCP3CON .. CTMUICON 07h), so basil's devgen
+  takes the implemented mask from the `access` letters for this pack; `tools/audit/audit_summary.py` checks them against Table 5-2
+  (p.79-83), and the known differences are the baselines `tools/audit/baseline/18F25K22.json`, `18F45K22.json` (ADCON0 bit 6 is CHS4 per
+  Register 17-1; EECON2 is written by the unlock; TRISE of the 28-pin parts has WPUE3 only; T1GCON's GVAL is bit 2 per Register 12-2).
+  Corrected by hand against the data sheet: OSCCON reset `0011q000` (IRCF = 011, 1 MHz, Register 2-1 p.30; the pack gives `0110q000`) and
+  TBLPTRU reset `--000000` (Table 5-2).
+
+### K22 against MDB (`exec-test.py --engine both`, MPLAB X 6.35)
+
+* Equal cycle counts: Timer0/1/2 (`lib_timer`), `isr_save`, `events_isr`, `gosub_isr`, `bit_packed_isr`, `lib_pinio`; the device-independent
+  programs of basil's `tests/exec` (as on the Q10). `isr_single` differs by 331 cycles (the D-SIM-1 kind: MDB drops prescaler counts around
+  TMR0 accesses) and `isr_dual` by 1 (D-SIM-2). The EEPROM write times differ as D-SIM-3 says.
+* D-SIM-12: an ADC conversion takes one TAD more in MDB than Figures 17-3/17-4 give: GO to GO clear, polled, with FOSC/64 and ACQT 8 TAD is 305
+  cycles in the sim and 320 in MDB, with FOSC/16 and ACQT 20 TAD 125 and 128 (the poll loop takes 3 cycles a pass, so short conversions do
+  not separate). The model follows the data sheet.
+* D-SIM-13: after a program flash write MDB leaves the 64 holding registers 00h, so a later write of fewer than 64 bytes programs the rest of the
+  block to 00h; the data sheet says they go back to FFh after every write (6.6 note p.96), which the model does. basil's `flashwrite` loads
+  all 64 on the K22, so it works either way.
+* D-SIM-14: MDB does not model OSCCON.OSTS, OSCCON.HFIOFS or OSCCON2.PLLRDY: they read back as written (OSCCON reads 70h after 70h is
+  written with FOSC = INTIO67). Programs that wait for them (basil's `intosc`) run in the sim only (`' engine: sim`).
+
 ## XC8 debug information (`debuginfo.rs`; tests `tests/xc8_*.rs`)
 
 * `[A130]` XC8's software stack (`-mstack=reentrant`, and the routines `hybrid` puts there; `DebugInfo::shape`, `DebugInfo::frames`, `Pic18::entry_sp`, `Pic16::entry_sp`; test `tests/xc8_stack.rs`). Seen in XC8 4.00 output for the PIC18F27Q10 and PIC16F17146 (`-Wa,-a` listings), not in a Microchip document: a stack variable has `DW_AT_location` = `DW_OP_fbreg k`, and its routine `DW_AT_frame_base` = `DW_OP_addr` of FSR1L (FE1h, 06h); the variable is at FSR1 + k while the body runs. FSR1 points just past the frame; the stack grows upward. The prologue, at the start of the routine, adds the size of the locals (PIC18: `MOVF POSTINC1,F` once per byte, or `MOVLW lo; ADDWF FSR1L,F; MOVLW hi; ADDWFC FSR1H,F`; PIC16: `ADDFSR 1,k`, several for more than 31 bytes). The caller pushes the stack parameters below the frame (`MOVWF POSTINC1`) and the callee's epilogue takes off the locals and those parameters together. A call can be made while the caller has already pushed arguments of an outer call (`mix(loc[0], leaf(loc[1], 5), loc[2])` pushes `loc[0]` before calling `leaf`), so a caller's frame cannot be found from its callee's. The cores therefore note FSR1 whenever a return address is pushed (CALL, RCALL, CALLW, interrupt entry), by return-stack level, and again when the PC reaches the first instruction of `main` (entered with GOTO) or of a routine whose frame base is FSR1L, for the current level (`DebugInfo::entry_points`, `[A132]`); a call's frame base is that value plus the routine's prologue size, given only to a routine whose `DW_AT_frame_base` names the part's FSR1L (with `hybrid`, the routines on the compiled stack have none). An interrupt routine saves FSR1 and loads a separate interrupt stack (PIC18 `LFSR 1,___inthi_sp`, PIC16 `___int_sp` into FSR1; its own locals are compiled, without `DW_AT_frame_base`); the cores mark a return address an interrupt pushed (`entry_irq`), and the routine below is the one containing that address (not the instruction before it, as for a CALL). A routine's parameters may still have fixed addresses (`btemp` registers) when XC8 does not need them on the stack. XC8 stops a PIC18 frame at 128 bytes (error 1465). Assumption: the prologue is the run of FSR1 increments at the start of the routine. On a PIC16, FSR1 is a linear address (2000h + n is byte 20h + n mod 80 of bank n / 80, up to 2FEFh: DS40002343F 9.6.2 p.57, Figure 9-20; `pic16::linear_to_data`), and `DebugInfo::data_view` appends that view to data memory.
