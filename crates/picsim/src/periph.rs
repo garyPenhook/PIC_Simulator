@@ -329,6 +329,39 @@ const NVM_LAST: u8 = NVM0 + nvm::CON2;
 const NVMQ0: u8 = 242;
 const NVMQ_LAST: u8 = NVMQ0 + nvmq::LOCK;
 
+/// A repeatable request/reply device attached to a UART's completed TX characters.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UartReply {
+    request: Vec<u8>,
+    reply: Vec<u8>,
+    delay: u64,
+    bit: Option<u64>,
+    gap: u64,
+    seen: VecDeque<u8>,
+}
+
+impl UartReply {
+    pub fn new(request: Vec<u8>, reply: Vec<u8>, delay: u64, bit: Option<u64>, gap: u64) -> Self {
+        Self { request, reply, delay, bit, gap, seen: VecDeque::new() }
+    }
+
+    pub(crate) fn receive(&mut self, byte: u8, end: u64) -> Option<RxStream> {
+        self.seen.push_back(byte);
+        if self.seen.len() > self.request.len() { self.seen.pop_front(); }
+        if self.request.is_empty() || !self.seen.iter().eq(self.request.iter()) { return None; }
+        Some(RxStream { at: end.saturating_add(self.delay), words: self.reply.iter().copied().map(u16::from).collect(), bit: self.bit, gap: self.gap, nine: false, bad_stop: false })
+    }
+}
+
+pub(crate) fn uart_replies(rules: &mut [UartReply], byte: u8, end: u64, queue: &mut VecDeque<RxStream>) {
+    for rule in rules {
+        if let Some(stream) = rule.receive(byte, end) {
+            let i = queue.partition_point(|s| s.at <= stream.at);
+            queue.insert(i, stream);
+        }
+    }
+}
+
 /// Characters sent to a receiver: the first start bit falls at cycle `at`, then back to back plus `gap` idle cycles.
 /// `bit` is the sender's bit time in instruction cycles; without it the receiver's own rate is used.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1052,6 +1085,13 @@ impl Periph {
     /// Whether this part has a modelled UART or EUSART receiver.
     pub fn has_uart(&self, num: u8) -> bool {
         self.quarts.iter().any(|u| u.num == num) || self.uarts.iter().any(|u| u.num == num)
+    }
+
+    /// Attach a reactive request/reply rule; false when this UART is absent.
+    pub fn uart_reply(&mut self, num: u8, rule: UartReply) -> bool {
+        if let Some(u) = self.uarts.iter_mut().find(|u| u.num == num) { u.replies.push(rule); return true; }
+        if let Some(u) = self.quarts.iter_mut().find(|u| u.num == num) { u.replies.push(rule); return true; }
+        false
     }
 
     /// Queue characters for the receiver of EUSART `num` (1-based). False when the part has no such EUSART.
@@ -3039,6 +3079,14 @@ impl Periph {
         }
         segs.push((start, to, cur));
         (p.ff, p.run, p.ggo, p.b) = (ff, run, ggo, Some(b));
+        true
+    }
+
+    /// Attach a periodic input clock to a port.
+    pub fn clock_feed(&mut self, clock: crate::drive::Clock) -> bool {
+        let Some(i) = self.ports.iter().position(|p| p.letter == clock.pin.0) else { return false; };
+        self.drive.clock(i, clock);
+        self.due = 0;
         true
     }
 

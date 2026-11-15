@@ -65,6 +65,32 @@ pub struct I2cClient {
     pub tag: u8,
     /// The part is not wired as the code expects: it does not answer.
     pub absent: bool,
+    /// Register memory mode: first write byte selects an 8-bit pointer, later bytes write sequentially.
+    pub memory: Option<Box<[u8; 256]>>,
+    pub readonly: bool,
+    pub pointer: u8,
+    pub pointer_pending: bool,
+}
+
+impl I2cClient {
+    pub fn addressed(&mut self, read: bool) { self.pointer_pending = !read; }
+
+    pub fn write_byte(&mut self, byte: u8) {
+        let Some(memory) = &mut self.memory else { return; };
+        if self.pointer_pending { self.pointer = byte; self.pointer_pending = false; }
+        else {
+            if !self.readonly { memory[usize::from(self.pointer)] = byte; }
+            self.pointer = self.pointer.wrapping_add(1);
+        }
+    }
+
+    pub fn read_byte(&mut self) -> u8 {
+        if let Some(memory) = &self.memory {
+            let byte = memory[usize::from(self.pointer)];
+            self.pointer = self.pointer.wrapping_add(1);
+            byte
+        } else { self.data.pop_front().unwrap_or(self.fill) }
+    }
 }
 
 /// What the host put on the I2C bus. `ack` is the receiver's answer: the client for an address or a byte written, the host for a byte read.
@@ -226,7 +252,7 @@ impl Mssp {
                     let b = match self.sel {
                         Some((i, true)) => {
                             let c = &mut self.i2c[i];
-                            c.data.pop_front().unwrap_or(c.fill)
+                            c.read_byte()
                         }
                         _ => 0xFF,
                     };
@@ -269,11 +295,13 @@ impl Mssp {
         if self.expect_addr {
             self.expect_addr = false;
             self.sel = self.i2c.iter().position(|c| c.address == b >> 1 && !c.absent).map(|i| (i, b & 1 != 0));
+            if let Some((i, read)) = self.sel { self.i2c[i].addressed(read); }
             let ack = self.sel.is_some();
             log.push((self.num, t, I2cEv::Addr(b, ack)));
             ack
         } else {
             let ack = matches!(self.sel, Some((_, false)));
+            if let Some((i, false)) = self.sel { self.i2c[i].write_byte(b); }
             log.push((self.num, t, I2cEv::Write(b, ack)));
             ack
         }

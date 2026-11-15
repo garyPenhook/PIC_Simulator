@@ -1,4 +1,7 @@
 //! Stimulus file: what the outside world does to the part over time (TOML).
+//! Time fields accept cycle integers or strings with ns/us/ms/s/cycles; physical units require explicit `fosc_mhz`.
+//! `[[clock]]` supplies periodic pin edges, `[[uart_device]]` repeatable request/reply rules,
+//! and `[[i2c]] mode = "memory"` a device with 256 registers and a wrapping pointer (see docs/MANUAL.md).
 //!
 //! ```toml
 //! [[uart]]            # characters sent to the receiver of an EUSART
@@ -86,6 +89,10 @@ pub const MAX_CYCLES: u64 = 1 << 32;
 #[derive(Debug, Default, PartialEq)]
 pub struct Stimulus {
     pub uart: Vec<(u8, RxStream)>,
+    /// Periodic input pins, evaluated lazily by the pin driver.
+    pub clocks: Vec<crate::drive::Clock>,
+    /// (UART number, repeatable request/reply rule).
+    pub uart_devices: Vec<(u8, crate::periph::UartReply)>,
     /// (SPI number, client)
     pub spi: Vec<(u8, SpiClient)>,
     /// (MSSP number, client)
@@ -110,13 +117,58 @@ pub struct Stimulus {
 
 impl Stimulus {
     pub fn parse(text: &str) -> Result<Stimulus, String> {
-        let doc: toml::Table = text.parse().map_err(|e: toml::de::Error| e.to_string())?;
+        let mut doc: toml::Table = text.parse().map_err(|e: toml::de::Error| e.to_string())?;
+        normalize_times(&mut doc)?;
         let mut st = Stimulus::default();
         // [[bounce]] changes are kept apart and put before the [[pin]]/[[port]] ones at the end, whatever order the keys
         // come in: at a cycle both name, the [[pin]]/[[port]] level wins (`Drive::push` keeps the order changes were added in).
         let mut bounce = Vec::new();
         let mut trains: Vec<(crate::periph::Pin, u64, u64)> = Vec::new();
         for (k, v) in &doc {
+            if k == "clock" {
+                for e in v.as_array().ok_or("clock must be [[clock]] entries")? {
+                    let t = e.as_table().ok_or("clock entry must be a table")?;
+                    for key in t.keys() {
+                        if !["pin", "at", "period", "high", "until"].contains(&key.as_str()) { return Err(format!("clock: unknown key {key}")); }
+                    }
+                    let pin = t.get("pin").and_then(|v| v.as_str()).and_then(parse_pin).ok_or("clock needs pin (RA0..RH7)")?;
+                    if st.clocks.iter().any(|c| c.pin == pin) { return Err("clock: only one clock per pin is supported".into()); }
+                    let time = |key: &str| -> Result<Option<u64>, String> {
+                        t.get(key).map(|v| v.as_integer().and_then(|v| u64::try_from(v).ok()).filter(|v| *v <= MAX_CYCLES).ok_or(format!("clock.{key} must be 0..{MAX_CYCLES}"))).transpose()
+                    };
+                    let at = time("at")?.unwrap_or(0);
+                    let period = time("period")?.ok_or("clock needs period")?;
+                    let high = time("high")?.unwrap_or(period / 2);
+                    let until = time("until")?;
+                    if high == 0 || high >= period { return Err("clock.high must be at least 1 and less than period".into()); }
+                    if until.is_some_and(|end| end <= at) { return Err("clock.until must be after at".into()); }
+                    st.clocks.push(crate::drive::Clock { pin, at, period, high, until });
+                }
+                continue;
+            }
+            if k == "uart_device" {
+                for e in v.as_array().ok_or("uart_device must be [[uart_device]] entries")? {
+                    let t = e.as_table().ok_or("uart_device entry must be a table")?;
+                    for key in t.keys() {
+                        if !["port", "request", "reply", "delay", "bit", "gap"].contains(&key.as_str()) { return Err(format!("uart_device: unknown key {key}")); }
+                    }
+                    let bytes = |key: &str| -> Result<Vec<u8>, String> {
+                        match t.get(key) {
+                            Some(toml::Value::String(s)) => s.chars().map(|c| u8::try_from(c).map_err(|_| format!("uart_device.{key}: character is not one byte"))).collect(),
+                            Some(toml::Value::Array(a)) => a.iter().map(|v| v.as_integer().and_then(|v| u8::try_from(v).ok()).ok_or(format!("uart_device.{key}: expected bytes 0..255"))).collect(),
+                            _ => Err(format!("uart_device needs {key} (string or byte array)")),
+                        }
+                    };
+                    let time = |key: &str| -> Result<Option<u64>, String> { t.get(key).map(|v| v.as_integer().and_then(|v| u64::try_from(v).ok()).filter(|v| *v <= MAX_CYCLES).ok_or(format!("uart_device.{key}: expected 0..{MAX_CYCLES}"))).transpose() };
+                    let port = t.get("port").map_or(Ok(1), |v| v.as_integer().and_then(|v| u8::try_from(v).ok()).filter(|v| *v > 0).ok_or("bad uart_device.port"))?;
+                    let request = bytes("request")?;
+                    if request.is_empty() { return Err("uart_device.request must not be empty".into()); }
+                    let bit = time("bit")?;
+                    if bit == Some(0) { return Err("uart_device.bit must be positive".into()); }
+                    st.uart_devices.push((port, crate::periph::UartReply::new(request, bytes("reply")?, time("delay")?.unwrap_or(0), bit, time("gap")?.unwrap_or(0))));
+                }
+                continue;
+            }
             if k == "bounce" {
                 for e in v.as_array().ok_or("bounce must be [[bounce]] entries")? {
                     let t = e.as_table().ok_or("bounce entry must be a table")?;
@@ -269,7 +321,7 @@ impl Stimulus {
                 for e in v.as_array().ok_or("i2c must be [[i2c]] entries")? {
                     let t = e.as_table().ok_or("i2c entry must be a table")?;
                     for k in t.keys() {
-                        if !["port", "address", "data", "fill"].contains(&k.as_str()) {
+                        if !["port", "address", "data", "fill", "mode", "readonly"].contains(&k.as_str()) {
                             return Err(format!("i2c: unknown key {k}"));
                         }
                     }
@@ -280,7 +332,7 @@ impl Stimulus {
                         Some(Err(e)) => return Err(e),
                         None => return Err("i2c needs an address".into()),
                     };
-                    let data = match t.get("data") {
+                    let data: std::collections::VecDeque<u8> = match t.get("data") {
                         Some(d) => d.as_array().ok_or("i2c.data must be an array")?.iter().map(byte).collect::<Result<_, _>>()?,
                         None => Default::default(),
                     };
@@ -289,7 +341,21 @@ impl Stimulus {
                     if st.i2c.iter().any(|(p, c)| *p == port && c.address == address) {
                         return Err(format!("i2c: address {address:#x} given twice on port {port}"));
                     }
-                    st.i2c.push((port, I2cClient { address, data, fill, ..Default::default() }));
+                    let readonly = t.get("readonly").map_or(Ok(false), |v| v.as_bool().ok_or("i2c.readonly must be boolean"))?;
+                    let memory = match t.get("mode").map(|v| v.as_str()) {
+                        None | Some(Some("stream")) => {
+                            if t.contains_key("readonly") { return Err("i2c.readonly requires mode = \"memory\"".into()); }
+                            None
+                        }
+                        Some(Some("memory")) => {
+                            if data.len() > 256 { return Err("i2c memory data must contain at most 256 bytes".into()); }
+                            let mut memory = Box::new([fill; 256]);
+                            for (i, b) in data.iter().enumerate() { memory[i] = *b; }
+                            Some(memory)
+                        }
+                        _ => return Err("i2c.mode must be \"stream\" or \"memory\"".into()),
+                    };
+                    st.i2c.push((port, I2cClient { address, data, fill, memory, readonly, ..Default::default() }));
                 }
                 continue;
             }
@@ -407,7 +473,7 @@ impl Stimulus {
             return Err(format!("{}: the part has no CLB", dev.device.name));
         }
         if let Some((n, _)) = other.iter().find(|(_, used)| *used) {
-            return Err(format!("{}: [[{n}]] is not modelled on PIC16 parts yet; only [[uart]], [[adc]], [[pin]]/[[port]], [[led]] and [[oled]] are", dev.device.name));
+            return Err(format!("{}: [[{n}]] is not modelled on PIC16 parts yet; only [[uart]], [[uart_device]], [[adc]], [[pin]]/[[port]], [[bounce]], [[clock]], [[led]] and [[oled]] are", dev.device.name));
         }
         for o in &self.board.oleds {
             if let Bus::I2c(n) = o.bus
@@ -416,8 +482,9 @@ impl Stimulus {
                 return Err(format!("{}: the part has no MSSP{n} in the simulator; an [[oled]] needs bus = \"gpio\" (bit-banged) or an MSSP the part has", dev.device.name));
             }
         }
+        if let Some((port, _)) = self.uart_devices.iter().find(|(port, _)| !cpu.has_uart(*port)) { return Err(format!("{}: no UART{port}", dev.device.name)); }
         let pins = cpu.pins();
-        for p in self.board.leds.iter().map(|l| l.pin).chain(self.board.oleds.iter().flat_map(|o| [o.scl, o.sda])).chain(self.bounce_pins.iter().copied()) {
+        for p in self.board.leds.iter().map(|l| l.pin).chain(self.board.oleds.iter().flat_map(|o| [o.scl, o.sda])).chain(self.bounce_pins.iter().copied()).chain(self.clocks.iter().map(|c| c.pin)) {
             if !pins.contains(&p) {
                 return Err(format!("{}: no pin {} on this part", dev.device.name, crate::periph::pin_name(p)));
             }
@@ -450,6 +517,8 @@ impl Stimulus {
         for (ch, at, v) in self.adc {
             cpu.adc_feed(ch, at, v);
         }
+        for clock in self.clocks { cpu.clock_feed(clock); }
+        for (port, rule) in self.uart_devices { cpu.uart_reply(port, rule); }
         for (port, s) in self.uart {
             cpu.rx_send(port, s);
         }
@@ -460,6 +529,13 @@ impl Stimulus {
     pub fn apply(self, dev: &Device, m: &crate::mem::DataMem, p: &mut crate::periph::Periph) -> Result<(), String> {
         if self.clb.is_some() {
             return Err(format!("{}: the part has no CLB", dev.device.name));
+        }
+        for clock in self.clocks {
+            if !p.has_pin(m, clock.pin) { return Err(format!("{}: no pin {}", dev.device.name, crate::periph::pin_name(clock.pin))); }
+            p.clock_feed(clock);
+        }
+        for (port, rule) in self.uart_devices {
+            if !p.uart_reply(port, rule) { return Err(format!("{}: no UART{port}", dev.device.name)); }
         }
         for (port, s) in self.uart {
             if !p.rx_send(port, s) {
@@ -511,6 +587,54 @@ impl Stimulus {
         }
         Ok(())
     }
+}
+
+/// Resolve physical times once at load time; firmware oscillator changes do not retime a file.
+fn normalize_times(doc: &mut toml::Table) -> Result<(), String> {
+    let fosc = doc.get("fosc_mhz").and_then(|v| v.as_float().or_else(|| v.as_integer().map(|i| i as f64)));
+    for section in ["uart", "uart_device", "pin", "port", "bounce", "clock", "mclr", "adc", "analog"] {
+        let Some(entries) = doc.get_mut(section).and_then(|v| v.as_array_mut()) else { continue; };
+        for entry in entries {
+            let Some(t) = entry.as_table_mut() else { continue; };
+            let keys: &[&str] = match section {
+                "uart" => &["at", "bit", "gap"],
+                "uart_device" => &["delay", "bit", "gap"],
+                "bounce" => &["at", "period"],
+                "clock" => &["at", "period", "high", "until"],
+                _ => &["at"],
+            };
+            for key in keys {
+                if let Some(value) = t.get_mut(*key) {
+                    if let Some(a) = value.as_array_mut() {
+                        for v in a { normalize_time(v, fosc, section, key)?; }
+                    } else { normalize_time(value, fosc, section, key)?; }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn normalize_time(value: &mut toml::Value, fosc: Option<f64>, section: &str, key: &str) -> Result<(), String> {
+    let Some(text) = value.as_str() else { return Ok(()); };
+    let error = || format!("{section}.{key}: expected a non-negative time with ns, us, ms, s or cycles (maximum {MAX_CYCLES} cycles)");
+    let text = text.trim();
+    let (number, scale) = if let Some(n) = text.strip_suffix("cycles") { (n, 1.0) }
+        else {
+            let (n, seconds) = [("ns", 1e-9), ("us", 1e-6), ("ms", 1e-3), ("s", 1.0)].into_iter()
+                .find_map(|(unit, scale)| text.strip_suffix(unit).map(|n| (n, scale))).ok_or_else(error)?;
+            let mhz = fosc.filter(|f| f.is_finite() && *f > 0.0 && *f <= 64.0)
+                .ok_or(format!("{section}.{key}: physical time units require an explicit positive fosc_mhz"))?;
+            (n, seconds * mhz * 1e6 / 4.0)
+        };
+    let number: f64 = number.trim().parse().map_err(|_| error())?;
+    let cycles = number * scale;
+    if !number.is_finite() || number < 0.0 || !cycles.is_finite() || cycles > MAX_CYCLES as f64 { return Err(error()); }
+    // Ignore floating point noise at integer boundaries, then round towards the next instruction cycle.
+    let rounded = cycles.round();
+    let cycles = if (cycles - rounded).abs() <= 4.0 * f64::EPSILON * cycles.abs() { rounded } else { cycles.ceil() };
+    *value = toml::Value::Integer(cycles as i64);
+    Ok(())
 }
 
 /// A stimulus pin change: (port letter, from cycle, pin mask, levels).

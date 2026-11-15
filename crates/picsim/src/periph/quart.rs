@@ -55,6 +55,8 @@ type Rx = (u8, bool, bool);
 #[derive(Clone)]
 pub struct QUart {
     pub num: u8,
+    pub replies: Vec<super::UartReply>,
+    sent: u8,
     con0: usize,
     con1: usize,
     con2: usize,
@@ -96,6 +98,7 @@ impl QUart {
             (a("CON0")?, a("CON1")?, a("CON2")?, a("ERRIR")?, a("ERRIE")?, a("FIFO")?, a("BRGL")?, a("BRGH")?, a("TXB")?, a("RXB")?, a("P1L")?);
         let q = QUart {
             num: n,
+            replies: Vec::new(), sent: 0,
             con0,
             con1,
             con2,
@@ -169,7 +172,8 @@ impl QUart {
     fn start_next(&mut self, m: &DataMem, t: u64, tx: &mut Log<(u8, u64, u8)>) {
         let Some(w) = self.next.take() else { return };
         let mask = if self.mode(m) == 1 { 0x7F } else { 0xFF };
-        tx.push((self.num, t, w as u8 & mask));
+        self.sent = w as u8 & mask;
+        tx.push((self.num, t, self.sent));
         let stop = self.stop_halves(m);
         let end = t + self.span(m, 2 * (1 + self.data_bits(m)) + stop);
         self.cur = Some((end - self.span(m, stop), end));
@@ -282,6 +286,7 @@ impl QUart {
                     if end > now {
                         break;
                     }
+                    super::uart_replies(&mut self.replies, self.sent, end, &mut self.rx_in);
                     self.cur = None;
                     if self.next.is_some() && txen {
                         self.start_next(m, end, tx); // the next Start bit follows the last Stop bit

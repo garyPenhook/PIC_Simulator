@@ -22,6 +22,8 @@ pub(crate) const RCREG: u8 = 3;
 #[derive(Clone)]
 pub(crate) struct Uart {
     pub num: u8,
+    pub replies: Vec<super::UartReply>,
+    sent: u8,
     pub reg: usize,
     pub sta: usize,
     pub baud: usize,
@@ -72,6 +74,7 @@ impl Uart {
         let rcsta = addr(dev, &format!("RC{n}STA"))?;
         let rcflag = Flag::find(dev, &format!("RC{n}IF")).or_else(|| (n == 1).then(|| Flag::find(dev, "RCIF")).flatten())?;
         let u = Uart {
+            replies: Vec::new(), sent: 0,
             num: n, reg, sta, baud, brgl, brgh, flag, tsr_end: None, pending: None, rcreg, rcsta, rcflag,
             tx_frames: VecDeque::new(), pending_ninth: false, pin_paused: None, pin_prev: None, pin_rx: None,
             rx_in: VecDeque::new(), rx_free: 0, rx_cur: None, asleep: false, fifo: VecDeque::new(),
@@ -92,6 +95,7 @@ impl Uart {
     }
 
     fn start_frame(&mut self, mem: &[u8], at: u64, byte: u8, ninth: bool) {
+        self.sent = byte;
         let width = if mem[self.sta] & 0x40 != 0 { 9 } else { 8 };
         let word = u16::from(byte) | if width == 9 { u16::from(ninth) << 8 } else { 0 };
         self.tx_frames.push_back((at, self.bit_cycles(mem), word, width));
@@ -249,6 +253,7 @@ impl Uart {
         }
         while let Some(e) = self.tsr_end.filter(|e| *e <= now) {
             self.tsr_end = None;
+            super::uart_replies(&mut self.replies, self.sent, e, &mut self.rx_in);
             if let Some(b) = self.pending.take() {
                 self.start_frame(mem, e, b, self.pending_ninth);
                 tx.push((self.num, e, b));

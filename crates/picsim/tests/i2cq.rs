@@ -156,3 +156,28 @@ fn restart_after_write_then_read_and_buffer_errors() {
     assert_eq!(rd(&mut m, "I2C1STAT1") & 8, 8, "RXRE");
     assert!(rd(&mut m, "I2C1ERR") & 0x10 != 0);
 }
+
+#[test]
+fn memory_client_write_then_pointer_selection_and_read() {
+    let mut m = machine("[[i2c]]\naddress = 0x50\nmode = \"memory\"\n");
+    ready(&mut m);
+    w(&mut m, "I2C1CNTL", 2);
+    w(&mut m, "I2C1TXB", 0xA0);
+    until(&mut m, "address", |m| rd(m, "I2C1STAT1") & 0x20 != 0);
+    w(&mut m, "I2C1TXB", 0x10);
+    until(&mut m, "TXBE", |m| rd(m, "I2C1STAT1") & 0x20 != 0);
+    w(&mut m, "I2C1TXB", 0x55);
+    until(&mut m, "Stop", |m| rd(m, "I2C1PIR") & 4 != 0);
+    ready(&mut m);
+    w(&mut m, "I2C1CON0", 0xC4);
+    w(&mut m, "I2C1CON1", 0x80);
+    w(&mut m, "I2C1CNTL", 1);
+    w(&mut m, "I2C1TXB", 0xA0);
+    until(&mut m, "address", |m| rd(m, "I2C1STAT1") & 0x20 != 0);
+    w(&mut m, "I2C1TXB", 0x10);
+    until(&mut m, "MDR", |m| rd(m, "I2C1CON0") & 8 != 0);
+    w(&mut m, "I2C1CNTL", 1);
+    w(&mut m, "I2C1TXB", 0xA1);
+    until(&mut m, "RXBF", |m| rd(m, "I2C1STAT1") & 1 != 0);
+    assert_eq!(rd(&mut m, "I2C1RXB"), 0x55);
+}

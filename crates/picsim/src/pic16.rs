@@ -1571,6 +1571,14 @@ impl Pic16 {
         self.ports.iter().any(|p| p.letter == letter)
     }
 
+    /// Attach a periodic input clock to a port.
+    pub fn clock_feed(&mut self, clock: crate::drive::Clock) -> bool {
+        let Some(i) = self.ports.iter().position(|p| p.letter == clock.pin.0) else { return false; };
+        self.drive.clock(i, clock);
+        self.due = 0;
+        true
+    }
+
     /// Stimulus: the pins `mask` of port `letter` are driven to `val` from cycle `at` on.
     pub fn pin_feed(&mut self, letter: u8, at: u64, mask: u8, val: u8) -> bool {
         match self.ports.iter().position(|p| p.letter == letter) {
@@ -1897,6 +1905,13 @@ impl Pic16 {
     /// The part has EUSART `num`.
     pub fn has_uart(&self, num: u8) -> bool {
         self.uarts.iter().any(|u| u.num == num)
+    }
+
+    /// Attach a reactive request/reply rule; false when this UART is absent.
+    pub fn uart_reply(&mut self, num: u8, rule: crate::periph::UartReply) -> bool {
+        let Some(u) = self.uarts.iter_mut().find(|u| u.num == num) else { return false; };
+        u.replies.push(rule);
+        true
     }
 
     /// Queue characters for the receiver of EUSART `num`; false when the part has no such EUSART.

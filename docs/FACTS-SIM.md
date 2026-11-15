@@ -789,3 +789,13 @@ Board clock segments preserve accumulated elapsed time across frequency changes;
   queued or receiving. Synchronous mode, auto-baud, wake-on-receive and break generation remain unmodelled. MSSP hardware bus pin waveforms remain
   outside this model (`[A124]`). Tests cover six PIC16 families, GPIO/IOC/Timer0 loopback, PWM-to-Timer0/capture, both EUSARTs, fastest back-to-back
   nine-bit frames, framing errors and overrun recovery, weak pull-ups, ANSEL and open-drain release.
+
+## Stimulus extensions (`stimulus.rs`, `drive.rs`)
+
+These are configurable outside-world models, independent of a particular peripheral's electrical protocol:
+
+* Time strings resolve at load using explicit `fosc_mhz`, TCY = 4/Fosc, rounded up to whole cycles. Firmware clock changes do not reschedule them. Integer cycle syntax remains unchanged.
+* `[[clock]]` starts high at `at`, falls after `high` cycles, and repeats every `period`. Edges at or after optional `until` are excluded; the last level remains driven. Static changes win ties; the next periodic edge resumes the clock. `Drive` merges periodic and static times lazily; Sleep deadlines see the next periodic edge.
+* `[[uart_device]]` matches suffixes of completed TX bytes, including overlapping matches, and schedules eight-bit valid-Stop RX frames after `delay` from the last Stop bit. The shared EUSART and Q41 UART models call the same matcher. Reply reception follows the existing baud, FIFO and receiver-enable rules. An aborted transmission does not reach the matcher.
+* I2C `mode = "memory"` on either PIC18 host has 256 registers, a wrapping eight-bit pointer, and immediate writes. Each write address arms pointer selection by the next byte; following bytes write sequentially. Read addresses preserve the pointer, including across Stop/Restart. `readonly` acknowledges and advances past writes while preserving memory. This models a simple register device, without stretching or EEPROM programming delays.
+* Explicit simulator Reset reconstructs these models from the stimulus. Coverage: `tests/stimulus_extensions.rs`, `tests/mssp.rs`, `tests/i2cq.rs`, `tests/timer_sleep.rs`, and `drive` unit tests.

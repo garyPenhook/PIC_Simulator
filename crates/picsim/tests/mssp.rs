@@ -242,3 +242,60 @@ fn restart_and_disable() {
     w(&mut m, "SSP1CON1", 0x08); // SSPEN cleared
     assert_eq!(rd(&mut m, "SSP1STAT") & 0x1F, 0);
 }
+
+#[test]
+fn memory_client_writes_wraps_and_retains_pointer_across_restart() {
+    let mut m = i2c("[[i2c]]\naddress = 0x50\nmode = \"memory\"\ndata = [0x12, 0x34]\n");
+    w(&mut m, "SSP1CON2", 1);
+    run_for(&mut m, 10);
+    // Write across FF -> 00, then select FF again.
+    for byte in [0xA0, 0xFF, 0xAB, 0xCD] {
+        w(&mut m, "SSP1BUF", byte);
+        run_for(&mut m, 90);
+    }
+    w(&mut m, "SSP1CON2", 2);
+    run_for(&mut m, 15);
+    for byte in [0xA0, 0xFF] {
+        w(&mut m, "SSP1BUF", byte);
+        run_for(&mut m, 90);
+    }
+    w(&mut m, "SSP1CON2", 2);
+    run_for(&mut m, 15);
+    w(&mut m, "SSP1BUF", 0xA1);
+    run_for(&mut m, 90);
+    for expected in [0xAB, 0xCD, 0x34] {
+        w(&mut m, "SSP1CON2", 8);
+        run_for(&mut m, 80);
+        assert_eq!(rd(&mut m, "SSP1BUF"), expected);
+        w(&mut m, "SSP1CON2", 0x10);
+        run_for(&mut m, 10);
+    }
+}
+
+#[test]
+fn readonly_memory_client_acknowledges_writes_without_changing_registers() {
+    let mut m = i2c("[[i2c]]\naddress = 0x50\nmode = \"memory\"\ndata = [0x12, 0x34]\nreadonly = true\n");
+    w(&mut m, "SSP1CON2", 1);
+    run_for(&mut m, 10);
+    for byte in [0xA0, 0, 0x99, 0x88] {
+        w(&mut m, "SSP1BUF", byte);
+        run_for(&mut m, 90);
+        assert_eq!(rd(&mut m, "SSP1CON2") & 0x40, 0);
+    }
+    // A new transaction selects register zero again.
+    w(&mut m, "SSP1CON2", 4);
+    run_for(&mut m, 15);
+    w(&mut m, "SSP1CON2", 1);
+    run_for(&mut m, 10);
+    for byte in [0xA0, 0] {
+        w(&mut m, "SSP1BUF", byte);
+        run_for(&mut m, 90);
+    }
+    w(&mut m, "SSP1CON2", 2);
+    run_for(&mut m, 15);
+    w(&mut m, "SSP1BUF", 0xA1);
+    run_for(&mut m, 90);
+    w(&mut m, "SSP1CON2", 8);
+    run_for(&mut m, 80);
+    assert_eq!(rd(&mut m, "SSP1BUF"), 0x12);
+}

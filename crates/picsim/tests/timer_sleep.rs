@@ -349,3 +349,21 @@ fn q41_sosc_codes() {
     let n = u64::from(r(&mut m, "TMR0L")) | u64::from(r(&mut m, "TMR0H")) << 8;
     assert!(n.abs_diff(edges(c, 32_768)) <= 1, "{n} counts at cycle {c}");
 }
+
+#[test]
+fn periodic_clock_drives_timer1_and_wakes_from_sleep() {
+    let stim = "[[clock]]\npin = \"RC0\"\nat = 1000\nperiod = 200\n";
+    let mut m = machine(OFF, stim);
+    w(&mut m, "TRISC", 0xFF);
+    w(&mut m, "T1CLK", 0);
+    w(&mut m, "TMR1H", 0xFF);
+    w(&mut m, "TMR1L", 0xFE);
+    w(&mut m, "T1CON", 0x05);
+    w(&mut m, "PIE4", 0x01);
+    w(&mut m, "INTCON", 0x40);
+    m.cpu.step();
+    assert_eq!(m.cpu.state, State::Sleeping);
+    wake(&mut m, 20);
+    assert_eq!(m.cpu.cycles, 1200);
+    assert_eq!(t1(&mut m), 0);
+}

@@ -373,7 +373,7 @@ impl I2cQ {
                 self.rxb = match self.sel {
                     Some((i, true)) => {
                         let c = &mut self.i2c[i];
-                        c.data.pop_front().unwrap_or(c.fill)
+                        c.read_byte()
                     }
                     _ => 0xFF,
                 };
@@ -432,11 +432,13 @@ impl I2cQ {
         if self.expect_addr {
             self.expect_addr = false;
             self.sel = self.i2c.iter().position(|c| c.address == b >> 1 && !c.absent).map(|i| (i, b & 1 != 0));
+            if let Some((i, read)) = self.sel { self.i2c[i].addressed(read); }
             let ack = self.sel.is_some();
             log.push((self.num, t, I2cEv::Addr(b, ack)));
             ack
         } else {
             let ack = matches!(self.sel, Some((_, false)));
+            if let Some((i, false)) = self.sel { self.i2c[i].write_byte(b); }
             log.push((self.num, t, I2cEv::Write(b, ack)));
             ack
         }

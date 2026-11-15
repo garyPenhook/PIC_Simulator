@@ -533,11 +533,25 @@ basil-sim prog.hex --trace 1000-1040 --trace-regs WREG,LATA,PIR3
 
 # 7. The stimulus file
 
-A stimulus file is a TOML file that describes everything the outside world does to the part. It is given with `--stim FILE` or the *Stim…* field. Each section is written as `[[name]]` and may be repeated. **Time** is always an instruction cycle count from reset, written `at`; an entry with `at = 0` (the default) applies from the start. Where several entries set the same thing, **the later one replaces the earlier from its `at` on**.
+A stimulus file is a TOML file that describes everything the outside world does to the part. It is given with `--stim FILE` or the *Stim…* field. Each section is written as `[[name]]` and may be repeated. **Time** is measured from reset, written `at`; integer values count instruction cycles and strings may carry time units (below). An entry with `at = 0` (the default) applies from the start. Where several entries set the same thing, **the later one replaces the earlier from its `at` on**.
 
 An unknown section or key is an error, not ignored, so a misspelled name cannot silently do nothing. The largest value of `at`, `bit` and `gap` is 2^32.
 
 A stimulus file is replayed from the start whenever the part is reset.
+
+## Time units
+
+Every `at`, UART `bit`/`gap`, bounce `period` (including range endpoints), clock `period`/`high`/`until`, and UART-device `delay` accepts an integer cycle count or a string such as `"100 cycles"`, `"250ns"`, `"1.5 us"`, `"20ms"`, or `"0.1s"`. Physical units require a positive top-level `fosc_mhz`, before any tables:
+
+```toml
+fosc_mhz = 16
+[[uart]]
+at = "1ms"          # 4000 instruction cycles at 16 MHz
+bytes = "Hello"
+bit = "104.167us"
+```
+
+Times convert once when the file loads, using one instruction cycle = four oscillator clocks, rounded up to the next whole cycle. Firmware oscillator changes and the GUI/CLI clock setting do not retime these entries. Values must be non-negative, finite, and at most 2^32 cycles after conversion. Bare integers keep their existing meaning.
 
 ## Pins: `[[pin]]` and `[[port]]`
 
@@ -558,6 +572,21 @@ at = 20000
 ```
 
 An input pin that nobody drives reads **0**. A pin shows the driven level only when it is an input (`TRISx` bit set) **and** digital (`ANSELx` bit clear); an output pin shows its latch.
+
+## Periodic clocks: `[[clock]]`
+
+```toml
+[[clock]]
+pin = "RC0"
+at = 1000         # first rising edge; default 0
+period = 200      # rising-edge interval, at least 2 cycles
+high = 50         # high duration; default floor(period / 2)
+until = 10000     # optional exclusive end; omit to run indefinitely
+```
+
+The pin goes high at `at`, low `high` cycles later, and repeats every `period`. `high` must be positive and less than `period`; `until` must be later than `at`. After `until`, the pin holds the level of its final edge. There is one clock per pin. Clocks generate edges as needed, so an indefinite clock does not expand into a stored list.
+
+Clocks use the same input path as `[[pin]]`, including interrupts, external timer clocks, gates and Sleep wake-up. A static pin/port/bounce change takes precedence at the same cycle; the next clock edge resumes the waveform. The pin must exist on the selected device.
 
 ## Contact bounce: `[[bounce]]`
 
@@ -597,6 +626,22 @@ bad_stop = false     # send the Stop bit as 0 (a framing error)
 
 Give exactly one of `bytes` and `data`. Each character of `bytes` is one byte, so it must be U+0000 to U+00FF (Latin-1); any other is an error, and byte values go in `data`. A character whose Start bit falls while the receiver is off is lost, as on the part. The receiver's FIFO, framing and overrun errors behave as the data sheet describes (`docs/FACTS-SIM.md`).
 
+## Reactive serial devices: `[[uart_device]]`
+
+```toml
+[[uart_device]]
+port = 1             # default 1
+request = "AT\r"      # required nonempty string or array of bytes
+reply = "OK\r\n"      # required string or byte array
+delay = 100          # cycles after the final transmitted Stop bit; default 0
+bit = 139            # optional sender bit time; defaults to receiver rate
+gap = 0              # idle cycles between reply characters
+```
+
+Each rule watches completed transmitted bytes and sends its reply whenever the request matches the most recent bytes. Rules repeat, allow overlapping matches, and can share a port. Strings use the same Latin-1 byte mapping as `[[uart]]`. Matching starts only after the request's final Stop bit; a transmission aborted before completion cannot trigger a reply. Replies go through the timed receiver, with its normal enable, FIFO and overrun behavior. They are eight-bit frames with a valid Stop bit.
+
+Devices work with PIC16/PIC18 EUSARTs and Q41 UARTs. Scheduled `[[uart]]` input and replies share one receive line; queued frames serialize when they overlap. An explicit simulator Reset recreates the rules and their match history.
+
 ## ADC input: `[[adc]]`
 
 The conversion result for a channel.
@@ -634,6 +679,19 @@ fill = 0xFF          # returned after data is used up, default 0xFF
 ```
 
 The client acknowledges its address and every byte written to it, and answers reads from `data`. Several `[[i2c]]` entries make several clients; two at one address on one port are an error. A host that addresses an unlisted device gets a NACK (shown as `!` in the `i2c` report), and a read from nobody returns `0xFF`. The bus is assumed to have pull-ups.
+
+For a reactive register device, add `mode = "memory"`:
+
+```toml
+[[i2c]]
+address = 0x50
+mode = "memory"
+data = [0x12, 0x34]  # initial registers starting at 0; at most 256 bytes
+fill = 0xFF          # initial value for the remaining registers
+readonly = false    # optional; true acknowledges writes but preserves register contents
+```
+
+The device has 256 byte registers and an eight-bit pointer. The first data byte after each write address selects the pointer; subsequent bytes write registers and advance it. Reads return the current register and advance the pointer. It wraps from 255 to 0 and persists across Stop and repeated Start, allowing the usual write-pointer / repeated-start / read transaction. Read-only writes still advance the pointer. An explicit simulator Reset restores the initial contents. The default `mode = "stream"` keeps the original fixed-list behavior; `readonly` requires memory mode. These devices are byte-level models without clock stretching or EEPROM write delays.
 
 ## SPI client: `[[spi]]`
 
@@ -708,8 +766,8 @@ See section 8.
 
 | Section | PIC18 Q10 | PIC18 Q41 | PIC18 K22 | PIC16 |
 |---|---|---|---|---|
-| `[[pin]]`, `[[port]]`, `[[bounce]]` | yes | yes | yes | yes |
-| `[[uart]]` | yes | yes | yes | yes |
+| `[[pin]]`, `[[port]]`, `[[bounce]]`, `[[clock]]` | yes | yes | yes | yes |
+| `[[uart]]`, `[[uart_device]]` | yes | yes | yes | yes |
 | `[[adc]]` | yes | yes | yes (`channel` is the AN number, the CHS value) | yes |
 | `[[led]]`, `[[oled]]` | yes | yes | yes | yes |
 | `[[i2c]]`, `[[spi]]` | yes | yes | yes | **no** |
@@ -899,7 +957,7 @@ The simulator follows the data sheet. Where it differs from MDB it says so in `d
 
 ## Stimulus sections
 
-`[[pin]]`, `[[port]]`, `[[bounce]]`, `[[uart]]`, `[[adc]]`, `[[analog]]`, `[[i2c]]`, `[[spi]]`, `[[mclr]]`, `[[led]]`, `[[oled]]`, `[clb]`, and the top-level `fosc_mhz`.
+`[[pin]]`, `[[port]]`, `[[bounce]]`, `[[clock]]`, `[[uart]]`, `[[uart_device]]`, `[[adc]]`, `[[analog]]`, `[[i2c]]`, `[[spi]]`, `[[mclr]]`, `[[led]]`, `[[oled]]`, `[clb]`, and the top-level `fosc_mhz`.
 
 ## Pin names
 
