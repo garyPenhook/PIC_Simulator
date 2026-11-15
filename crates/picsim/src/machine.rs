@@ -12,6 +12,8 @@ pub enum Stop {
     Halt,
     /// The cycle budget ran out.
     Cycles,
+    /// Strict mode encountered an SFR without a peripheral model.
+    Unmodelled,
     /// SLEEP with nothing that can wake the part.
     Sleep,
     /// A breakpoint address was reached.
@@ -40,6 +42,8 @@ pub struct Machine {
     /// `run` stops at its `until` address even when the PC gets there by a CALL: the address is the entry of a routine
     /// (`basil-sim --until ROUTINE`), not basil's `__halt`, which may be the first address of a routine that follows the program.
     pub until_routine: bool,
+    /// Stop after an instruction touches an SFR without a model.
+    pub strict: bool,
     /// Notes about the files loaded (a hex or ELF for another part, C2), given to the core again after every reset.
     load_notes: Vec<String>,
 }
@@ -50,7 +54,7 @@ impl Machine {
             return Err(format!("{}: family {} is not simulated yet", dev.device.name, dev.device.family));
         }
         let cpu = Pic18::new(&dev)?;
-        Ok(Machine { cpu, dev, syms: BTreeMap::new(), breakpoints: Vec::new(), debug: DebugInfo::default(), image: Image::default(), stimulus: None, until_routine: false, load_notes: Vec::new() })
+        Ok(Machine { cpu, dev, syms: BTreeMap::new(), breakpoints: Vec::new(), debug: DebugInfo::default(), image: Image::default(), stimulus: None, until_routine: false, strict: false, load_notes: Vec::new() })
     }
 
     pub fn load_hex(&mut self, text: &str) -> Result<(), String> {
@@ -178,10 +182,16 @@ impl Machine {
     /// SLEEP with nothing to wake the part (`Stop::Sleep`).
     /// `over` runs calls and interrupts to completion; `out` runs until the current routine returns.
     pub fn line_step(&mut self, s: &LineStep, budget: u32) -> Option<Option<Stop>> {
+        if self.strict && !self.cpu.m.unmodelled.is_empty() {
+            return Some(Some(Stop::Unmodelled));
+        }
         let halt = self.syms.get("__halt").copied();
         for _ in 0..budget {
             let before = self.stack_depth();
             self.cpu.step();
+            if self.strict && !self.cpu.m.unmodelled.is_empty() {
+                return Some(Some(Stop::Unmodelled));
+            }
             if self.cpu.sleep_dead() {
                 return Some(Some(Stop::Sleep)); // nothing can wake the part: the step would never finish
             }
@@ -220,6 +230,9 @@ impl Machine {
 
     /// Run until `until` (a program address), a breakpoint, SLEEP, or `max_cycles` more cycles.
     pub fn run(&mut self, until: Option<u32>, max_cycles: u64) -> Stop {
+        if self.strict && !self.cpu.m.unmodelled.is_empty() {
+            return Stop::Unmodelled;
+        }
         self.cpu.lazy = true;
         let stop = self.run_lazy(until, max_cycles);
         self.cpu.settle();
@@ -245,6 +258,9 @@ impl Machine {
             }
             first = false;
             self.cpu.step();
+            if self.strict && !self.cpu.m.unmodelled.is_empty() {
+                return Stop::Unmodelled;
+            }
             if self.cpu.sleep_dead() {
                 return Stop::Sleep;
             }

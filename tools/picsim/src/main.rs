@@ -14,7 +14,7 @@ usage: basil-sim prog.hex|prog.elf [--device PART] [--devices DIR]
                  [--asm prog.S] [--until SYMBOL] [--max-cycles N]
                  [--stim FILE] [--dump NAME[:BYTES],...]
                  [--bp SYMBOL,...] [--bp-max N]
-                 [--trace FROM-TO] [--trace-regs NAME,...] [--config]
+                 [--strict] [--trace FROM-TO] [--trace-regs NAME,...] [--config]
                  [--speed max|RATIO] [--fosc MHZ]
        basil-sim --help | --version
 
@@ -30,6 +30,7 @@ usage: basil-sim prog.hex|prog.elf [--device PART] [--devices DIR]
   --bp-max N            stop after N breakpoint hits (default 20)
   --trace FROM-TO       print every instruction from cycle FROM to TO (FROM <= TO), then exit
   --trace-regs NAME,... the registers each --trace line shows
+  --strict              fail on the first access to an unmodelled SFR (exit 3)
   --config              print the configuration words (PIC18 only)
   --speed max|R         run at a fraction R of real time (default max)
   --fosc MHZ            the clock --speed uses, up to the family's highest (32 MHz PIC16,
@@ -54,6 +55,7 @@ fn run() -> Result<ExitCode, String> {
     let mut trace_regs = None::<Vec<String>>;
     let (mut bps, mut bp_max) = (Vec::<String>::new(), 20usize);
     let mut show_cfg = false;
+    let mut strict = false;
     let (mut speed, mut fosc) = (0.0f64, None::<f64>);
     let mut stim = None::<PathBuf>;
     let mut until_given = false;
@@ -89,6 +91,7 @@ fn run() -> Result<ExitCode, String> {
                 trace = Some((a, b));
             }
             "--trace-regs" => trace_regs = Some(val("--trace-regs")?.split(',').map(String::from).collect()),
+            "--strict" => strict = true,
             "--config" => show_cfg = true,
             "--speed" => speed = parse_ratio(&val("--speed")?)?,
             "--fosc" => {
@@ -122,9 +125,10 @@ fn run() -> Result<ExitCode, String> {
         if show_cfg {
             return Err("--config is not supported for PIC16 parts yet".into());
         }
-        return run16(dev, &hex, asm, stim, until, until_given, &dump, max, trace, trace_regs, &bps, bp_max, &mut pace);
+        return run16(dev, &hex, asm, stim, until, until_given, &dump, max, trace, trace_regs, &bps, bp_max, &mut pace, strict);
     }
     let mut m = Machine::new(dev)?;
+    m.strict = strict;
     let given = hex.clone();
     let hex = picsim::lines::program_hex(&hex)?;
     m.load_hex(&std::fs::read_to_string(&hex).map_err(|e| format!("{}: {e}", hex.display()))?)?;
@@ -159,6 +163,9 @@ fn run() -> Result<ExitCode, String> {
     if let Some((from, to)) = trace {
         let regs = trace_columns(&m.dev, trace_regs, &["TMR0L", "PIR0", "INTCON0", "INTCON"])?;
         m.run(None, from);
+        if strict && !m.cpu.m.unmodelled.is_empty() {
+            return Ok(strict_failure(&m.cpu.m.unmodelled));
+        }
         while m.cpu.cycles < to {
             let pc = m.cpu.pc;
             let (w, w2, w3) = (m.cpu.fetch(pc), m.cpu.fetch(pc + 2), m.cpu.fetch(pc + 4));
@@ -167,6 +174,9 @@ fn run() -> Result<ExitCode, String> {
             m.cpu.step();
             let cols: String = regs.iter().map(|(n, a)| format!(" {n}={:02X}", m.peek(*a, 1)[0])).collect();
             println!("{:>8} {:06X}  {:<28} +{} {cols}", c0, pc, text, m.cpu.cycles - c0);
+            if strict && !m.cpu.m.unmodelled.is_empty() {
+                return Ok(strict_failure(&m.cpu.m.unmodelled));
+            }
         }
         return Ok(ExitCode::SUCCESS);
     }
@@ -278,6 +288,9 @@ fn run() -> Result<ExitCode, String> {
     if !m.cpu.m.unmodelled.is_empty() {
         eprintln!("note: unmodelled SFRs touched: {}", m.cpu.m.unmodelled.iter().cloned().collect::<Vec<_>>().join(" "));
     }
+    if stop == Stop::Unmodelled {
+        return Ok(ExitCode::from(3));
+    }
     Ok(if stop == Stop::Halt || until.is_none() { ExitCode::SUCCESS } else { ExitCode::from(1) })
 }
 
@@ -297,8 +310,10 @@ fn run16(
     bps: &[String],
     bp_max: usize,
     pace: &mut Option<Pace>,
+    strict: bool,
 ) -> Result<ExitCode, String> {
     let mut m = picsim::machine16::Machine16::new(dev)?;
+    m.strict = strict;
     let given = hex.to_path_buf();
     let hex = picsim::lines::program_hex(hex)?;
     m.load_hex(&std::fs::read_to_string(&hex).map_err(|e| format!("{}: {e}", hex.display()))?)?;
@@ -324,6 +339,9 @@ fn run16(
     if let Some((from, to)) = trace {
         let regs = trace_columns(&m.dev, trace_regs, &["WREG", "STATUS"])?;
         m.run(None, from);
+        if strict && !m.cpu.unmodelled.is_empty() {
+            return Ok(strict_failure(&m.cpu.unmodelled));
+        }
         while m.cpu.cycles < to {
             let pc = m.cpu.pc;
             let c0 = m.cpu.cycles;
@@ -331,6 +349,9 @@ fn run16(
             m.cpu.step();
             let cols: String = regs.iter().map(|(n, a)| format!(" {n}={:02X}", m.peek(*a, 1)[0])).collect();
             println!("{:>8} {:04X}  {:<28} +{} {cols}", c0, pc, text, m.cpu.cycles - c0);
+            if strict && !m.cpu.unmodelled.is_empty() {
+                return Ok(strict_failure(&m.cpu.unmodelled));
+            }
         }
         return Ok(ExitCode::SUCCESS);
     }
@@ -375,6 +396,9 @@ fn run16(
     }
     if !m.cpu.unmodelled.is_empty() {
         eprintln!("note: unmodelled SFRs touched: {}", m.cpu.unmodelled.iter().cloned().collect::<Vec<_>>().join(" "));
+    }
+    if stop == Stop::Unmodelled {
+        return Ok(ExitCode::from(3));
     }
     Ok(if stop == Stop::Halt || until.is_none() { ExitCode::SUCCESS } else { ExitCode::from(1) })
 }
@@ -506,4 +530,10 @@ fn trace_columns(dev: &devdesc::Device, given: Option<Vec<String>>, default: &[&
             .collect(),
         None => Ok(default.iter().filter_map(|n| dev.find_sfr(n).map(|s| (n.to_string(), s.addr))).collect()),
     }
+}
+
+/// Strict trace failures use the same exit status and register diagnostics as a normal run.
+fn strict_failure(names: &std::collections::BTreeSet<String>) -> ExitCode {
+    eprintln!("strict: unmodelled SFRs touched: {}", names.iter().cloned().collect::<Vec<_>>().join(" "));
+    ExitCode::from(3)
 }

@@ -1,5 +1,8 @@
 //! `pic-sim [prog.hex] [--device 18F16Q41|16F18056]`: run, step and inspect a program on a simulated PIC18 or PIC16 (enhanced mid-range).
 
+mod terminal;
+use terminal::Terminal;
+
 use eframe::egui;
 use picsim::lines::LineMap;
 use picsim::periph::{Board, Bus, Led, Oled, Pin, pin_name};
@@ -134,6 +137,7 @@ struct App {
     /// (time, cycles) at the last rate sample, and the measured simulated cycles per second.
     rate: (std::time::Instant, u64, f64),
     sw: Stopwatch,
+    terminal: Terminal,
 }
 
 fn list_devices(dir: &PathBuf) -> Vec<String> {
@@ -191,6 +195,7 @@ impl App {
             job: None,
             rate: (std::time::Instant::now(), 0, 0.0),
             sw: Stopwatch::default(),
+            terminal: Terminal::default(),
         };
         if hex.is_some() {
             a.load();
@@ -207,6 +212,7 @@ impl App {
     fn load(&mut self) {
         self.running = false;
         self.sw.clear();
+        self.terminal.clear();
         self.job = None; // a step over from the previous program must not run on the new one
         self.last_stop = None;
         // The part the ELF was built for wins over the device box (the wrong part has the wrong SFRs and pins).
@@ -628,6 +634,7 @@ impl eframe::App for App {
                     self.job = None;
                     self.snap = None;
                     self.sw.clear();
+                    self.terminal.clear();
                     if let Some(m) = &mut self.m {
                         m.reset();
                     }
@@ -766,8 +773,8 @@ impl eframe::App for App {
             }
         });
         egui::Panel::right("data").default_size(360.0).show(ui, |ui| {
-            ui.horizontal(|ui| {
-                for (i, t) in ["Memory", "SFRs", "Watch", "Board", "Variables"].iter().enumerate() {
+            ui.horizontal_wrapped(|ui| {
+                for (i, t) in ["Memory", "SFRs", "Watch", "Board", "Variables", "UART"].iter().enumerate() {
                     ui.selectable_value(&mut self.tab, i, *t);
                 }
             });
@@ -806,6 +813,12 @@ impl eframe::App for App {
                     }
                 }
                 4 => variables_ui(ui, &m.debug, pc, &m.frames(), &m.cpu.m.mem, &m.cpu.prog, self.snap.as_ref().map(|s| (s, self.snap_frames.as_slice()))),
+                5 => {
+                    let ports: Vec<u8> = (1..=3).filter(|&n| m.cpu.p.has_uart(n)).collect();
+                    if let Some((port, stream)) = self.terminal.ui(ui, &m.cpu.p.tx, &ports, m.cpu.cycles) {
+                        m.cpu.p.rx_send(port, stream);
+                    }
+                }
                 _ => {
                     let (syms, dev, debug, pc) = (&m.syms, &m.dev, &m.debug, m.cpu.pc);
                     watch_ui(ui, &mut self.watch, &mut self.watch_in, |n| watch_addr(debug, syms, dev, n, pc), |a, l, rom| if rom { debug.rom_bytes(&m.cpu.prog, a, l) } else { m.peek(a, l) });
@@ -1091,8 +1104,8 @@ impl App {
             }
         });
         egui::Panel::right("data").default_size(360.0).show(ui, |ui| {
-            ui.horizontal(|ui| {
-                for (i, t) in ["Memory", "SFRs", "Watch", "Board", "Variables"].iter().enumerate() {
+            ui.horizontal_wrapped(|ui| {
+                for (i, t) in ["Memory", "SFRs", "Watch", "Board", "Variables", "UART"].iter().enumerate() {
                     ui.selectable_value(&mut self.tab, i, *t);
                 }
             });
@@ -1133,6 +1146,12 @@ impl App {
                     }
                 }
                 4 => variables_ui(ui, &m.debug, pc, &m.frames(), &m.cpu.mem, &m.cpu.prog, self.snap.as_ref().map(|s| (s, self.snap_frames.as_slice()))),
+                5 => {
+                    let ports: Vec<u8> = (1..=3).filter(|&n| m.cpu.has_uart(n)).collect();
+                    if let Some((port, stream)) = self.terminal.ui(ui, &m.cpu.tx, &ports, m.cpu.cycles) {
+                        m.cpu.rx_send(port, stream);
+                    }
+                }
                 _ => {
                     let (syms, dev, debug, pc) = (&m.syms, &m.dev, &m.debug, m.cpu.pc);
                     watch_ui(ui, &mut self.watch, &mut self.watch_in, |n| watch_addr(debug, syms, dev, n, pc), |a, l, rom| if rom { debug.rom_bytes(&m.cpu.prog, a, l) } else { m.peek(a, l) });

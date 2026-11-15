@@ -22,6 +22,8 @@ pub struct Machine16 {
     /// `run` stops at its `until` address even when the PC gets there by a CALL: the address is the entry of a routine
     /// (`basil-sim --until ROUTINE`), not basil's `__halt`, which may be the first address of a routine that follows the program.
     pub until_routine: bool,
+    /// Stop after an instruction touches an SFR without a model.
+    pub strict: bool,
     /// Notes about the files loaded (a hex or ELF for another part, C2), given to the core again after every reset.
     load_notes: Vec<String>,
 }
@@ -29,7 +31,7 @@ pub struct Machine16 {
 impl Machine16 {
     pub fn new(dev: Device) -> Result<Machine16, String> {
         let cpu = Pic16::new(&dev)?;
-        Ok(Machine16 { cpu, dev, syms: BTreeMap::new(), breakpoints: Vec::new(), debug: DebugInfo::default(), image: Image::default(), stimulus: None, until_routine: false, load_notes: Vec::new() })
+        Ok(Machine16 { cpu, dev, syms: BTreeMap::new(), breakpoints: Vec::new(), debug: DebugInfo::default(), image: Image::default(), stimulus: None, until_routine: false, strict: false, load_notes: Vec::new() })
     }
 
     pub fn load_hex(&mut self, text: &str) -> Result<(), String> {
@@ -143,10 +145,16 @@ impl Machine16 {
     /// on a new line (or, for `out`, after the routine returned), `Some(Some(stop))` a breakpoint or `__halt` came first. An
     /// interrupt entry pushes the return stack like a call, so `over` runs the handler to completion too.
     pub fn line_step(&mut self, s: &LineStep, budget: u32) -> Option<Option<Stop>> {
+        if self.strict && !self.cpu.unmodelled.is_empty() {
+            return Some(Some(Stop::Unmodelled));
+        }
         let halt = self.syms.get("__halt").copied();
         for _ in 0..budget {
             let before = self.cpu.depth();
             self.cpu.step();
+            if self.strict && !self.cpu.unmodelled.is_empty() {
+                return Some(Some(Stop::Unmodelled));
+            }
             if self.cpu.sleep_dead() {
                 return Some(Some(Stop::Sleep)); // nothing can wake the part: the step would never finish
             }
@@ -186,6 +194,9 @@ impl Machine16 {
     /// Run until `until` (a word address), a breakpoint, SLEEP with nothing to wake it, or `max_cycles` more cycles.
     /// Reaching `until` by a CALL (the stack grew) is a call into the routine that starts there, not the end.
     pub fn run(&mut self, until: Option<u32>, max_cycles: u64) -> Stop {
+        if self.strict && !self.cpu.unmodelled.is_empty() {
+            return Stop::Unmodelled;
+        }
         self.cpu.lazy = true;
         let stop = self.run_lazy(until, max_cycles);
         self.cpu.settle();
@@ -209,6 +220,9 @@ impl Machine16 {
             }
             first = false;
             self.cpu.step();
+            if self.strict && !self.cpu.unmodelled.is_empty() {
+                return Stop::Unmodelled;
+            }
             if self.cpu.sleep_dead() {
                 return Stop::Sleep;
             }

@@ -1763,6 +1763,7 @@ impl Pic16 {
 
     /// Queue characters for the receiver of EUSART `num`; false when the part has no such EUSART.
     pub fn rx_send(&mut self, num: u8, s: RxStream) -> bool {
+        self.due = 0; // newly queued input invalidates the next peripheral deadline
         match self.uarts.iter_mut().find(|u| u.num == num) {
             Some(u) => {
                 u.rx_in.push_back(s);

@@ -261,6 +261,12 @@ Use *1x* or a fraction to watch an LED blink or a display scroll at a speed you 
 
 While running, the status line shows the achieved rate, for example `running at 100.0% of real time (16.00 Mcycles/s)`. It also reminds you that a wait on a UART or timer flag shows as one source line for a long time — that is the program waiting, not the simulator.
 
+## UART terminal
+
+The **UART** tab shows transmitted bytes from the selected modelled UART/EUSART on PIC16 and PIC18 parts. Text displays UTF-8 with other control characters escaped; **Hex** shows the exact byte values. The pane shows at most the latest 16 KiB of output and reports when older output was omitted. **Clear output** hides the selected port's existing output without changing the simulated UART. Loading a program or pressing Reset clears this view's history.
+
+Enter text (sent as UTF-8), or enable **Hex** and enter space-separated two-digit bytes such as `41 00 FF`. Choose no line ending, LF or CRLF, then press **Send**. Up to 4096 bytes including the ending can be queued at once. Input is queued after any existing receiver stimulus and uses the firmware's baud setting and existing timed receiver model; run or step to advance reception. Enable the firmware's receiver before sending. Queued terminal input is transient and is discarded by a reset; stimulus-file input is reapplied as before.
+
 ## The Program pane
 
 The pane has two views, chosen with the **Source** / **Disassembly** buttons (the buttons appear only when the ELF supplies source lines).
@@ -389,6 +395,7 @@ The program runs from reset until it stops, then `basil-sim` prints a report and
 | `--config` | off | Print the configuration words and the oscillator and watchdog registers they set (PIC18 only) |
 | `--speed max\|R` | `max` | Limit the run to a fraction of real time: `1` is real time, `0.5`, `1/10`, `0.001` … |
 | `--fosc MHZ` | 32 (PIC16), 64 (PIC18) | The clock `--speed` uses, at most the family's highest clock (OS20: 32 MHz on a PIC16, 64 MHz on a PIC18); a higher one is refused |
+| `--strict` | off | Stop after the first instruction that accesses an unmodelled SFR; report its name and exit with status 3 (also applies to tracing) |
 | `--help`, `-h` | | Print the synopsis and a line for each option, and exit |
 | `--version`, `-V` | | Print `basil-sim <version>` and exit |
 
@@ -405,6 +412,9 @@ An unknown option, a missing value, an unreadable file, an unknown device, a bad
 | 0 | The program reached `--until` (by default `__halt`), or no stop symbol applied (a C program without `--until`) and the run completed |
 | 1 | The run stopped for another reason: cycle limit, breakpoint limit, Sleep |
 | 2 | An error (see above); nothing was simulated |
+| 3 | Strict mode encountered an unmodelled SFR |
+
+Strict mode is opt-in and checks unmodelled SFR accesses, not every modelling assumption or warning. Without it, these accesses continue to produce notes. For example, use `basil-sim program.hex --device 18F16Q41 --strict` to reject an unsupported peripheral access.
 
 This makes `basil-sim` usable in scripts: a test program that ends at `__halt` returns 0, one that hangs hits `--max-cycles` and returns 1.
 

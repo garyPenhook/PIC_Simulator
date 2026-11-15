@@ -1053,8 +1053,14 @@ impl Periph {
         }
     }
 
+    /// Whether this part has a modelled UART or EUSART receiver.
+    pub fn has_uart(&self, num: u8) -> bool {
+        self.quarts.iter().any(|u| u.num == num) || self.uarts.iter().any(|u| u.num == num)
+    }
+
     /// Queue characters for the receiver of EUSART `num` (1-based). False when the part has no such EUSART.
     pub fn rx_send(&mut self, num: u8, s: RxStream) -> bool {
+        self.due = 0; // newly queued input invalidates the next peripheral deadline
         if let Some(q) = self.quarts.iter_mut().find(|q| q.num == num) {
             q.rx_send(s);
             return true;
