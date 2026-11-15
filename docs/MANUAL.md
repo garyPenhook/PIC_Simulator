@@ -534,6 +534,27 @@ at = 20000
 
 An input pin that nobody drives reads **0**. A pin shows the driven level only when it is an input (`TRISx` bit set) **and** digital (`ANSELx` bit clear); an output pin shows its latch.
 
+## Contact bounce: `[[bounce]]`
+
+A switch or relay contact that chatters before it settles. The entry is a train of ordinary pin changes, so everything that sees `[[pin]]` changes (PORTx, interrupt-on-change, the INT pins, timer clock and gate pins, capture, CLC and CLB inputs) sees every edge of the chatter.
+
+```toml
+[[bounce]]
+pin = "RB0"        # the PIC pin
+level = 0          # the level the pin goes to at `at` and settles at (0, 1, true, false)
+at = 20000         # the first change, default 0
+bounces = 3        # times the contact springs back before it settles, 0..1000
+period = 150       # cycles between changes: one number (1..2^32), or a range
+# period = [100, 400]   # each interval drawn from 100..400
+# seed = 1              # with a range only: which intervals (default 1)
+```
+
+The pin changes `1 + 2 x bounces` times: to `level` at `at`, then to the other level and back, `bounces` times, one interval apart; the last change leaves it at `level`. With `bounces = 3, period = 150, at = 20000, level = 0` the pin reads 0 from 20000, 1 from 20150, 0 from 20300, 1 from 20450, 0 from 20600, 1 from 20750 and 0 from 20900 on. A press and a release are two entries.
+
+With a range the intervals are pseudo-random but fixed by `seed`: the same file gives the same train on every run and after every reset, and another seed gives another train. The simulator has no electrical model of a contact: the level is a clean 0 or 1 at every cycle, with no slow edge or voltage between the thresholds. The times are yours to choose; take them from the switch's data sheet or a scope capture.
+
+Where a `[[pin]]` or `[[port]]` entry changes the same pin at the same cycle as a bounce, the `[[pin]]`/`[[port]]` level wins. Two bounces on one pin must not overlap in time (start the release after the last change of the press), a train that would end after cycle 2^32 is an error, and so is a pin the part does not have.
+
 ## Serial input: `[[uart]]`
 
 Characters sent to the receiver of an EUSART (PIC18-Q10, all PIC16) or UART (PIC18-Q41).
@@ -660,7 +681,7 @@ See section 8.
 
 | Section | PIC18 Q10 | PIC18 Q41 | PIC18 K22 | PIC16 |
 |---|---|---|---|---|
-| `[[pin]]`, `[[port]]` | yes | yes | yes | yes |
+| `[[pin]]`, `[[port]]`, `[[bounce]]` | yes | yes | yes | yes |
 | `[[uart]]` | yes | yes | yes | yes |
 | `[[adc]]` | yes | yes | yes (`channel` is the AN number, the CHS value) | yes |
 | `[[led]]`, `[[oled]]` | yes | yes | yes | yes |
@@ -842,7 +863,7 @@ The simulator follows the data sheet. Where it differs from MDB it says so in `d
 
 ## Stimulus sections
 
-`[[pin]]`, `[[port]]`, `[[uart]]`, `[[adc]]`, `[[analog]]`, `[[i2c]]`, `[[spi]]`, `[[mclr]]`, `[[led]]`, `[[oled]]`, `[clb]`, and the top-level `fosc_mhz`.
+`[[pin]]`, `[[port]]`, `[[bounce]]`, `[[uart]]`, `[[adc]]`, `[[analog]]`, `[[i2c]]`, `[[spi]]`, `[[mclr]]`, `[[led]]`, `[[oled]]`, `[clb]`, and the top-level `fosc_mhz`.
 
 ## Pin names
 

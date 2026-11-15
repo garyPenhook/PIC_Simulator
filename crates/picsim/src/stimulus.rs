@@ -48,6 +48,14 @@
 //! mask = 0xFF         # default 0xFF
 //! at = 0
 //!
+//! [[bounce]]          # a contact that chatters before it settles: 1 + 2 x bounces changes of one input pin
+//! pin = "RB0"         # the PIC pin
+//! level = 0           # 0 or 1 (also true/false): the level the pin goes to at `at` and settles at
+//! at = 20000          # the first change, default 0
+//! bounces = 3         # times the contact springs back before it settles, 0..1000
+//! period = 150        # cycles between changes (1..2^32), or a range [100, 400] that each interval is drawn from
+//! seed = 1            # with a range: the same seed gives the same intervals on every run and after a reset (default 1)
+//!
 //! [[mclr]]            # the level of the MCLR pin (RE3 on the 28-pin Q10): 0 holds the part in reset (when the pin is MCLR)
 //! level = 0           # 0 or 1; from `at` on, later entries replace earlier ones; the pin is high until driven
 //! at = 20000
@@ -86,8 +94,10 @@ pub struct Stimulus {
     pub adc: Vec<(u8, u64, u16)>,
     /// (port letter, pin, from cycle, volts)
     pub analog: Vec<(u8, u8, u64, f64)>,
-    /// (port letter, from cycle, pin mask, levels)
+    /// (port letter, from cycle, pin mask, levels): the [[bounce]] changes first, then [[pin]] and [[port]].
     pub pins: Vec<(u8, u64, u8, u8)>,
+    /// The pins [[bounce]] entries name, checked against the part when the stimulus is applied.
+    pub bounce_pins: Vec<crate::periph::Pin>,
     /// (from cycle, level) of the MCLR pin, sorted by cycle.
     pub mclr: Vec<(u64, u8)>,
     /// LEDs and OLEDs on the board.
@@ -100,7 +110,28 @@ impl Stimulus {
     pub fn parse(text: &str) -> Result<Stimulus, String> {
         let doc: toml::Table = text.parse().map_err(|e: toml::de::Error| e.to_string())?;
         let mut st = Stimulus::default();
+        // [[bounce]] changes are kept apart and put before the [[pin]]/[[port]] ones at the end, whatever order the keys
+        // come in: at a cycle both name, the [[pin]]/[[port]] level wins (`Drive::push` keeps the order changes were added in).
+        let mut bounce = Vec::new();
+        let mut trains: Vec<(crate::periph::Pin, u64, u64)> = Vec::new();
         for (k, v) in &doc {
+            if k == "bounce" {
+                for e in v.as_array().ok_or("bounce must be [[bounce]] entries")? {
+                    let t = e.as_table().ok_or("bounce entry must be a table")?;
+                    let (pin, train) = parse_bounce(t)?;
+                    let (from, to) = (train[0].1, train[train.len() - 1].1);
+                    if let Some(&(_, f, l)) = trains.iter().find(|&&(p, f, l)| p == pin && from <= l && f <= to) {
+                        let name = crate::periph::pin_name(pin);
+                        return Err(format!("bounce on {name}: cycles {from}..{to} overlap another bounce on {name} ({f}..{l}); start the next one after the last change"));
+                    }
+                    trains.push((pin, from, to));
+                    if !st.bounce_pins.contains(&pin) {
+                        st.bounce_pins.push(pin);
+                    }
+                    bounce.extend(train);
+                }
+                continue;
+            }
             if k == "pin" || k == "port" {
                 for e in v.as_array().ok_or(format!("{k} must be [[{k}]] entries"))? {
                     let t = e.as_table().ok_or(format!("{k} entry must be a table"))?;
@@ -356,6 +387,7 @@ impl Stimulus {
                 ));
             }
         }
+        st.pins.splice(0..0, bounce);
         Ok(st)
     }
 
@@ -382,7 +414,7 @@ impl Stimulus {
             }
         }
         let pins = cpu.pins();
-        for p in self.board.leds.iter().map(|l| l.pin).chain(self.board.oleds.iter().flat_map(|o| [o.scl, o.sda])) {
+        for p in self.board.leds.iter().map(|l| l.pin).chain(self.board.oleds.iter().flat_map(|o| [o.scl, o.sda])).chain(self.bounce_pins.iter().copied()) {
             if !pins.contains(&p) {
                 return Err(format!("{}: no pin {} on this part", dev.device.name, crate::periph::pin_name(p)));
             }
@@ -454,6 +486,9 @@ impl Stimulus {
         } else if self.board.fosc_mhz > 0.0 {
             p.board.fosc_mhz = self.board.fosc_mhz; // a clock without parts still sets the timing
         }
+        if let Some(&pin) = self.bounce_pins.iter().find(|&&pin| !p.has_pin(m, pin)) {
+            return Err(format!("{}: [[bounce]] on {}: no such pin on this part", dev.device.name, crate::periph::pin_name(pin)));
+        }
         for (letter, at, mask, val) in self.pins {
             if !p.pin_feed(letter, at, mask, val) {
                 return Err(format!("{}: no PORT{} in the simulator", dev.device.name, letter as char));
@@ -469,6 +504,76 @@ impl Stimulus {
         }
         Ok(())
     }
+}
+
+/// A stimulus pin change: (port letter, from cycle, pin mask, levels).
+type PinChange = (u8, u64, u8, u8);
+
+/// Largest `bounces` of a `[[bounce]]` entry.
+const MAX_BOUNCES: u64 = 1000;
+
+/// One `[[bounce]]` entry: its pin and its pin changes `(port letter, at, mask, levels)`: `level` at `at`, then
+/// `bounces` times the other level and back, one interval apart. The intervals are `period`, or drawn from the range
+/// `[min, max]` by SplitMix64 from `seed`: a function of the entry alone, with no other state, so a reset that parses the
+/// file again (or keeps what it parsed) gets the same train.
+fn parse_bounce(t: &toml::Table) -> Result<(crate::periph::Pin, Vec<PinChange>), String> {
+    for key in t.keys() {
+        if !["pin", "level", "at", "bounces", "period", "seed"].contains(&key.as_str()) {
+            return Err(format!("bounce: unknown key {key}"));
+        }
+    }
+    let s = t.get("pin").and_then(|x| x.as_str()).ok_or("bounce needs pin (a pin such as \"RB0\")")?;
+    let (letter, bit) = parse_pin(s).ok_or(format!("bounce.pin = {s:?} is not a pin (RA0..RH7)"))?;
+    let level = match t.get("level") {
+        Some(toml::Value::Boolean(b)) => u8::from(*b),
+        Some(x) if matches!(x.as_integer(), Some(0 | 1)) => x.as_integer().unwrap() as u8,
+        _ => return Err("bounce.level must be 0, 1, true or false".into()),
+    };
+    let int = |x: &toml::Value, n: &str, min: u64, max: u64| -> Result<u64, String> {
+        x.as_integer().and_then(|i| u64::try_from(i).ok()).filter(|i| (min..=max).contains(i)).ok_or(format!("bounce.{n} must be an integer {min}..{max}"))
+    };
+    let at = t.get("at").map_or(Ok(0), |x| int(x, "at", 0, MAX_CYCLES))?;
+    let bounces = int(t.get("bounces").ok_or("bounce needs bounces")?, "bounces", 0, MAX_BOUNCES)?;
+    let period = t.get("period").ok_or("bounce needs period")?;
+    let (lo, hi) = match period {
+        toml::Value::Array(a) if a.len() == 2 => {
+            let (lo, hi) = (int(&a[0], "period", 1, MAX_CYCLES)?, int(&a[1], "period", 1, MAX_CYCLES)?);
+            if lo > hi {
+                return Err(format!("bounce.period [{lo}, {hi}]: the first value must not be above the second"));
+            }
+            (lo, hi)
+        }
+        toml::Value::Array(_) => return Err("bounce.period range must be [min, max]".into()),
+        x => {
+            let p = int(x, "period", 1, MAX_CYCLES)?;
+            (p, p)
+        }
+    };
+    let mut seed = match t.get("seed") {
+        Some(_) if !period.is_array() => return Err("bounce.seed needs a period range [min, max]".into()),
+        Some(x) => x.as_integer().and_then(|i| u64::try_from(i).ok()).ok_or("bounce.seed must be a non-negative integer")?,
+        None => 1,
+    };
+    let mut next = || {
+        // SplitMix64 (Steele, Lea, Flood 2014); the modulo bias is below 2^-31 for spans up to 2^32
+        seed = seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = seed;
+        z = (z ^ z >> 30).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ z >> 27).wrapping_mul(0x94D0_49BB_1331_11EB);
+        lo + (z ^ z >> 31) % (hi - lo + 1)
+    };
+    let mask = 1u8 << bit;
+    let mut train = vec![(letter, at, mask, level << bit)];
+    let mut c = at;
+    for i in 0..2 * bounces {
+        c += next(); // at most 2^32 + 2000 x 2^32: no overflow
+        if c > MAX_CYCLES {
+            return Err(format!("bounce on {s}: the last change would be after cycle {MAX_CYCLES}"));
+        }
+        let l = if i % 2 == 0 { level ^ 1 } else { level };
+        train.push((letter, c, mask, l << bit));
+    }
+    Ok(((letter, bit), train))
 }
 
 /// The `[clb]` netlist: the latches of DS40002686B Fig. 29-1 to 29-13, which the CLB Synthesizer would load from program memory.
@@ -540,4 +645,77 @@ fn parse_clb(t: &toml::Table) -> Result<crate::periph::clb::Cfg, String> {
         c.ble[n] = b;
     }
     Ok(c)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn changes(text: &str) -> Vec<(u64, u8)> {
+        Stimulus::parse(text).unwrap().pins.iter().map(|&(l, at, m, v)| {
+            assert_eq!((l, m), (b'B', 1), "RB0");
+            (at, v)
+        }).collect()
+    }
+
+    #[test]
+    fn bounce_with_a_fixed_period() {
+        let c = changes("[[bounce]]\npin = \"RB0\"\nlevel = 1\nat = 100\nbounces = 2\nperiod = 10\n");
+        assert_eq!(c, [(100, 1), (110, 0), (120, 1), (130, 0), (140, 1)]);
+        let c = changes("[[bounce]]\npin = \"RB0\"\nlevel = false\nbounces = 0\nperiod = 10\n");
+        assert_eq!(c, [(0, 0)], "no bounces: one clean change at cycle 0");
+    }
+
+    #[test]
+    fn bounce_with_a_range_is_repeatable_and_inside_it() {
+        let text = "[[bounce]]\npin = \"RB0\"\nlevel = 0\nat = 5\nbounces = 50\nperiod = [3, 9]\nseed = 7\n";
+        let c = changes(text);
+        assert_eq!(c, changes(text), "the same file gives the same train");
+        assert_eq!(c.len(), 101);
+        assert_eq!(*c.last().unwrap(), (c.last().unwrap().0, 0), "settles at level");
+        let gaps: Vec<u64> = c.windows(2).map(|w| w[1].0 - w[0].0).collect();
+        assert!(gaps.iter().all(|g| (3..=9).contains(g)), "{gaps:?}");
+        assert!(gaps.iter().any(|g| *g != gaps[0]), "the intervals vary");
+        assert_ne!(c, changes(&text.replace("seed = 7", "seed = 8")), "another seed, another train");
+        assert_eq!(changes(&text.replace("seed = 7\n", "")), changes(&text.replace("seed = 7", "seed = 1")), "default seed 1");
+    }
+
+    #[test]
+    fn bounce_errors() {
+        let base = "[[bounce]]\npin = \"RB0\"\nlevel = 1\nbounces = 2\nperiod = 10\n";
+        assert!(Stimulus::parse(base).is_ok());
+        assert!(Stimulus::parse(&base.replace("period = 10", "period = [5, 5]\nseed = 3")).is_ok(), "a seed with a one-value range");
+        let two = base.to_string() + "[[bounce]]\npin = \"RB0\"\nlevel = 0\nat = 41\nbounces = 1\nperiod = 5\n[[bounce]]\npin = \"RB1\"\nlevel = 0\nat = 0\nbounces = 1\nperiod = 5\n";
+        assert!(Stimulus::parse(&two).is_ok(), "one after the other on a pin, or at once on two pins");
+        for (bad, why) in [
+            (base.replace("pin = \"RB0\"", "pin = \"RZ0\""), "pin"),
+            (base.replace("level = 1", "level = 2"), "level"),
+            (base.replace("bounces = 2", "bounces = 1001"), "bounces"),
+            (base.replace("bounces = 2\n", ""), "no bounces"),
+            (base.replace("period = 10\n", ""), "no period"),
+            (base.replace("period = 10", "period = 0"), "period 0"),
+            (base.replace("period = 10", "period = [9, 3]"), "reversed range"),
+            (base.replace("period = 10", "period = [1, 2, 3]"), "three values"),
+            (base.replace("period = 10", "period = 10\nseed = 3"), "seed without a range"),
+            (base.to_string() + "[[bounce]]\npin = \"RB0\"\nlevel = 0\nat = 30\nbounces = 0\nperiod = 1\n", "overlapping trains on one pin"),
+            (base.replace("period = 10", "period = 10\nfoo = 1"), "unknown key"),
+            (base.replace("period = 10", "period = 4294967296\nat = 4294967296"), "past 2^32"),
+        ] {
+            assert!(Stimulus::parse(&bad).is_err(), "{why}");
+        }
+    }
+
+    #[test]
+    fn a_pin_entry_at_the_same_cycle_wins_over_a_bounce() {
+        let pin = "[[pin]]\nport = \"B\"\nbit = 0\nlevel = 1\nat = 110\n";
+        let bounce = "[[bounce]]\npin = \"RB0\"\nlevel = 1\nat = 100\nbounces = 1\nperiod = 10\n";
+        for text in [format!("{pin}{bounce}"), format!("{bounce}{pin}")] {
+            let st = Stimulus::parse(&text).unwrap();
+            let mut d = crate::drive::Drive::default();
+            for &(_, at, m, v) in &st.pins {
+                d.push(at, 0, m, v);
+            }
+            assert_eq!(d.level(0, 110), 1, "the [[pin]] entry, not the bounce's 0, in either order");
+        }
+    }
 }

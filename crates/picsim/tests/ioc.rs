@@ -158,3 +158,47 @@ fn a_line_step_into_a_sleep_nothing_can_wake_stops_with_sleep() {
     assert_eq!(m.step_line(false, false, 1_000_000), Some(picsim::Stop::Sleep));
     assert!(m.cpu.cycles < 10, "{}", m.cpu.cycles);
 }
+
+/// `[[bounce]]`: RB0 goes high at 100 and chatters 100, 110 (0), 120 (1), 130 (0), 140 (1). The chatter's falling edges
+/// set IOCBF although the pin settles high, and the port reads each level.
+const BOUNCE: &str = "[[bounce]]\npin = \"RB0\"\nlevel = 1\nat = 100\nbounces = 2\nperiod = 10\n";
+
+#[test]
+fn a_bouncing_pin_makes_every_edge() {
+    let mut m = machine(&BRA_SELF, BOUNCE);
+    w(&mut m, "IOCBN", 0x01);
+    run_to(&mut m, 105);
+    assert_eq!((r(&mut m, "PORTB") & 1, r(&mut m, "IOCBF")), (1, 0), "high, no falling edge yet");
+    run_to(&mut m, 112);
+    assert_eq!((r(&mut m, "PORTB") & 1, r(&mut m, "IOCBF")), (0, 1), "the first bounce falls");
+    run_to(&mut m, 145);
+    assert_eq!(r(&mut m, "PORTB") & 1, 1, "settled high");
+}
+
+#[test]
+fn a_bounce_with_a_random_period_is_the_same_after_a_reset() {
+    let stim = "[[bounce]]\npin = \"RB0\"\nlevel = 1\nat = 50\nbounces = 20\nperiod = [2, 15]\nseed = 42\n";
+    let mut m = machine(&BRA_SELF, stim);
+    fn trace(m: &mut Machine) -> Vec<(u64, u8)> {
+        let mut v = Vec::new();
+        while m.cpu.cycles < 600 {
+            v.push((m.cpu.cycles, r(m, "PORTB") & 1));
+            m.cpu.step();
+        }
+        v
+    }
+    let first = trace(&mut m);
+    assert!(first.windows(2).filter(|w| w[0].1 != w[1].1).count() > 10, "the pin chatters");
+    m.reset();
+    m.cpu.write(m.dev.find_sfr("ANSELB").unwrap().addr, 0);
+    assert_eq!(trace(&mut m), first);
+}
+
+#[test]
+fn a_bounce_on_a_pin_the_part_lacks_is_an_error() {
+    // RE0 is not a pin of the PIC18F27Q10 in devices/18F27Q10.toml
+    let dev = Device::load(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../../devices/18F27Q10.toml")).unwrap();
+    let mut m = Machine::new(dev).unwrap();
+    let e = m.load_stimulus("[[bounce]]\npin = \"RE0\"\nlevel = 1\nbounces = 1\nperiod = 10\n").unwrap_err();
+    assert!(e.contains("RE0"), "{e}");
+}

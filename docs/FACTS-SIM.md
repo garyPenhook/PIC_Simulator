@@ -236,11 +236,11 @@ through `raise_flag`, so it is a request arriving while the program runs (`[A108
 
 ## Stimulus file (`crates/picsim/src/stimulus.rs`, `basil-sim --stim FILE`)
 
-TOML; `[[uart]]` entries (`port`, `at`, `bytes` or `data`, `bit`, `gap`, `nine`, `bad_stop`), `[[adc]]` entries (`channel`, `value`, `at`), `[[pin]]` entries (`port` letter, `bit`, `level`, `at`) and `[[port]]` entries (`port`, `value`, `mask`, `at`); documented at the
+TOML; `[[uart]]` entries (`port`, `at`, `bytes` or `data`, `bit`, `gap`, `nine`, `bad_stop`), `[[adc]]` entries (`channel`, `value`, `at`), `[[pin]]` entries (`port` letter, `bit`, `level`, `at`), `[[port]]` entries (`port`, `value`, `mask`, `at`) and `[[bounce]]` entries (`pin`, `level`, `at`, `bounces`, `period` or `[min, max]`, `seed`); documented at the
 top of `stimulus.rs`. Characters of one entry go out back to back; entries follow each other on the line. `at` is an
 instruction cycle, `bit` the sender's bit time in instruction cycles (default: the receiver's own rate at the time the
 character starts). `at`, `bit` and `gap` are capped at 2^32 cycles (larger values are a parse error). The stimulus is kept
-and applied again after `Machine::reset()`. Tests: `cargo test --release -p picsim`, `tests/sim/run.sh` (a Basil program reading from it).
+and applied again after `Machine::reset()`. A `[[bounce]]` entry is expanded when the file is parsed into `1 + 2 x bounces` ordinary pin changes (the cores see nothing new); the intervals of a range come from SplitMix64 seeded by `seed` and depend on nothing else, so the train is the same on every run and after any reset. It is a user-supplied waveform, not a model of a contact: no datasheet value is assumed and the levels are clean logic levels. At a cycle a `[[pin]]`/`[[port]]` entry also changes, that entry wins (`Stimulus::parse` puts the bounce changes first). Two `[[bounce]]` trains on one pin that overlap in time are an error, and a bounce pin the part lacks is an error when the stimulus is applied. Tests: `stimulus.rs` unit tests, `a_bouncing_pin_*` in `tests/ioc.rs` and `tests/pic16_ioc.rs`, `a_bounce_*` in `tests/ioc.rs`, `cargo test --release -p picsim`, `tests/sim/run.sh` (a Basil program reading from it).
 
 ## Configuration words (S3)
 

@@ -212,3 +212,27 @@ fn a_sleep_without_watchdog_jumps_to_the_wake_up_edge() {
         assert!(m.cpu.cycles < 10_000_010, "{part}: woke at the edge, cycle {}", m.cpu.cycles);
     }
 }
+
+#[test]
+fn a_bouncing_pin_makes_every_edge() {
+    // RA4 goes high at 1000 and chatters: 1010 (0), 1020 (1), 1030 (0), 1040 (1); added to UP_DOWN on RA2
+    for part in PARTS {
+        let mut m = machine(part, &BRA_SELF);
+        m.load_stimulus("[[bounce]]\npin = \"RA4\"\nlevel = 1\nat = 1000\nbounces = 2\nperiod = 10\n").unwrap();
+        w(&mut m, "IOCAN", 0x10);
+        run_to(&mut m, 1005);
+        assert_eq!((r(&mut m, "PORTA") & 0x10, r(&mut m, "IOCAF") & 0x10), (0x10, 0), "{part}: high, no falling edge yet");
+        run_to(&mut m, 1012);
+        assert_eq!((r(&mut m, "PORTA") & 0x10, r(&mut m, "IOCAF") & 0x10), (0, 0x10), "{part}: the first bounce falls");
+        run_to(&mut m, 1045);
+        assert_eq!(r(&mut m, "PORTA") & 0x10, 0x10, "{part}: settled high");
+    }
+}
+
+#[test]
+fn a_bounce_on_a_pin_the_part_lacks_is_an_error() {
+    // RB0 is not a pin of the PIC16F17146 in devices/16F17146.toml
+    let mut m = machine("16F17146", &BRA_SELF);
+    let e = m.load_stimulus("[[bounce]]\npin = \"RB0\"\nlevel = 1\nbounces = 1\nperiod = 10\n").unwrap_err();
+    assert!(e.contains("RB0"), "{e}");
+}
