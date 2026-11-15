@@ -20,7 +20,7 @@ use crate::periph::wdt::{self, Wdt};
 use crate::periph::mssp::{self, I2cEv, Mssp};
 use crate::periph::{pin_name, Board, Bus, Pin, PinView, RxStream};
 use devdesc::Device;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 pub const C: u8 = 1;
 pub const DC: u8 = 2;
@@ -41,6 +41,20 @@ struct Port16 {
     lat: usize,
     tris: usize,
     ansel: Option<usize>,
+    wpu: Option<usize>,
+    odcon: Option<usize>,
+}
+
+/// Electrical state before external drives and the digital input buffer.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct PinState {
+    output: u8,
+    high: u8,
+    weak: u8,
+    analog: u8,
+    od: u8,
+    uart: [u8; 2],
+    inverted: u8,
 }
 
 /// Timer0 (DS40002343F ch.22 p.244-249; same behaviour as the PIC18 model in `periph.rs`): Fosc/4 clock only.
@@ -277,6 +291,10 @@ pub struct Pic16 {
     port_reg: Vec<Option<(u8, bool)>>,
     /// What the outside world drives on the input pins: (from cycle, port index, pin mask, levels), stable-sorted by cycle.
     drive: crate::drive::Drive,
+    /// Internal changes become visible to edge consumers on the following instruction clock.
+    pin_history: Vec<VecDeque<(u64, PinState)>>,
+    uart_pins: Vec<(Option<usize>, u8)>,
+    uart_scan: u64,
     /// PPSLOCK, how far the 55h, AAh sequence has got (0 none, 1 after 55h, 2 after AAh), and which addresses are PPS
     /// selection registers (xxxPPS, RxyPPS): writes to them are ignored while PPSLOCKED is set.
     pps_lock: Option<usize>,
@@ -462,6 +480,9 @@ impl Pic16 {
             ports: Vec::new(),
             port_reg: vec![None; MEM],
             drive: Default::default(),
+            pin_history: Vec::new(),
+            uart_pins: Vec::new(),
+            uart_scan: 0,
             pps_lock: None,
             pps_seq: 0,
             pps_reg: vec![false; MEM],
@@ -748,12 +769,14 @@ impl Pic16 {
                 continue;
             }
             let i = p.ports.len() as u8;
-            for a in [tris].into_iter().chain(ansel) {
+            let wpu = addr(&format!("WPU{l}"));
+            let odcon = addr(&format!("ODCON{l}"));
+            for a in [tris].into_iter().chain(ansel).chain(wpu).chain(odcon) {
                 p.core[a] = true;
             }
             (p.core[port], p.core[lat]) = (true, true);
             (p.port_reg[port], p.port_reg[lat]) = (Some((i, true)), Some((i, false)));
-            p.ports.push(Port16 { letter, port, lat, tris, ansel });
+            p.ports.push(Port16 { letter, port, lat, tris, ansel, wpu, odcon });
         }
         // The MCLR pin is RA3, or RE3 where the part has PORTE (PIC16F180x6). Its TRIS bit, where there is one, is read only
         // and reads 1 (DS40002195E 16.14.3 p.133; DS40001839E Register 12-2 p.143 "U-1"): the reset value says whether it does.
@@ -873,6 +896,17 @@ impl Pic16 {
             .collect();
         for a in p.oscillator.addresses() { p.core[a] = true; }
         p.reset_clock();
+        let family = dev.device.name.replacen("PIC16LF", "PIC16F", 1);
+        let txcode = if family.starts_with("PIC16F183") { 0x14 }
+            else if family.starts_with("PIC16F152") { 0x05 }
+            else if family.starts_with("PIC16F180") { 0x0E }
+            else if family.starts_with("PIC16F171") || family.starts_with("PIC16F131") || family.starts_with("PIC16F132") { 0x13 }
+            else { 0 };
+        for u in &p.uarts {
+            let rx = addr(&format!("RX{}PPS", u.num)).or_else(|| (u.num == 1).then(|| addr("RXPPS")).flatten());
+            p.uart_pins.push((rx, if txcode == 0 { 0 } else { txcode + 3 * (u.num - 1) }));
+        }
+        p.pin_history = (0..p.ports.len()).map(|i| VecDeque::from([(0, p.pin_state(i, 0))])).collect();
         Ok(p)
     }
 
@@ -1181,45 +1215,105 @@ impl Pic16 {
                 }
             }
         }
+        if let Tgt::Mem(a) = t {
+            if self.pps_reg[a] || self.port_reg[a].is_some() || self.uart_reg[a].is_some()
+                || self.ports.iter().any(|p| a == p.tris || p.ansel == Some(a) || p.wpu == Some(a) || p.odcon == Some(a)) {
+                self.publish_pins();
+            }
+        }
     }
 
     // ----- ports and PPS ---------------------------------------------------------------------------------------
 
-    /// Levels of the pins of port `i` now. An output pin shows its latch, an input pin what the outside world drives (0
-    /// until a stimulus says otherwise `[A16]`) and 0 when ANSELx makes it analog (DS40002343F 16.5: the digital input is
-    /// off). A pin whose RxyPPS selects a source other than LATxy still shows its latch `[A120]`.
-    fn port_levels(&self, i: usize) -> u8 {
-        self.port_levels_at(i, self.cycles)
+    /// Electrical output source, direction, pull-up and analog input-buffer state.
+    fn pin_state(&self, i: usize, t: u64) -> PinState {
+        let p = &self.ports[i];
+        let tris = self.tris_of(i);
+        let m = self.mclr_pin.filter(|&(k, _)| k == i).map_or(0, |(_, m)| m);
+        let mut high = self.mem[p.lat];
+        let mut uart = [0; 2];
+        let mut inverted = 0;
+        for &(reg, pi, bit) in &self.pps_out {
+            if pi != i { continue; }
+            let code = self.mem[reg] & self.implemented[reg];
+            if let Some((k, _)) = self.uart_pins.iter().enumerate().find(|(_, p)| p.1 != 0 && p.1 == code) {
+                if self.uarts[k].tx_level(&self.mem, t).is_some() {
+                    uart[k] |= 1 << bit;
+                    if self.mem[self.uarts[k].baud] & 0x10 != 0 { inverted |= 1 << bit; }
+                }
+            }
+            let level = self.ccps.iter().find(|c| code != 0 && c.code == code).map(|c| c.out)
+                .or_else(|| self.clb_pin_level(code))
+                .or_else(|| self.uart_pins.iter().enumerate().find(|(_, p)| p.1 != 0 && p.1 == code)
+                    .and_then(|(k, _)| self.uarts[k].tx_level(&self.mem, t).map(|_| true)));
+            if let Some(level) = level { high = high & !(1 << bit) | u8::from(level) << bit; }
+        }
+        let od = p.odcon.map_or(0, |a| self.mem[a]);
+        let output = (!tris | uart.iter().copied().fold(0, |a, b| a | b)) & self.implemented[p.tris] & self.implemented[p.port];
+        PinState {
+            output, high, od, uart, inverted,
+            // WPU is disabled for an output, including an open-drain output released high.
+            weak: p.wpu.map_or(0, |a| self.mem[a]) & !output | self.pullup.get(i).copied().unwrap_or(0),
+            analog: p.ansel.map_or(0, |a| self.mem[a]) & !m,
+        }
     }
 
-    /// `port_levels` with the outside world as it was driving at cycle `t` (the registers are the current ones).
-    fn port_levels_at(&self, i: usize, t: u64) -> u8 {
+    fn resolve_pins(&self, i: usize, t: u64, s: PinState, source_at: u64) -> u8 {
         let p = &self.ports[i];
+        let driven = self.drive.mask(i, t);
         let ext = self.drive.level(i, t);
-        // the MCLR pin has no analog function
-        let m = self.mclr_pin.filter(|&(k, _)| k == i).map_or(0, |(_, m)| m);
-        let tris = self.tris_of(i);
-        let ana = p.ansel.map_or(0, |a| self.mem[a]) & !m;
-        let mclr_high = if self.cfg.get("MCLRE") == Some(1) { m } else { 0 }; // reads 1 while MCLR is enabled (DS40002343F 16.13 p.182)
-        let v = self.mem[p.lat] & !tris | (ext | mclr_high) & tris & !ana;
-        // The OLED's bus lines: an external pull-up on a released pin, held low while the OLED acknowledges.
-        let v = v | self.pullup.get(i).copied().unwrap_or(0) & tris;
-        // a pin whose RxyPPS selects a CCP shows its output while the pin is an output (TRIS keeps control, 18.3 p.201)
-        let v = self.pps_out.iter().filter(|o| o.1 == i).fold(v, |v, &(reg, _, bit)| {
-            let code = self.mem[reg] & self.implemented[reg];
-            match self.ccps.iter().find(|c| code != 0 && c.code == code) {
-                Some(c) if tris >> bit & 1 == 0 => v & !(1 << bit) | u8::from(c.out) << bit,
-                _ => v,
+        let m = self.mclr_pin.filter(|&(k, _)| k == i && self.cfg.get("MCLRE") == Some(1)).map_or(0, |(_, m)| m);
+        let input = ext | s.weak & !driven | m;
+        let (output, high) = self.electrical_output(s, source_at);
+        (high & output | input & !output) & !s.analog
+            & !self.forced.get(i).copied().unwrap_or(0) & self.implemented[p.port]
+    }
+
+    fn electrical_output(&self, s: PinState, t: u64) -> (u8, u8) {
+        let mut high = s.high;
+        for (k, &mask) in s.uart.iter().enumerate() {
+            if mask != 0 {
+                high = high & !mask | if self.uarts[k].tx_signal(t) { mask } else { 0 };
             }
-        });
-        // a pin whose RxyPPS selects a CLB output shows it while the pin is an output `[A137]`
-        let v = self.pps_out.iter().filter(|o| o.1 == i).fold(v, |v, &(reg, _, bit)| {
-            match self.clb_pin_level(self.mem[reg] & self.implemented[reg]) {
-                Some(l) if tris >> bit & 1 == 0 => v & !(1 << bit) | u8::from(l) << bit,
-                _ => v,
+        }
+        high ^= s.inverted;
+        (s.output & !(s.od & high), high)
+    }
+
+    fn port_levels(&self, i: usize) -> u8 {
+        self.resolve_pins(i, self.cycles, self.pin_state(i, self.cycles), self.cycles)
+    }
+
+    /// Historical internal state combined with the external stimulus at exactly `t`.
+    fn port_levels_at(&self, i: usize, t: u64) -> u8 {
+        let s = self.pin_history.get(i).and_then(|h| h.iter().rev().find(|e| e.0 <= t)).map(|e| e.1)
+            .unwrap_or_else(|| self.pin_state(i, t));
+        // Analytical UART edges use the same following-clock propagation as sampled GPIO/CCP/CLB states.
+        self.resolve_pins(i, t, s, t.saturating_sub(1))
+    }
+
+    fn publish_pins(&mut self) {
+        let at = self.cycles + 1;
+        for i in 0..self.ports.len() {
+            let s = self.pin_state(i, self.cycles);
+            let h = &mut self.pin_history[i];
+            if h.back().is_none_or(|e| e.1 != s) {
+                if h.back().is_some_and(|e| e.0 == at) { h.pop_back(); }
+                h.push_back((at, s));
             }
-        });
-        (v & !self.forced.get(i).copied().unwrap_or(0)) & self.implemented[p.port]
+            // All edge consumers are synchronized at each instruction boundary. Keep the preceding
+            // state as well as changes of the current and following clocks for two-cycle instructions.
+            while h.len() > 2 && h[1].0 < self.cycles.saturating_sub(4) { h.pop_front(); }
+        }
+    }
+
+    fn pin_times(&self, from: u64, to: u64) -> Vec<u64> {
+        let mut times: Vec<_> = self.drive.times(from, to).collect();
+        times.extend(self.uarts.iter().flat_map(|u| u.tx_times(from.saturating_sub(1), to.saturating_sub(1))).map(|t| t + 1));
+        times.extend(self.pin_history.iter().flat_map(|h| h.iter().map(|e| e.0)).filter(|&t| from < t && t <= to));
+        times.sort_unstable();
+        times.dedup();
+        times
     }
 
     /// What the CLB drives on a pin whose RxyPPS holds `code`: CLBPPSOUT0-7 or CLBDEBUG0 (DB0); `None` for any other code.
@@ -1384,16 +1478,20 @@ impl Pic16 {
     /// The pin level an input selection register (PORT field at bits 5:3, PIN at 2:0; the PIC16F183xx has 5 bits and the
     /// same layout, DS40002343F Register 18-1, DS40001839E Register 13-1) selects. `None` when it names no pin of the part.
     pub fn pps_input(&self, reg: usize) -> Option<bool> {
-        self.pps_input_at(reg, self.cycles)
+        let v = self.mem[reg];
+        let i = self.ports.iter().position(|p| p.letter == b'A' + (v >> 3 & 7))?;
+        (self.implemented[self.ports[i].port] & (1 << (v & 7)) != 0)
+            .then(|| self.port_levels(i) >> (v & 7) & 1 != 0)
     }
 
     fn pps_input_at(&self, reg: usize, t: u64) -> Option<bool> {
         let v = self.mem[reg];
         let i = self.ports.iter().position(|p| p.letter == b'A' + (v >> 3 & 7))?;
-        Some(self.port_levels_at(i, t) >> (v & 7) & 1 != 0)
+        (self.implemented[self.ports[i].port] & (1 << (v & 7)) != 0)
+            .then(|| self.port_levels_at(i, t) >> (v & 7) & 1 != 0)
     }
 
-    /// Interrupt-on-change and the INT pin `[A125]`: the changes the stimulus made to the pins since the last look (up to
+    /// Interrupt-on-change and the INT pin `[A125]`: resolved pin changes since the last look (up to
     /// the current cycle, also while asleep) set the IOCxF bits whose edge is enabled, and INTF on the INTEDG edge of the
     /// INTPPS pin, whatever the enable bits say; IOCIF follows the IOCxF registers (read only).
     fn ioc_scan(&mut self) {
@@ -1402,9 +1500,7 @@ impl Pic16 {
         if self.ioc.is_empty() && self.int_pin.is_none() {
             return;
         }
-        let mut times: Vec<u64> = self.drive.times(from, now).collect();
-        times.sort_unstable();
-        times.dedup();
+        let times = self.pin_times(from, now);
         // With MCLRE = 1 or LVP = 1 the MCLR pin has no port function and no IOC (Register 17.7.1 Important)
         let mclr_off = self.cfg.get("MCLRE") == Some(1) || self.cfg.get("LVP") == Some(1);
         for t in times {
@@ -1458,7 +1554,7 @@ impl Pic16 {
     }
 
     /// A write to a PPS selection register: ignored while PPSLOCKED is set (Register 18-3: "Writes to any PPS register are
-    /// ignored"). An output source other than LATxy is not modelled on the PIC16 parts yet.
+    /// ignored"). Unsupported output sources keep the latch fallback and produce a note.
     fn write_pps(&mut self, a: usize, v: u8) {
         if self.pps_lock.is_some_and(|l| self.mem[l] & 1 != 0) {
             self.notes.insert("a write to a PPS selection register while PPSLOCKED is set is ignored".into());
@@ -1466,8 +1562,8 @@ impl Pic16 {
         }
         let v = v & self.implemented[a];
         self.mem[a] = v;
-        if v != 0 && self.pps_out.iter().any(|o| o.0 == a) && !self.ccps.iter().any(|c| c.code == v) && self.clb_pin_level(v).is_none() {
-            self.notes.insert("a RxyPPS output source other than LATxy is not modelled on PIC16 parts; the pin shows its latch".into());
+        if v != 0 && self.pps_out.iter().any(|o| o.0 == a) && !self.ccps.iter().any(|c| c.code == v) && self.clb_pin_level(v).is_none() && !self.uart_pins.iter().any(|p| p.1 != 0 && p.1 == v) {
+            self.notes.insert("this RxyPPS output source is not modelled on PIC16 parts; the pin shows its latch".into());
         }
     }
 
@@ -1546,8 +1642,9 @@ impl Pic16 {
 
     /// Bring every timer to the current cycle.
     fn sync_timers(&mut self) {
-        self.sync_captures(); // before the timers move on: a capture reads the count at its edge
+        self.publish_pins();
         self.sync_uarts();
+        self.sync_captures(); // before the timers move on: a capture reads the count at its edge
         self.sync_mssps();
         self.sync_adc();
         self.sync_nvm();
@@ -1559,13 +1656,14 @@ impl Pic16 {
         for i in 0..self.t2.len() {
             self.sync_t2(i);
         }
+        self.publish_pins();
     }
 
     /// Bring the timers whose flags land before a PIRn access in the same cycle to the current cycle: Timer1/3/5 and
     /// the older Timer2/4/6 (`flag_reg`, `[A110]`).
     fn sync_flag_timers(&mut self) {
-        self.sync_captures();
         self.sync_uarts();
+        self.sync_captures();
         self.sync_mssps();
         self.sync_adc();
         self.sync_nvm();
@@ -1699,10 +1797,24 @@ impl Pic16 {
     /// arrive then are lost (`[A94]`).
     fn sync_uarts(&mut self) {
         let mut ev = Vec::new();
-        for i in 0..self.uarts.len() {
-            let before = self.flags_of(i as u8);
-            self.uarts[i].sync(&mut self.mem, self.cycles, &mut ev, &mut self.tx, &mut self.notes);
-            self.flags_after(i as u8, before);
+        let from = self.uart_scan;
+        self.uart_scan = self.cycles;
+        let before: Vec<_> = (0..self.uarts.len()).map(|i| self.flags_of(i as u8)).collect();
+        // Publish every transmitter first, including a pending frame that starts in this interval.
+        for u in &mut self.uarts {
+            u.sync(&mut self.mem, self.cycles, &mut ev, &mut self.tx, &mut self.notes);
+        }
+        for (i, flags) in before.into_iter().enumerate() {
+            if let Some(reg) = self.uart_pins[i].0 {
+                if self.mem[self.uarts[i].rcsta] & 0x90 == 0x90 {
+                    for t in from.saturating_add(1)..=self.cycles {
+                        let high = self.pps_input_at(reg, t).unwrap_or(true);
+                        self.uarts[i].rx_pin(&mut self.mem, t, high);
+                    }
+                    self.uarts[i].bits(&mut self.mem);
+                }
+            }
+            self.flags_after(i as u8, flags);
         }
     }
 
@@ -1992,7 +2104,7 @@ impl Pic16 {
         a.overflow
     }
 
-    /// Capture: the edges the stimulus makes on the CCPxPPS pins since the last look. Each is looked at in its own cycle, with
+    /// Capture: resolved edges on the CCPxPPS pins since the last look. Each is looked at in its own cycle, with
     /// Timer1 brought to that cycle first, so the captured count is the one at the edge. Edges are not watched in Sleep
     /// (Timer1 does not run from Fosc/4 then, 27.2.5 p.328) nor while a module is not capturing.
     fn sync_captures(&mut self) {
@@ -2109,12 +2221,9 @@ impl Pic16 {
         }
     }
 
-    /// Changes of the level of the pin the input selection register `reg` selects that the stimulus makes in cycles `from+1 ..= to`:
-    /// (cycle, new level). A pin change made by the program or a peripheral is not seen (`[A125]`).
+    /// Resolved changes of the pin selected by `reg` in cycles `from+1 ..= to`: (cycle, new level).
     fn pin_changes(&self, reg: usize, from: u64, to: u64) -> Vec<(u64, bool)> {
-        let mut times: Vec<u64> = self.drive.times(from, to).collect();
-        times.sort_unstable();
-        times.dedup();
+        let times = self.pin_times(from, to);
         times
             .into_iter()
             .filter_map(|t| {
@@ -2513,6 +2622,7 @@ impl Pic16 {
         }
         for u in &mut self.uarts {
             (u.tsr_end, u.pending, u.rx_cur, u.asleep) = (None, None, None, false);
+            u.reset_pins();
             u.fifo.clear();
             u.bits(&mut self.mem);
         }
@@ -2522,6 +2632,8 @@ impl Pic16 {
             h.clb = Clb::new(family, self.cycles * 4);
             h.clb.cfg = cfg;
         }
+        self.uart_scan = self.cycles;
+        self.pin_history = (0..self.ports.len()).map(|i| VecDeque::from([(self.cycles, self.pin_state(i, self.cycles))])).collect();
         self.pps_seq = 0;
         self.ioc_at = self.cycles; // the pins are not watched during a Reset
         self.pc = self.reset_vector;
@@ -2710,7 +2822,9 @@ impl Pic16 {
     /// Asleep with nothing that can wake the part (no watchdog or peripheral is modelled yet).
     pub fn sleep_dead(&self) -> bool {
         // a pin the stimulus has yet to change can raise an IOC or INT flag
-        self.sleeping && !self.enabled_flag_any() && self.drive.next_after(self.cycles).is_none() && !self.wdt_counts_in_sleep()
+        self.sleeping && !self.enabled_flag_any() && self.drive.next_after(self.cycles).is_none()
+            && !self.pin_history.iter().any(|h| h.back().is_some_and(|e| e.0 > self.cycles))
+            && !self.wdt_counts_in_sleep()
     }
 
     /// The watchdog is on in Sleep (WDTE = 3, or 1 with SEN): it will wake the part.
@@ -2778,6 +2892,8 @@ impl Pic16 {
         if self.sleeping
             || self.reset_req.is_some()
             || self.stk_fault.is_some()
+            || self.pin_history.iter().any(|h| h.back().is_some_and(|e| e.0 > now))
+            || self.uarts.iter().any(|u| self.mem[u.rcsta] & 0x90 == 0x90)
             || !self.board.is_empty()
             || self.clb.as_ref().is_some_and(|h| self.mem[h.con] & 0x80 != 0)
             || self.uarts.iter().any(Uart::busy)
@@ -2935,7 +3051,8 @@ impl Pic16 {
                     let wdt = self.wdt_sleep_deadline().unwrap_or(u64::MAX);
                     let next = self.drive.next_after(self.cycles).unwrap_or(u64::MAX);
                     let nvm = self.nvm.as_ref().and_then(Nvm16::deadline).unwrap_or(u64::MAX);
-                    let d = wdt.min(next).min(nvm);
+                    let pins = self.pin_history.iter().filter_map(|h| h.back().map(|e| e.0)).filter(|&t| t > self.cycles).min().unwrap_or(u64::MAX);
+                    let d = wdt.min(next).min(nvm).min(pins);
                     if d != u64::MAX {
                         adv = d.saturating_sub(self.cycles).max(1);
                     }
@@ -3283,6 +3400,7 @@ impl Pic16 {
                     a.enter_sleep(&mut self.mem, &mut self.notes);
                 }
                 for u in &mut self.uarts {
+                    u.freeze_pins(self.cycles);
                     u.sleep(true, 0);
                 }
                 if let Some(w) = self.wdt.as_mut() {
@@ -3407,12 +3525,20 @@ pub fn disasm_for(w: u16, bsr5: bool) -> String {
 impl PinView for Pic16 {
     fn pin(&self, p: Pin) -> Option<(bool, bool)> {
         let i = self.ports.iter().position(|q| q.letter == p.0)?;
-        Some((self.tris_of(i) >> p.1 & 1 == 0, self.port_levels(i) >> p.1 & 1 != 0))
+        if p.1 >= 8 || self.implemented[self.ports[i].port] & (1 << p.1) == 0 { return None; }
+        let mut state = self.pin_state(i, self.cycles);
+        let output = self.electrical_output(state, self.cycles).0;
+        state.analog = 0; // the board sees the physical pin, independently of the digital input buffer
+        Some((output >> p.1 & 1 != 0, self.resolve_pins(i, self.cycles, state, self.cycles) >> p.1 & 1 != 0))
     }
 
     fn open_drain(&self, p: Pin) -> bool {
+        if p.1 >= 8 { return true; }
         match self.ports.iter().position(|q| q.letter == p.0) {
-            Some(i) => !(self.tris_of(i) >> p.1 & 1 == 0 && self.mem[self.ports[i].lat] >> p.1 & 1 == 0),
+            Some(i) => {
+                let (output, high) = self.electrical_output(self.pin_state(i, self.cycles), self.cycles);
+                output & !high & (1 << p.1) == 0
+            }
             None => true,
         }
     }

@@ -247,7 +247,7 @@ fn pps1way_allows_one_lock_and_no_unlock_until_a_reset() {
 fn a_ppsout_source_other_than_lat_is_noted() {
     let probe = machine("16F17146", &[], true, None);
     let rc0 = addr(&probe, "RC0PPS");
-    let mut m = machine("16F17146", &wr("16F17146", rc0, 0x13), true, None);
+    let mut m = machine("16F17146", &wr("16F17146", rc0, 0x3F), true, None);
     step(&mut m, 3);
     assert!(m.cpu.notes.iter().any(|n| n.contains("RxyPPS")), "{:?}", m.cpu.notes);
 }

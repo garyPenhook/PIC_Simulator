@@ -49,6 +49,10 @@ impl Part {
         }
         m.load_hex(&(text + ":00000001FF\n")).unwrap();
         m.load_stimulus(stim).unwrap();
+        // These tests observe digital CLB pin levels through PORT/PPS.
+        for name in ["ANSELA", "ANSELB", "ANSELC"] {
+            if let Some(r) = m.dev.find_sfr(name) { m.cpu.write(r.addr, 0); }
+        }
         m
     }
 }

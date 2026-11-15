@@ -14,8 +14,8 @@ pub struct Edge {
 pub struct Drive {
     /// Every change, sorted by `at`; changes at the same cycle keep the order they were added in.
     edges: Vec<Edge>,
-    /// Per port: `(at, mask, val, level after it)` for each of that port's changes, same order as `edges`.
-    levels: Vec<Vec<(u64, u8, u8, u8)>>,
+    /// Per port: `(at, mask, val, level after it, driven mask after it)` for each of that port's changes, same order as `edges`.
+    levels: Vec<Vec<(u64, u8, u8, u8, u8)>>,
 }
 
 impl Drive {
@@ -27,12 +27,15 @@ impl Drive {
         }
         let l = &mut self.levels[port];
         let j = l.partition_point(|e| e.0 <= at);
-        l.insert(j, (at, mask, val, 0));
+        l.insert(j, (at, mask, val, 0, 0));
         // this change and the later ones of the port apply on top of the one before
         let mut prev = if j == 0 { 0 } else { l[j - 1].3 };
+        let mut driven = if j == 0 { 0 } else { l[j - 1].4 };
         for e in &mut l[j..] {
             e.3 = prev & !e.1 | e.2 & e.1;
             prev = e.3;
+            driven |= e.1;
+            e.4 = driven;
         }
     }
 
@@ -43,6 +46,12 @@ impl Drive {
             0 => 0,
             j => l[j - 1].3,
         }
+    }
+
+    /// Pins explicitly driven at `t`; an unspecified pin floats rather than driving zero.
+    pub fn mask(&self, port: usize, t: u64) -> u8 {
+        let Some(l) = self.levels.get(port) else { return 0 };
+        match l.partition_point(|e| e.0 <= t) { 0 => 0, j => l[j - 1].4 }
     }
 
     /// Cycles of the changes with `from < at <= to`, in order (a cycle repeats when several changes share it).
@@ -94,6 +103,7 @@ mod tests {
             d.push(at, p, m, v);
             for port in 0..3 {
                 for t in [0, 9, 10, 15, 20, 29, 30, 49, 50, 51, 70, 100] {
+                    assert_eq!(d.mask(port, t), edges[..=n].iter().filter(|e| e.0 <= t && e.1 == port).fold(0, |mask, e| mask | e.2));
                     assert_eq!(d.level(port, t), walk(&edges[..=n], port, t), "after {n} edges, port {port}, t {t}");
                 }
             }
