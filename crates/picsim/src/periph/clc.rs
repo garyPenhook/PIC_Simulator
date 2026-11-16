@@ -28,6 +28,8 @@ use devdesc::Device;
 #[derive(Clone)]
 pub struct Clc {
     pub n: u8,
+    pub md: Option<(usize, u8)>,
+    pub bank: Option<[u8; 10]>,
     pub con: usize,
     pub pol: usize,
     pub sel: [usize; 4],
@@ -46,10 +48,27 @@ pub struct Clc {
 }
 
 impl Clc {
+    pub fn regs(&self) -> [usize; 10] {
+        [self.con, self.pol, self.sel[0], self.sel[1], self.sel[2], self.sel[3], self.gls[0], self.gls[1], self.gls[2], self.gls[3]]
+    }
+    pub fn values(&self, m: &crate::mem::DataMem) -> [u8; 10] {
+        self.bank.unwrap_or_else(|| self.regs().map(|a| m.mem[a]))
+    }
+    /// Q41 uses CLCSELECT and one register window for four independent logic cells (DS ch.22).
+    pub fn find_q41(dev: &Device, n: u8) -> Option<Self> {
+        let a = |s: &str| dev.find_sfr(&format!("CLCn{s}")).map(|x| x.addr as usize);
+        Some(Self { n, md: super::pmd(dev, &format!("CLC{n}MD")), bank: Some([0; 10]), con: a("CON")?, pol: a("POL")?,
+            sel: [a("SEL0")?, a("SEL1")?, a("SEL2")?, a("SEL3")?],
+            gls: [a("GLS0")?, a("GLS1")?, a("GLS2")?, a("GLS3")?],
+            flag: Flag::find(dev, &format!("CLC{n}IF"))?, sig: 0x17 + n,
+            out: false, q: false, clk: false, on: false })
+    }
     pub fn find(dev: &Device, n: u8) -> Option<Clc> {
         let a = |s: &str| dev.find_sfr(&format!("CLC{n}{s}")).map(|x| x.addr as usize);
         Some(Clc {
             n,
+            md: super::pmd(dev, &format!("CLC{n}MD")),
+            bank: None,
             con: a("CON")?,
             pol: a("POL")?,
             sel: [a("SEL0")?, a("SEL1")?, a("SEL2")?, a("SEL3")?],

@@ -54,6 +54,7 @@ pub struct Pic18 {
     /// SFR addresses of the registers whose reset value depends on the configuration.
     cfg_sfrs: BTreeMap<&'static str, usize>,
     pub p: Periph,
+    dma: Option<crate::dma::Dma>,
     /// The end-of-instruction peripheral sync may be skipped while no model has anything due (`Periph::tick`). Set by a
     /// run (`Machine::run`), which calls `settle` before it returns; with it set, `p` and the peripheral registers of `m`
     /// can lag behind `cycles` between instructions.
@@ -161,6 +162,7 @@ impl Pic18 {
     pub fn new(dev: &Device) -> Result<Pic18, String> {
         let mut m = DataMem::new(dev)?;
         let p = Periph::bind(dev, &mut m);
+        let dma = crate::dma::Dma::bind(dev, &mut m);
         let intcon = dev
             .find_sfr("INTCON")
             .or_else(|| dev.find_sfr("INTCON0"))
@@ -232,6 +234,7 @@ impl Pic18 {
                 .filter_map(|n| dev.find_sfr(n).map(|s| (n, s.addr as usize)))
                 .collect(),
             p,
+            dma,
             in_service: Vec::new(),
             ctx: Vec::new(),
             irq,
@@ -468,6 +471,10 @@ impl Pic18 {
         let Some(&stored) = self.m.mem.get(i) else { return 0 };
         match self.m.special[i] {
             Special::Hook(k) => self.p.peek_hook(k, &self.m, self.cycles).unwrap_or(stored),
+            Special::PwmQ(i, k) => self.p.pwmq_read(i, k, &self.m),
+            Special::CrcQ(k) => self.p.crcq_read(k, &self.m),
+            Special::Clc(k) => self.p.clc_read(k, &self.m),
+            Special::Dma(k) => self.dma.as_ref().map_or(0, |d| d.read(k)),
             Special::Pcl => self.pc as u8,
             Special::Tos(k) => (self.tos() >> (8 * u32::from(k))) as u8,
             _ => stored,
@@ -481,6 +488,13 @@ impl Pic18 {
             return 0;
         }
         match self.m.special[i] {
+            Special::PwmQ(i, k) => { self.p.catch_up(&mut self.m); self.p.pwmq_read(i, k, &self.m) },
+            Special::CrcQ(k) => { self.p.catch_up(&mut self.m); self.p.crcq_read(k, &self.m) },
+            Special::Clc(k) => { self.p.catch_up(&mut self.m); self.p.clc_read(k, &self.m) },
+            Special::Dma(k) => {
+                if self.dma.is_none() { self.notes.insert("DMA access to its own or another DMA's control registers is not modelled".into()); }
+                self.dma.as_ref().map_or(0, |d| d.read(k))
+            }
             Special::Core => self.m.mem[i],
             Special::None | Special::Crc(_) | Special::Sync => {
                 if self.m.is_sfr[i] || self.m.special[i] != Special::None {
@@ -535,7 +549,7 @@ impl Pic18 {
         }
         let model_reg = self.oscillator.contains(i) || match self.m.special[i] {
             Special::None => self.m.is_sfr[i],
-            Special::Hook(_) | Special::Crc(_) | Special::Sync => true,
+            Special::Hook(_) | Special::Crc(_) | Special::Dma(_) | Special::Clc(_) | Special::PwmQ(..) | Special::CrcQ(_) | Special::Sync => true,
             Special::Core | Special::Pcl | Special::Tos(_) | Special::Indirect(..) => false,
         };
         if model_reg {
@@ -561,6 +575,13 @@ impl Pic18 {
                 }
                 self.m.mem[i] = v & self.m.implemented[i];
                 self.p.synced_write(i);
+            }
+            Special::PwmQ(i, k) => self.p.pwmq_write(i, k, v, &mut self.m, self.cycles),
+            Special::CrcQ(k) => self.p.crcq_write(k, v, self.cycles, &mut self.m),
+            Special::Clc(k) => self.p.clc_write(k, v, &mut self.m, self.cycles),
+            Special::Dma(k) => {
+                if let Some(d) = &mut self.dma { d.write(k, v, &mut self.m); }
+                else { self.notes.insert("DMA access to its own or another DMA's control registers is not modelled".into()); }
             }
             Special::Crc(k) => {
                 let now = self.cycles;
@@ -684,7 +705,7 @@ impl Pic18 {
     pub fn step(&mut self) -> u32 {
         self.p.board.clock_changed(self.cycles);
         self.p.wdt_fosc(self.cycles);
-        let n = self.step_inner();
+        let n = if !self.p.fosc_stopped() && !self.mclr_hold && let Some(n) = self.dma_cycle() { n } else { self.step_inner() };
         if crate::periph::check_lazy() {
             // Check mode: every step predicts and checks its skip (`Periph::tick`), then syncs anyway, so a test that
             // steps by hand sees what it always saw.
@@ -692,6 +713,44 @@ impl Pic18 {
         }
         self.note_entry(); // after the instruction, so a run that stops at a routine's first instruction has it noted
         n
+    }
+
+    /// One DMA bus phase. The initial model grants DMA ahead of the CPU; each read/write costs one cycle.
+    fn dma_cycle(&mut self) -> Option<u32> {
+        let start = self.cycles;
+        let mut dma = self.dma.take()?;
+        if !dma.enabled() {
+            if let Some(q) = &mut self.m.dma_requests { q.clear(); }
+            self.dma = Some(dma);
+            return None;
+        }
+        self.p.catch_up(&mut self.m);
+        let action = dma.next(&mut self.m);
+        let active = action.is_some();
+        if let Some((channel, write, region, address, value)) = action {
+            if address >= 0x4000 && (write || region == 0) {
+                self.notes.insert("DMA-only register mirrors (4000h and above) are not modelled".into());
+            }
+            if write {
+                self.write(address, value);
+                dma.written(channel, &mut self.m);
+            } else {
+                let value = match region {
+                    0 => self.read(address),
+                    1 => self.prog.get(address as usize).copied().unwrap_or(0xFF),
+                    _ => self.p.dma_eeprom(address),
+                };
+                dma.read_complete(channel, value);
+            }
+        }
+        self.dma = Some(dma);
+        if active {
+            self.cycles += 1;
+            self.p.sync(&mut self.m, self.cycles);
+            self.p.board_poll(&self.m, self.cycles);
+            if let Some(k) = self.mclr_fell().or_else(|| self.p.take_reset()) { self.reset_cond(k); }
+        }
+        active.then_some((self.cycles - start) as u32)
     }
 
     /// At a routine's first instruction (`entry_watch`): notes FSR1 for the current return-stack level (`entry_sp`). After
@@ -1542,6 +1601,7 @@ impl Pic18 {
     /// the reset state, data RAM and the program stay, and the peripherals start over (rebuilt, the stimulus applied again; the
     /// logs, the notes, the board and the `[[spi]]`/`[[i2c]]` clients' places in their data stay). `[A91]`-`[A93]` in FACTS-SIM.md.
     pub fn reset_cond(&mut self, kind: ResetKind) {
+        self.dma = crate::dma::Dma::bind(&self.dev, &mut self.m);
         self.entry_sp.fill(None);
         self.entry_irq.fill(false);
         for &(a, set, clr) in &self.mclr {

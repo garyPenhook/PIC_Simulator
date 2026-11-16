@@ -195,12 +195,14 @@ fn unmodelled_pps_sources_keep_showing_the_latch() {
 }
 
 #[test]
-fn q41_is_unchanged() {
+fn q41_ccp_control_has_a_model() {
     let dev = Device::load(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../../devices/18F16Q41.toml")).unwrap();
     let mut m = Machine::new(dev).unwrap();
     let a = m.dev.find_sfr("CCP1CON").unwrap().addr;
     m.cpu.write(a, 0x8C);
-    assert_eq!(m.cpu.read(a), 0x8C, "no CCP model on the Q41: a plain register");
+    assert_eq!(m.cpu.read(a), 0x8C, "PWM enabled with output initially low");
+    assert!(matches!(m.cpu.m.special[a as usize], picsim::mem::Special::Hook(_)));
+    assert!(!m.cpu.m.unmodelled.contains("CCP1CON"));
 }
 
 // ---- Timers 3-6 (DS40002043F ch.20, 21, 22.1; CCPTMRS p.359) ----

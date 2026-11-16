@@ -32,6 +32,8 @@ pub(crate) mod ccp16;
 pub(crate) mod clb;
 mod clc;
 mod crc;
+mod pwmq;
+mod crcq;
 pub(crate) mod wdt;
 mod cmp;
 mod cwg;
@@ -111,6 +113,7 @@ impl Flag {
     }
     fn set(self, m: &mut DataMem) {
         self.set_in(&mut m.mem);
+        if let Some(q) = &mut m.dma_requests { q.push((self.addr, self.mask)); }
     }
     fn clear(self, m: &mut DataMem) {
         self.clear_in(&mut m.mem);
@@ -136,6 +139,12 @@ fn out_code(m: &DataMem, reg: usize) -> u8 {
 fn addr(dev: &Device, name: &str) -> Option<usize> {
     dev.find_sfr(name).map(|s| s.addr as usize)
 }
+
+/// Peripheral-module-disable bit, if supplied by this part's register description.
+fn pmd(dev: &Device, name: &str) -> Option<(usize, u8)> {
+    dev.sfr.iter().find_map(|s| s.fields.iter().find(|f| f.name == name).map(|f| (s.addr as usize, 1 << f.pos)))
+}
+fn pmd_off(m: &DataMem, bit: Option<(usize, u8)>) -> bool { bit.is_some_and(|(a, mask)| m.mem[a] & mask != 0) }
 
 /// Clocks produced by `dt` input ticks through a prescaler of `1 << shift` whose counter is `pre`.
 #[inline]
@@ -547,6 +556,11 @@ struct I2cPps {
 
 #[derive(Clone)]
 pub struct Periph {
+    q41: bool,
+    pwmqs: Vec<pwmq::PwmQ>,
+    pwm_en: Option<usize>,
+    pwm_load: Option<usize>,
+    clc_select: Option<usize>,
     ports: Vec<Port>,
     /// What the outside world drives on the input pins: (from cycle, port index, pin mask, levels), stable-sorted by cycle.
     drive: crate::drive::Drive,
@@ -584,6 +598,7 @@ pub struct Periph {
     clc_scan: u64,
     /// CRC with memory scanner (Q10).
     crc: Option<Crc>,
+    crcq: Option<crcq::CrcQ>,
     wdt: Option<Wdt>,
     /// A reset the watchdog or CLRWDT asks for; the core takes it after the instruction (`take_reset`).
     reset_req: Option<ResetKind>,
@@ -733,6 +748,10 @@ impl Periph {
         self.nvm.as_mut().is_some_and(|n| n.latch(p, v))
     }
 
+    pub(crate) fn dma_eeprom(&self, a: u32) -> u8 {
+        self.nvmq.as_ref().and_then(|n| n.eeprom.get(a as usize)).copied().unwrap_or(0xFF)
+    }
+
     pub fn hold_base(&self) -> Option<usize> {
         self.nvm.as_ref().and_then(|n| n.hold()).or_else(|| self.nvmq.as_ref().and_then(|n| n.hold()))
     }
@@ -751,7 +770,7 @@ impl Periph {
 
     /// Find the timers the part has and mark their registers as hooked in `m`.
     pub fn bind(dev: &Device, m: &mut DataMem) -> Periph {
-        let mut p = Periph { ports: Vec::new(), drive: Default::default(), t0: None, t1: Vec::new(), t2: Vec::new(), uarts: Vec::new(), quarts: Vec::new(), spis: Vec::new(), mssps: Vec::new(), i2cqs: Vec::new(), adc: None, nvm: None, nvmq: None, stall: 0, fvr: None, tx: Log::new(), spi_tx: Log::new(), i2c_log: Log::new(), notes: BTreeSet::new(), ccps: Vec::new(), pwms: Vec::new(), cwg: None, cmps: Vec::new(), cmout: None, clcs: Vec::new(), clcin: Vec::new(), clcdata: None, in_clc: false, clc_scan: 0, crc: None, wdt: None, reset_req: None, sleeping: false, sleep_at: 0, fosc_off: false, wdt_wake: false, analog: Vec::new(), ccptmrs: ccp::TmrSel::Q10(None), k22_ccp: None, ppsout: Vec::new(), pps_by_port: Vec::new(), sig_src: 0, i2c_pps: Vec::new(), i2c_fixed: Vec::new(), board: Board::default(), pullup: Vec::new(), forced: Vec::new(), sig: 0, sig_log: Vec::new(), sched: Vec::new(), pin_log: Log::new(), event: None, ioc: Ioc::default(), sb: SyncBufs::default(), due: 0, owed: None };
+        let mut p = Periph { q41: addr(dev, "ADCPCON").is_some(), pwmqs: Vec::new(), pwm_en: addr(dev, "PWMEN"), pwm_load: addr(dev, "PWMLOAD"), clc_select: None, ports: Vec::new(), drive: Default::default(), t0: None, t1: Vec::new(), t2: Vec::new(), uarts: Vec::new(), quarts: Vec::new(), spis: Vec::new(), mssps: Vec::new(), i2cqs: Vec::new(), adc: None, nvm: None, nvmq: None, stall: 0, fvr: None, tx: Log::new(), spi_tx: Log::new(), i2c_log: Log::new(), notes: BTreeSet::new(), ccps: Vec::new(), pwms: Vec::new(), cwg: None, cmps: Vec::new(), cmout: None, clcs: Vec::new(), clcin: Vec::new(), clcdata: None, in_clc: false, clc_scan: 0, crc: None, crcq: None, wdt: None, reset_req: None, sleeping: false, sleep_at: 0, fosc_off: false, wdt_wake: false, analog: Vec::new(), ccptmrs: ccp::TmrSel::Q10(None), k22_ccp: None, ppsout: Vec::new(), pps_by_port: Vec::new(), sig_src: 0, i2c_pps: Vec::new(), i2c_fixed: Vec::new(), board: Board::default(), pullup: Vec::new(), forced: Vec::new(), sig: 0, sig_log: Vec::new(), sched: Vec::new(), pin_log: Log::new(), event: None, ioc: Ioc::default(), sb: SyncBufs::default(), due: 0, owed: None };
         let mut hook = |a: usize, k: u8| m.special[a] = Special::Hook(k);
         if let (Some(l), Some(h), Some(c0), Some(c1), Some(flag)) =
             (addr(dev, "TMR0L"), addr(dev, "TMR0H"), addr(dev, "T0CON0"), addr(dev, "T0CON1"), Flag::find(dev, "TMR0IF"))
@@ -850,8 +869,8 @@ impl Periph {
             hook(n.lock, NVMQ0 + nvmq::LOCK);
             p.nvmq = Some(n);
         }
-        if addr(dev, "ADCPCON").is_none() && addr(dev, "PRODL").is_some() {
-            p.ccptmrs = ccp::TmrSel::Q10(addr(dev, "CCPTMRS"));
+        if addr(dev, "PRODL").is_some() {
+            p.ccptmrs = ccp::TmrSel::Q10(addr(dev, "CCPTMRS").or_else(|| addr(dev, "CCPTMRS0")));
             for n in 1..=2u8 {
                 if let Some(c) = Ccp::find(dev, n) {
                     hook(c.con, CCP0 + p.ccps.len() as u8 * ccp::HOOKS);
@@ -897,6 +916,14 @@ impl Periph {
             }
             if !p.clcs.is_empty() {
                 p.clcin = (0..8).map(|k| addr(dev, &format!("CLCIN{k}PPS")).unwrap_or(usize::MAX)).collect();
+                p.clcdata = addr(dev, "CLCDATA");
+            }
+            if p.q41 {
+                p.clc_select = addr(dev, "CLCSELECT");
+                for n in 1..=4 {
+                    if let Some(c) = Clc::find_q41(dev, n) { p.clcs.push(c); }
+                }
+                p.clcin = (0..4).map(|k| addr(dev, &format!("CLCIN{k}PPS")).unwrap_or(usize::MAX)).collect();
                 p.clcdata = addr(dev, "CLCDATA");
             }
             for n in 3..=4u8 {
@@ -1001,6 +1028,25 @@ impl Periph {
             }
             p.crc = Some(c);
         }
+        if let Some(c) = crcq::CrcQ::find(dev) {
+            for (i, &a) in c.regs.iter().enumerate() { m.special[a] = Special::CrcQ(i as u8); }
+            p.crcq = Some(c);
+        }
+        if p.q41 {
+            for n in 1..=3 {
+                if let Some(w) = pwmq::PwmQ::find(dev, n) {
+                    for (sub, &a) in w.regs.iter().enumerate() { m.special[a] = Special::PwmQ(n - 1, sub as u8); }
+                    p.pwmqs.push(w);
+                }
+            }
+            if let Some(a) = p.pwm_en { m.special[a] = Special::PwmQ(3, 0); }
+            if let Some(a) = p.pwm_load { m.special[a] = Special::PwmQ(3, 1); }
+        }
+        if let Some(a) = p.clc_select {
+            m.special[a] = Special::Clc(10);
+            for (i, a) in p.clcs[0].regs().into_iter().enumerate() { m.special[a] = Special::Clc(i as u8); }
+            if let Some(a) = p.clcdata { m.special[a] = Special::Clc(11); }
+        }
         p.init_mem(m);
         for port in 0..p.ports.len() {
             let l = p.ports[port].letter as char;
@@ -1038,7 +1084,76 @@ impl Periph {
         }
         let sigs = p.ccps.iter().map(|c| c.sig).chain(p.pwms.iter().map(|c| c.sig)).chain(p.cmps.iter().map(|c| c.sig)).chain(p.clcs.iter().map(|c| c.sig));
         p.sig_src = sigs.fold(0, |a, c| a | 1u32.checked_shl(u32::from(c)).unwrap_or(0));
+        if !p.pwmqs.is_empty() { p.sig_src |= 0xFC0; }
         p
+    }
+
+    pub(crate) fn crcq_read(&self, k: u8, m: &DataMem) -> u8 {
+        self.crcq.as_ref().map_or(0, |c| c.read(k, m))
+    }
+    pub(crate) fn crcq_write(&mut self, k: u8, v: u8, now: u64, m: &mut DataMem) {
+        if let Some(c) = &mut self.crcq { c.write(k, v, now, m); }
+        self.invalidate();
+    }
+
+    fn pwmq_sync(&mut self, m: &mut DataMem, now: u64, asleep: bool) {
+        if self.pwmqs.is_empty() { return; }
+        let mut events = Vec::new();
+        for w in &mut self.pwmqs { w.sync(m, now, asleep, &mut events, &mut self.notes); }
+        events.sort_by_key(|e| e.0);
+        for (tick, code, v) in events { self.set_sig(m, code, u8::from(v), tick); }
+        if let Some(a) = self.pwm_en { m.mem[a] = self.pwmqs.iter().fold(0, |v, w| v | (m.mem[w.regs[9]] >> 7) << (w.n - 1)); }
+        if let Some(a) = self.pwm_load { m.mem[a] = self.pwmqs.iter().fold(0, |v, w| v | ((m.mem[w.regs[9]] >> 2) & 1) << (w.n - 1)); }
+    }
+    pub(crate) fn pwmq_read(&self, i: u8, sub: u8, m: &DataMem) -> u8 {
+        if i < 3 { m.mem[self.pwmqs[i as usize].regs[sub as usize]] }
+        else { self.pwmqs.iter().fold(0, |v, w| v | ((m.mem[w.regs[9]] >> if sub == 0 { 7 } else { 2 }) & 1) << (w.n - 1)) }
+    }
+    pub(crate) fn pwmq_write(&mut self, i: u8, sub: u8, v: u8, m: &mut DataMem, now: u64) {
+        self.sync(m, now);
+        let mut events = Vec::new();
+        if i < 3 { self.pwmqs[i as usize].write(sub, v, now, m, &mut events); }
+        else {
+            for w in &mut self.pwmqs {
+                let bit = if sub == 0 { 0x80 } else { 4 };
+                let value = m.mem[w.regs[9]] & !bit | if v & (1 << (w.n - 1)) != 0 { bit } else { 0 };
+                w.write(9, value, now, m, &mut events);
+            }
+        }
+        for (tick, code, v) in events { self.set_sig(m, code, u8::from(v), tick); }
+        self.invalidate();
+    }
+
+    /// Translate the family's PPS codes to the signal numbers used by the shared models.
+    fn output_code(&self, m: &DataMem, reg: usize) -> u8 {
+        let code = out_code(m, reg);
+        if !self.q41 || reg >= FIXED_PIN { return code; }
+        match m.mem[reg] & 0x3F {
+            1..=4 => 0x17 + (m.mem[reg] & 0x3F),
+            5..=8 => (m.mem[reg] & 0x3F) - 4,
+            9 => 5,
+            n @ 10..=15 => n - 4,
+            25 | 26 => (m.mem[reg] & 0x3F) - 12,
+            _ => 0,
+        }
+    }
+
+    pub(crate) fn clc_read(&self, k: u8, m: &DataMem) -> u8 {
+        let selected = self.clc_select.map_or(0, |a| m.mem[a] & 3);
+        if k == 11 { return self.clcs.iter().fold(0, |v, c| v | u8::from(c.out) << (c.n - 1)); }
+        if k == 10 { selected } else { self.clcs.get(selected as usize).and_then(|c| c.bank).map_or(0, |b| b[k as usize]) }
+    }
+
+    pub(crate) fn clc_write(&mut self, k: u8, v: u8, m: &mut DataMem, now: u64) {
+        self.sync(m, now);
+        if k == 11 { return; }
+        if k == 10 { m.mem[self.clc_select.unwrap()] = v & 3; return; }
+        let selected = m.mem[self.clc_select.unwrap()] as usize & 3;
+        if let Some(b) = &mut self.clcs[selected].bank {
+            b[k as usize] = match k { 0 => v & 0x9F | b[0] & 0x20, 1 => v & 0x8F, 2..=5 => v & 0x7F, _ => v };
+        }
+        self.clc_eval(m, 4 * now);
+        self.invalidate();
     }
 
     /// A Timer1-type timer is running or gated, so a write to a pin register must first bring the models up to date: the
@@ -1149,6 +1264,7 @@ impl Periph {
         if let Some(c) = &mut self.crc {
             c.sync(m, now);
         }
+        if let Some(c) = &mut self.crcq { c.sync(m, now); }
         for c in &mut self.ccps {
             c.scan = now;
         }
@@ -1193,6 +1309,7 @@ impl Periph {
         if self.sleeping
             || self.reset_req.is_some()
             || !self.board.is_empty()
+            || self.pwmqs.iter().any(|p| p.enabled(m))
             || self.clc_active(m)
             || self.cwg.as_ref().is_some_and(|c| c.en(m))
             || self.uarts.iter().any(Uart::busy)
@@ -1204,6 +1321,7 @@ impl Periph {
             || self.nvm.as_ref().is_some_and(Nvm::busy)
             || self.nvmq.as_ref().is_some_and(NvmQ::busy)
             || self.crc.as_ref().is_some_and(Crc::busy)
+            || self.crcq.as_ref().is_some_and(crcq::CrcQ::busy)
         {
             return soon;
         }
@@ -1305,6 +1423,7 @@ impl Periph {
                 let hit = (old ^ new) & (new & m.mem[pp] | !new & m.mem[n]);
                 if hit != 0 {
                     m.mem[f] |= hit & m.implemented[f];
+                    if let Some(flag) = self.ioc.iocif { flag.set(m); }
                     self.raised(t);
                 }
             }
@@ -1319,7 +1438,7 @@ impl Periph {
         }
         if let Some(fl) = self.ioc.iocif {
             if self.ioc.ports.iter().any(|&(_, f, ..)| m.mem[f] != 0) {
-                fl.set(m);
+                fl.set_in(&mut m.mem); // status summary, not another DMA request pulse
             } else {
                 fl.clear(m);
             }
@@ -1389,7 +1508,7 @@ impl Periph {
             if new { m.mem[w.con] |= 0x20 } else { m.mem[w.con] &= !0x20 }
         }
         for &(reg, pi, bit) in &self.ppsout {
-            if out_code(m, reg) == code && m.mem[self.ports[pi].tris] >> bit & 1 == 0 {
+            if self.output_code(m, reg) == code && m.mem[self.ports[pi].tris] >> bit & 1 == 0 {
                 self.pin_log.push((tick, self.ports[pi].letter, bit, new));
             }
         }
@@ -1431,7 +1550,8 @@ impl Periph {
         if self.stall > 0 {
             self.flash_event(now);
         }
-        if self.stall > 0 || self.crc.as_ref().is_some_and(Crc::busy) {
+        if self.stall > 0 || self.crc.as_ref().is_some_and(Crc::busy)
+            || self.crcq.as_ref().is_some_and(crcq::CrcQ::busy) {
             self.due = 0; // the scanner fed the CRC: `tick` must follow it
         }
     }
@@ -1617,6 +1737,7 @@ impl Periph {
     /// The part slept for `d` cycles: what has no clock in Sleep carries on from where it stopped, so every time it
     /// has in hand moves `d` cycles later.
     fn thaw(&mut self, d: u64) {
+        if let Some(c) = &mut self.crcq { c.thaw(d); }
         if let Some(c) = &mut self.crc {
             c.thaw(d);
         }
@@ -1725,6 +1846,21 @@ impl Periph {
 
     /// Level of CLC data input `src` (DyS code, DS40002043F p.409) of cell `n` at cycle `now`.
     fn clc_input(&mut self, m: &DataMem, src: u8, now: u64, n: u8) -> bool {
+        if self.q41 {
+            let code = match src {
+                0..=3 => return self.clcin.get(src as usize).is_some_and(|&r| r != usize::MAX && self.pps_pin(m, r, now)),
+                20 => 5,
+                21..=26 => src - 15,
+                28 | 29 => src - 15,
+                34..=37 => src - 10,
+                49 | 50 => src - 48,
+                _ => {
+                    self.notes.insert(format!("CLC{n} data input {src} is not modelled; it reads low"));
+                    return false;
+                }
+            };
+            return self.sig >> code & 1 != 0;
+        }
         let code = match src {
             0..=7 => return self.clcin.get(usize::from(src)).is_some_and(|&r| r != usize::MAX && self.pps_pin(m, r, now)),
             24..=27 => src - 19, // CCP1, CCP2, PWM3, PWM4 = source codes 5..8
@@ -1743,25 +1879,26 @@ impl Periph {
     fn clc_step(&mut self, m: &mut DataMem, i: usize, tick: u64) -> bool {
         let now = tick / 4;
         let c = &self.clcs[i];
-        let (con, polr, sel, gls, flag, sig, n) = (c.con, c.pol, c.sel, c.gls, c.flag, c.sig, c.n);
+        let (con, flag, sig, n) = (c.con, c.flag, c.sig, c.n);
+        let cfg = c.values(m);
         let (was_on, q0, clk0, out0) = (c.on, c.q, c.clk, c.out);
-        let on = m.mem[con] & 0x80 != 0;
+        let on = cfg[0] & 0x80 != 0 && !pmd_off(m, c.md);
         let (mut q, mut clk, mut out) = (false, false, false);
         if on {
-            let pol = m.mem[polr];
-            let used = |k: usize| gls.iter().any(|&g| m.mem[g] >> (2 * k) & 3 != 0);
+            let pol = cfg[1];
+            let used = |k: usize| cfg[6..10].iter().any(|&g| g >> (2 * k) & 3 != 0);
             let mut d = [false; 4];
             for (k, dk) in d.iter_mut().enumerate() {
                 if used(k) {
-                    *dk = self.clc_input(m, m.mem[sel[k]] & 63, now, n);
+                    *dk = self.clc_input(m, cfg[2 + k] & if self.q41 { 127 } else { 63 }, now, n);
                 }
             }
             let mut g = [false; 4];
             for (y, gy) in g.iter_mut().enumerate() {
-                *gy = clc::gate(m.mem[gls[y]], pol >> y & 1 != 0, d);
+                *gy = clc::gate(cfg[6 + y], pol >> y & 1 != 0, d);
             }
             clk = g[0];
-            q = clc::logic(m.mem[con] & 7, g, was_on && q0, if was_on { clk0 } else { g[0] });
+            q = clc::logic(cfg[0] & 7, g, was_on && q0, if was_on { clk0 } else { g[0] });
             out = q != (pol & 0x80 != 0);
         }
         let c = &mut self.clcs[i];
@@ -1769,7 +1906,8 @@ impl Periph {
         if out != out0 {
             c.out = out;
         }
-        m.mem[con] = m.mem[con] & !0x20 | u8::from(out) << 5;
+        if let Some(b) = &mut c.bank { b[0] = cfg[0] & !0x20 | u8::from(out) << 5; }
+        else { m.mem[con] = cfg[0] & !0x20 | u8::from(out) << 5; }
         if let Some(a) = self.clcdata {
             let bit = 1u8 << (n - 1);
             if out { m.mem[a] |= bit } else { m.mem[a] &= !bit }
@@ -1778,7 +1916,7 @@ impl Periph {
             return false;
         }
         self.set_sig(m, sig, u8::from(out), tick);
-        if m.mem[con] & (if out { 0x10 } else { 0x08 }) != 0 {
+        if cfg[0] & (if out { 0x10 } else { 0x08 }) != 0 {
             flag.set(m);
             self.raised(now);
         }
@@ -1787,7 +1925,7 @@ impl Periph {
 
     /// Some cell is enabled or still shows a high output (so that disabling it is seen).
     fn clc_active(&self, m: &DataMem) -> bool {
-        self.clcs.iter().any(|c| c.on || c.out || m.mem[c.con] & 0x80 != 0)
+        self.clcs.iter().any(|c| c.on || c.out || c.values(m)[0] & 0x80 != 0)
     }
 
     /// Re-evaluate all the cells at `tick` until the outputs settle (cells feed each other).
@@ -1841,8 +1979,8 @@ impl Periph {
     fn cmp_level(&self, m: &DataMem, i: usize, now: u64) -> bool {
         let c = &self.cmps[i];
         let con = m.mem[c.con0];
-        let core = con & 0x80 != 0 && {
-            let (p, n) = (cmp::pos(c.n, m.mem[c.pch]), cmp::neg(m.mem[c.nch]));
+        let core = con & 0x80 != 0 && !pmd_off(m, c.md) && {
+            let (p, n) = (c.positive(m.mem[c.pch]), c.negative(m.mem[c.nch]));
             self.cmp_volts(m, p, now) > self.cmp_volts(m, n, now)
         };
         core != (con & 0x10 != 0)
@@ -1854,7 +1992,7 @@ impl Periph {
         let new = self.cmp_level(m, i, at);
         let c = &self.cmps[i];
         let (con0, con1, flag, sig, n) = (c.con0, c.con1, c.flag, c.sig, c.n);
-        let pch = cmp::pos(n, m.mem[c.pch]);
+        let pch = self.cmps[i].positive(m.mem[c.pch]);
         if m.mem[con0] & 0x80 != 0 && pch == cmp::Src::Dac {
             self.notes.insert(format!("C{n} DAC input is not modelled; it reads 0 V"));
         }
@@ -1930,11 +2068,12 @@ impl Periph {
     fn cwg_sources(&mut self, m: &mut DataMem, now: u64) -> bool {
         let Some(c) = &self.cwg else { return false };
         let (as0, as1, pps) = (c.as0, m.mem[c.as1], c.pps);
-        if as1 & 0xCE != 0 {
-            self.notes.insert("CWG1 auto-shutdown sources other than the CWG1PPS pin (AS0E) and the comparators (AS4E, AS5E) are not modelled".to_string());
+        if as1 & if self.q41 { 0xE6 } else { 0xCE } != 0 {
+            self.notes.insert("CWG1 selected auto-shutdown source is not modelled (the pin and comparators are)".to_string());
         }
         let cmp_low = |n: usize| self.cmps.get(n).is_some_and(|c| !c.out);
-        let active = as1 & 1 != 0 && pps.is_some_and(|r| !self.pps_pin(m, r, now)) || as1 & 0x10 != 0 && cmp_low(0) || as1 & 0x20 != 0 && cmp_low(1);
+        let (c1, c2) = if self.q41 { (0x08, 0x10) } else { (0x10, 0x20) };
+        let active = as1 & 1 != 0 && pps.is_some_and(|r| !self.pps_pin(m, r, now)) || as1 & c1 != 0 && cmp_low(0) || as1 & c2 != 0 && cmp_low(1);
         let c = self.cwg.as_mut().unwrap();
         if active && c.en(m) && m.mem[as0] & 0x80 == 0 {
             m.mem[as0] |= 0x80;
@@ -1977,8 +2116,8 @@ impl Periph {
                         c.dir_change();
                     }
                 }
-                if m.mem[c.ism] & 15 == 0 || m.mem[c.ism] & 15 > 6 {
-                    self.notes.insert("CWG1 data input other than CCP1, CCP2, PWM3, PWM4, CMP1 and CMP2 is not modelled; the CWG sees it low".to_string());
+                if c.source(m).is_none() {
+                    self.notes.insert(if self.q41 { "CWG1 selected data input is not modelled; the CWG sees it low" } else { "CWG1 data input other than CCP1, CCP2, PWM3, PWM4, CMP1 and CMP2 is not modelled; the CWG sees it low" }.to_string());
                 }
                 if m.mem[self.cwg.as_ref().unwrap().clk] & 1 != 0 {
                     self.notes.insert("CWG1 clock HFINTOSC is counted as Fosc".to_string());
@@ -2331,6 +2470,7 @@ impl Periph {
     }
 
     fn sync_with(&mut self, m: &mut DataMem, now: u64, asleep: bool, sb: &mut SyncBufs) {
+        self.pwmq_sync(m, now, asleep);
         // Compare CCPs with the timer they use: (index, CCPR, MODE, timer number).
         let mut comps = std::mem::take(&mut sb.comps);
         comps.extend(self
@@ -2895,7 +3035,7 @@ impl Periph {
         let mut v = m.mem[p.lat] & !tris | ext & tris & !ana;
         for &(reg, bit) in &self.pps_by_port[i] {
             // A pin driven by a modelled peripheral source (RxyPPS, TRIS clear) shows the source level, not the latch.
-            let code = out_code(m, reg);
+            let code = self.output_code(m, reg);
             if tris >> bit & 1 == 0 && (self.sig_src >> code & 1 != 0 || ((1..=4).contains(&code) && self.cwg.as_ref().is_some_and(|c| c.hiz >> (code - 1) & 1 == 0))) {
                 v = v & !(1 << bit) | u8::from(self.sig >> code & 1 != 0) << bit;
             }

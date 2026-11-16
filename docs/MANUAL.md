@@ -4,7 +4,7 @@ Revision for **pic-sim 0.2.10** and **basil-sim 0.2.10** (one workspace version)
 
 This manual describes what the simulator does today. It is organised in the order you meet the tools: what the simulator is, how to build and start it, how to prepare a program for it, the graphical front end `pic-sim`, the command-line front end `basil-sim`, the stimulus file that describes the outside world, the simulated board (LEDs and OLED), and finally what is and is not modelled. Anything not listed here is not supported.
 
-Status: the simulator is **cycle exact against the data sheets and, where a Microchip MDB (MPLAB X simulator) comparison was possible, against MDB**. It has **not been compared with silicon**. Where the data sheet is silent the simulator makes an assumption; each one is numbered `[A#]` and written down with its source in `docs/FACTS-SIM.md`. The few places where the simulator deliberately disagrees with MDB are numbered `D-SIM-#` in the same file.
+Status: instruction timing follows the data sheets; peripheral behavior and timing follow the cited rules and explicit modelling assumptions. Some models have also been compared with Microchip MDB (the MPLAB X simulator). It has **not been compared with silicon**. Where the data sheet is silent the simulator makes an assumption; each one is numbered `[A#]` and written down with its source in `docs/FACTS-SIM.md`. The few places where the simulator deliberately disagrees with MDB are numbered `D-SIM-#` in the same file.
 
 Related documents: `docs/FACTS-SIM.md` (every timing rule with its data sheet page), `docs/SIMULATOR-PLAN.md` (architecture and milestones), `docs/DEVICE-FORMAT.md` (the device description files), `docs/REVIEW-FINDINGS.md`. The compiler that produces the programs is **basil**; its manual is `Basil_Manual.pdf` in the Basic_Compiler project.
 
@@ -657,7 +657,7 @@ The simulator does not model voltages here; it returns the code you give (limite
 
 ## Analogue pin voltage: `[[analog]]`
 
-The voltage on a pin, for the comparators (PIC18-Q10 only).
+The voltage on a pin, for the comparators (PIC18-Q10 and PIC18-Q41).
 
 ```toml
 [[analog]]
@@ -771,7 +771,7 @@ See section 8.
 | `[[adc]]` | yes | yes | yes (`channel` is the AN number, the CHS value) | yes |
 | `[[led]]`, `[[oled]]` | yes | yes | yes | yes |
 | `[[i2c]]`, `[[spi]]` | yes | yes | yes | **no** |
-| `[[analog]]` (comparators) | yes | — | — | **no** |
+| `[[analog]]` (comparators) | yes | yes | — | **no** |
 | `[[mclr]]` | yes | yes | yes | **no** |
 | `[clb]` | **no** | **no** | **no** | PIC16F131xx and PIC16F132xx only (an error on any other part) |
 
@@ -862,13 +862,14 @@ Models exist for the following; a register of anything else is plain storage tha
 | MSSP (SPI and I2C host) | yes | — | MSSP1/2 | I2C host mode, to drive the OLED |
 | SPI host | via MSSP | yes | via MSSP | — |
 | I2C host | via MSSP | yes | via MSSP | — |
-| CCP1/2 and PWM3/4 | yes | — | CCP1 to CCP5, PWM mode only (single output) | CCP1 to CCP4 (capture, compare, standard PWM) on PIC16F131xx, 132xx, 152xx, 171xx and 183xx; the separate PWM modules (PWM3 to PWM6, the PWM1/2 of the 171xx) are not modelled |
-| CWG1 | yes | — | — | — |
-| Comparators C1/C2 | yes | — | — | — |
-| CLC1–CLC8 | yes | — | — | — |
+| CCP1/2 and PWM3/4 | yes | CCP1 capture, compare and PWM; standalone 16-bit PWM1–3 (see below) | CCP1 to CCP5, PWM mode only (single output) | CCP1 to CCP4 (capture, compare, standard PWM) on PIC16F131xx, 132xx, 152xx, 171xx and 183xx; the separate PWM modules (PWM3 to PWM6, the PWM1/2 of the 171xx) are not modelled |
+| CWG1 | yes | yes, with source limits below | — | — |
+| Comparators C1/C2 | yes | yes, Q41 analog pin mapping | — | — |
+| CLC1–CLC8 | yes | CLC1–CLC4 through CLCSELECT | — | — |
 | CLB (PIC16F131xx, 132xx) | — | — | — | yes: 32 BLEs, input edge detectors, 3-bit counter, software inputs and outputs, PPS outputs and interrupts, driven by a `[clb]` netlist in the stimulus file (section 10); the Synthesizer's bitstream is not read; no clock, gate or trigger connections to other peripherals |
 | Watchdog (windowed on Q10 and Q41) and the resets it causes | yes | yes | — | yes: windowed WWDT (PIC16F131xx, PIC16F132xx, PIC16F171xx) or single-register WDT (PIC16F152xx, PIC16F183xx, PIC16F180x6) |
-| CRC and memory scanner | yes | — | — | — |
+| CRC and memory scanner | yes | software-fed 1–32-bit CRC; scanner not modelled | — | — |
+| DMA | — | four channels, with limits below | — | — |
 | External interrupts INT0–2, interrupt-on-change | yes | yes: PPS pin routing, edge selection, Sleep wake-up and legacy/vectored interrupt dispatch | the INT0..2 flags set by software; pin edges are not modelled | the INT pin and interrupt-on-change |
 | MCLR pin reset | yes | yes | yes | the MCLR pin is part of the port model |
 | LEDs and SSD1306 OLED | yes | yes | yes | yes |
@@ -876,7 +877,17 @@ Models exist for the following; a register of anything else is plain storage tha
 
 Where this table says "—", `docs/FACTS-SIM.md` documents no model for that peripheral on that family: its registers are plain storage and the program is reported as touching unmodelled SFRs. The Q10 models have their own data sheet citations; shared watchdog behaviour and Q41 pin-interrupt routing are also covered in that document. `docs/FACTS-SIM.md` is the authoritative list, section by section, with the data sheet page for each rule; peripherals are added over time.
 
-**Not modelled anywhere:** DMA, synchronous EUSART mode, input thresholds, oscillator start-up and PLL lock delays, oscillator trim and fail-safe clock monitoring (supported clock switches complete immediately; `CSWEN` and `CSWHOLD` are honoured), brown-out, `LVP`, code and write protection.
+**Not modelled anywhere:** synchronous EUSART mode, input thresholds, oscillator start-up and PLL lock delays, oscillator trim and fail-safe clock monitoring (supported clock switches complete immediately; `CSWEN` and `CSWHOLD` are honoured), brown-out, `LVP`, code and write protection.
+
+**Q41 DMA.** All four DMA banks are selected through `DMASELECT` (0–3). The engine reads GPR/SFR, program flash or data EEPROM and writes GPR/SFR through their normal peripheral models. It supports fixed, incrementing and decrementing pointers, independent source/destination counts and reloads, software DGO start/stop, hardware start/abort requests, source/destination stop controls, completion/abort/overrun flags, and PMD. A software stop preserves the buffer and counters; disabling/re-enabling initializes a fresh transfer. Peripheral requests work independently of PIE/GIE. UART/SPI/I2C RX/TX requests are level sensitive; timer and other modelled event requests are pulses, including repeated events while the PIR flag remains set. Each byte uses separate read and write cycles, observable through XIP and BUF.
+
+DMA arbitration currently grants an enabled DMA ahead of the CPU, with lower channel numbers first, and stalls the CPU for each bus phase. MAINPR/ISRPR/DMAnPR/PRLOCK scheduling and unused CPU bus cycles are not modelled. DMA pauses when Fosc stops in Sleep and runs in Idle. DMA-only register mirrors at 4000h and above and DMA-to-DMA control-register access are not modelled; a note identifies such access. The hardware stop pipeline is approximated by stopping at the next simulated bus phase. Unsupported trigger sources do not generate requests. This model validates transfer behavior, not cycle-exact system-arbiter timing.
+
+**Q41 shared peripherals.** CCP1 uses CCPTMRS0 to choose Timer1/2 or Timer3/4; capture currently accepts the CCP1PPS pin only, and the existing compare pulse and Fosc-clocked PWM limits apply. Comparators use Q41 pins (C1 positive RA0, C2 positive RC0; negative RA1/RC1/RC2/RC3), FVR or VSS; DAC input, hysteresis and response delays remain unmodelled. CLCSELECT selects four independent banks of CLCn registers. Supported CLC inputs are CLCIN0–3, CCP1, modelled PWM outputs, comparators, other CLCs and CWG1A/B; other inputs read low with a note. CWG supports the shared output, steering, bridge, dead-band and software-shutdown modes, with Q41 source selection and PPS codes. Its pin/comparator shutdown sources are supported; timer/CLC shutdown sources and external data input remain unmodelled.
+
+**Q41 16-bit PWM and CRC.** PWM1–3 each have two outputs, an independent 16-bit timer, FOSC clock selection (`PWMxCLK = 2`), clock prescaling, period interrupt postscaling, polarity, left/right aligned and pulsed/toggled compare modes, and push-pull in aligned modes. PR/P1/P2 load on enable and remain buffered until LD takes effect at a period boundary; PWMEN/PWMLOAD mirror the enable/load controls. Center/variable alignment, other clocks, external reset and automatic load sources are not modelled and produce notes. Period/parameter events can trigger DMA. PWM reload latency is idealized; the hardware's three-clock load-request exclusion is not modelled.
+
+The Q41 CRC accepts software data words of 1–32 bits, programmable polynomial/seed, MSb/LSb input order, augmented/unaugmented operation, a held input word, BUSY/FULL, completion interrupt and the CRCOUT/CRCSHIFT/CRCXOR register overlay (SETUP in CRCCON0 bits 3:2). Timing assumes one shifted bit per instruction cycle. The memory scanner and its arbiter/trigger behavior remain unmodelled and scanner register accesses are reported as such. DMA can feed CRCDATA through the normal SFR path. These new models have regression tests on all six Q41 parts; they have not been measured against silicon.
 
 **The watchdog on PIC18-Q10 and Q41 parts.** The shared windowed watchdog model follows `WDTE`, `WDTCPS`, `WDTCWS` and `WDTCCS` configuration settings. Time-outs while awake reset the part; time-outs in Sleep wake it. Window violations also reset the part, and software enable, `CLRWDT` and reset-cause flags follow the model. All six Q41 variants are covered. Timing uses the effective firmware clock or explicit Fosc override. The K22 watchdog remains unmodelled.
 

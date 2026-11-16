@@ -47,6 +47,8 @@ pub const HOOKS: u8 = 7;
 
 #[derive(Clone)]
 pub struct Cwg {
+    q41: bool,
+    md: Option<(usize, u8)>,
     pub con0: usize,
     pub con1: usize,
     pub as0: usize,
@@ -88,6 +90,8 @@ pub struct Change {
 impl Cwg {
     pub fn find(dev: &Device) -> Option<Cwg> {
         Some(Cwg {
+            md: super::pmd(dev, "CWG1MD"),
+            q41: addr(dev, "ADCPCON").is_some(),
             con0: addr(dev, "CWG1CON0")?,
             con1: addr(dev, "CWG1CON1")?,
             as0: addr(dev, "CWG1AS0")?,
@@ -113,7 +117,7 @@ impl Cwg {
     }
 
     pub fn en(&self, m: &DataMem) -> bool {
-        m.mem[self.con0] & 0x80 != 0
+        m.mem[self.con0] & 0x80 != 0 && !super::pmd_off(m, self.md)
     }
 
     fn mode(&self, m: &DataMem) -> u8 {
@@ -126,6 +130,13 @@ impl Cwg {
 
     /// PPS output code of the PPS source the data input comes from (CCP1 = 5, CCP2 = 6, PWM3 = 7, PWM4 = 8), if modelled.
     pub fn source(&self, m: &DataMem) -> Option<u8> {
+        if self.q41 {
+            return match m.mem[self.ism] & 15 {
+                1 => Some(5), 2..=7 => Some((m.mem[self.ism] & 15) + 4),
+                9 | 10 => Some((m.mem[self.ism] & 15) + 4),
+                12..=15 => Some((m.mem[self.ism] & 15) + 12), _ => None,
+            };
+        }
         match m.mem[self.ism] & 15 {
             n @ 1..=4 => Some(4 + n),
             n @ 5..=6 => Some(8 + n), // CMP1 = 0x0D, CMP2 = 0x0E

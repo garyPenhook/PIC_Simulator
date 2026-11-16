@@ -44,6 +44,7 @@ pub const HOOKS: u8 = 1;
 #[derive(Clone)]
 pub struct Ccp {
     pub n: u8,
+    md: Option<(usize, u8)>,
     pub con: usize,
     pub cap: usize,
     pub rl: usize,
@@ -65,6 +66,7 @@ impl Ccp {
     pub fn find(dev: &Device, n: u8) -> Option<Ccp> {
         Some(Ccp {
             n,
+            md: super::pmd(dev, &format!("CCP{n}MD")),
             con: addr(dev, &format!("CCP{n}CON"))?,
             cap: addr(dev, &format!("CCP{n}CAP"))?,
             rl: addr(dev, &format!("CCPR{n}L"))?,
@@ -84,6 +86,7 @@ impl Ccp {
         let con = addr(dev, &format!("CCP{n}CON"))?;
         Some(Ccp {
             n,
+            md: super::pmd(dev, &format!("CCP{n}MD")),
             con,
             cap: con,
             rl: addr(dev, &format!("CCPR{n}L"))?,
@@ -99,6 +102,7 @@ impl Ccp {
     }
 
     pub fn en(&self, m: &DataMem) -> bool {
+        if super::pmd_off(m, self.md) { return false; }
         if self.k22 { m.mem[self.con] & 15 != 0 } else { m.mem[self.con] & 0x80 != 0 }
     }
 

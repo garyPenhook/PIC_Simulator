@@ -799,3 +799,61 @@ These are configurable outside-world models, independent of a particular periphe
 * `[[uart_device]]` matches suffixes of completed TX bytes, including overlapping matches, and schedules eight-bit valid-Stop RX frames after `delay` from the last Stop bit. The shared EUSART and Q41 UART models call the same matcher. Reply reception follows the existing baud, FIFO and receiver-enable rules. An aborted transmission does not reach the matcher.
 * I2C `mode = "memory"` on either PIC18 host has 256 registers, a wrapping eight-bit pointer, and immediate writes. Each write address arms pointer selection by the next byte; following bytes write sequentially. Read addresses preserve the pointer, including across Stop/Restart. `readonly` acknowledges and advances past writes while preserving memory. This models a simple register device, without stretching or EEPROM programming delays.
 * Explicit simulator Reset reconstructs these models from the stimulus. Coverage: `tests/stimulus_extensions.rs`, `tests/mssp.rs`, `tests/i2cq.rs`, `tests/timer_sleep.rs`, and `drive` unit tests.
+
+
+## Q41 DMA and peripheral coverage
+
+Sources below are the locally supplied DS40002214G. Tests are `tests/q41_dma.rs` and
+`tests/q41_peripherals.rs`; all six 04/05/06/14/15/16Q41 variants are exercised.
+
+* `[A148]` DMA (`dma.rs`, ch.16 pp.246–282): four DMASELECT banks, EN initializes SPTR/DPTR from
+  SSA/DSA and SCNT/DCNT from SSZ/DSZ (Table 16-3 p.251). Each byte has a source read and destination
+  write (16.3 p.248); XIP identifies the retained buffer between them. Both counters decrement on a
+  completed transaction; a zero reloads its pointer/count, sets its interrupt and clears DGO; SSTP/DSTP
+  also clear SIRQEN (16.3.3–16.4 pp.250–254). Soft stop retains state; EN clear discards XIP and the
+  next enable reloads. AIRQ clears DGO/SIRQEN/AIRQEN and raises DMAxAIF. Repeated edge requests during
+  DGO set DMAxORIF without stopping; level requests do not overrun (16.7 pp.255–256).
+  Flag::set records hardware request pulses independently of whether the PIR bit was already set;
+  IOC summary/status refreshes do not create extra pulses. RX/TX requests sample UART/SPI/I2C status.
+  Table 16-6 pp.279–280 supplies vector numbers, including PWM parameter requests 58h–5Dh.
+  **Assumptions/limits:** DMA always wins over the CPU, DMA1 before DMA2 before DMA3 before DMA4;
+  one bus phase costs one instruction cycle and CPU instructions do not retire during it. Programmable
+  priority, CPU bus bubbles and DMA-only mirrors (Fig.16-2 pp.249–250) are unmodelled. A stop takes
+  effect at the next simulated phase rather than reconstructing the hardware extra-cycle pipeline.
+  Zero message size wraps a 12-bit counter. Unimplemented flash/EEPROM reads return FFh. DMA pauses
+  with Fosc in Sleep, runs in Idle, and resets with the part. Transfers into SFRs use CPU read/write
+  dispatch, including FIFO and timer side effects; DMA control-register cross-access is diagnosed.
+
+* `[A149]` Shared Q41 CCP/comparator/CWG/CLC: Table 21-2 pp.323–324 maps CLC1–4 to PPS 01h–04h,
+  CWG1A–D to 05h–08h, CCP1 to 09h, PWM outputs to 0Ah–0Fh and comparators to 19h/1Ah. Internal signal
+  numbers stay private to the shared models and are translated at pin routing. CCPTMRS0 (ch.29 p.440)
+  selects Timer1/2 or Timer3/4; Q10 CCP rules A61–A63 and their stated limits apply (Q41 ch.28).
+  Comparator input pins follow the Q41 package pin tables pp.6–9 and selections in ch.43 pp.787–788;
+  Q10 assumptions A79–A81 still apply, with Q41 positive RA0/RC0 and negative RA1/RC1/RC2/RC3.
+  CLCSELECT and CLCn banks (ch.22) retain independent configuration/state; gate/logic rules A83–A87
+  apply, with Table 22-2 p.341 input numbers. Supported inputs are pins, CCP, modelled PWM, CMP, CLC
+  and CWG; other sources read low and are diagnosed. CWG Table 31 input selection p.490 and shutdown
+  table p.493 differ from Q10: comparator shutdown enables are AS3E/AS4E. Other existing CWG
+  assumptions A73–A78 apply. Timer/CLC shutdown sources remain unmodelled. PMD bits are discovered
+  from the device descriptions.
+
+* `[A150]` Q41 PWM (`periph/pwmq.rs`, ch.30 pp.441–465): independent 16-bit counter, two outputs per
+  module; FOSC clock 2, prescale CPRE+1, postscale PIPOS+1. Left aligned has count < P; right aligned
+  is active for P clocks at the end of PR+1. Compare-pulse lasts one clock; compare-toggle changes
+  state on each parameter match. Polarity applies even while disabled; push-pull alternates periods.
+  PR/P1/P2 load on EN and on period reload with LD; PWMEN/PWMLOAD mirror the control bits (30.5–30.6
+  p.452). GIR stores parameter events and GIE gates the aggregate PWMxIF; PWMxPIF follows the period
+  postscaler (30.7 pp.452–453). DMA parameter requests are independent of GIE. Center/variable modes,
+  non-FOSC clocks and external reset/load sources are diagnosed as unmodelled. **Assumption:** no
+  three-clock load exclusion or register propagation delay; outputs are scheduled at Fosc-tick
+  resolution and are not validated against silicon.
+
+* `[A151]` Q41 CRC (`periph/crcq.rs`, ch.13 pp.201–220): PLEN/DLEN+1 cover 1–32 bits; polynomial
+  constant term always 1, seed in CRCOUT, input order follows SHIFTM; the examples at p.203–204 and
+  independent standard check values are regression targets. CRCDATAL commits the assembled input
+  word; another word may wait in the data buffer. BUSY/FULL are read only; BUSY falling sets CRCIF.
+  SETUP selects accumulator/shifter/polynomial in their shared address window. The diagram and pack
+  put SETUP at bits 3:2; the prose incorrectly says 4:3, overlapping ACCM. **Assumption:** one bit per
+  instruction cycle, paused with GO or Fosc stopped; timing is not measured. PMD/EN disable discards
+  pending data. The scanner is still unmodelled and its register accesses remain in the unmodelled
+  report. No scanner, arbitration or trigger fidelity is claimed.

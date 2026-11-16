@@ -38,6 +38,14 @@ pub enum Special {
     Hook(u8),
     /// A CRC / scanner register (`periph/crc.rs`); the code is the sub-code there. Reads are the stored byte.
     Crc(u8),
+    /// Q41 32-bit CRC register and overlay.
+    CrcQ(u8),
+    /// Banked Q41 DMA register (index into the DMA register window).
+    Dma(u8),
+    /// Q41 banked CLC window.
+    Clc(u8),
+    /// Q41 16-bit PWM instance and register.
+    PwmQ(u8, u8),
     /// A register that changes what a pin or a gate source reads (LATx, TRISx, ANSELx, RxyPPS, TxGATE, TxGPPS): the
     /// peripherals are brought up to date before a write; reads and the stored byte are plain.
     Sync,
@@ -46,6 +54,8 @@ pub enum Special {
 #[derive(Clone)]
 pub struct DataMem {
     pub mem: Vec<u8>,
+    /// Peripheral request pulses, enabled only on parts with DMA.
+    pub(crate) dma_requests: Option<Vec<(usize, u8)>>,
     /// Bits that exist, per address (0xFF for RAM).
     pub implemented: Vec<u8>,
     pub special: Vec<Special>,
@@ -86,6 +96,7 @@ impl DataMem {
         let n = size as usize;
         let mut m = DataMem {
             mem: vec![0; n],
+            dma_requests: None,
             implemented: vec![0; n],
             special: vec![Special::None; n],
             is_sfr: vec![false; n],

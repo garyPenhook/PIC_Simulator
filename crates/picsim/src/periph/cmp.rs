@@ -32,6 +32,8 @@ pub const HOOKS: u8 = 3;
 #[derive(Clone)]
 pub struct Cmp {
     pub n: u8,
+    q41: bool,
+    pub md: Option<(usize, u8)>,
     pub con0: usize,
     pub con1: usize,
     pub nch: usize,
@@ -46,10 +48,27 @@ pub struct Cmp {
 }
 
 impl Cmp {
+    pub fn positive(&self, pch: u8) -> Src {
+        if !self.q41 { return pos(self.n, pch); }
+        match pch & 7 {
+            0 => if self.n == 1 { Src::Pin(b'A', 0) } else { Src::Pin(b'C', 0) },
+            5 => Src::Dac, 6 => Src::Fvr, 7 => Src::Gnd, _ => Src::Open,
+        }
+    }
+    pub fn negative(&self, nch: u8) -> Src {
+        if !self.q41 { return neg(nch); }
+        match nch & 7 {
+            0 => Src::Pin(b'A', 1),
+            1..=3 => Src::Pin(b'C', nch & 7),
+            6 => Src::Fvr, 7 => Src::Gnd, _ => Src::Open,
+        }
+    }
     pub fn find(dev: &Device, n: u8) -> Option<Cmp> {
         let a = |s: &str| dev.find_sfr(&format!("CM{n}{s}")).map(|x| x.addr as usize);
         Some(Cmp {
             n,
+            md: super::pmd(dev, &format!("CM{n}MD")),
+            q41: dev.find_sfr("ADCPCON").is_some(),
             con0: a("CON0")?,
             con1: a("CON1")?,
             nch: a("NCH")?,
