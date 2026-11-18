@@ -27,13 +27,17 @@ identical GPR contents, so a cycle difference alone did not change any stored by
 | lib_serial, serial_word_digits | 8429/15098, 21305/35761 | MDB character time ≈ 18 bit times, data sheet 10 | D-SIM-17 (new) |
 | lib_adc, lib_adin | 717/633, 1345/1177 | one ADC conversion 42 cycles shorter in MDB | D-SIM-18 (new, **open**: engine not decided) |
 | lib_system | 1616/1488 | MDB `SysClockHz` returns 0 | D-SIM-19 (new) |
-| lib_eeprom | 480370/373 | MDB does not model write durations | D-SIM-3 |
+| lib_eeprom | 480370 / 373 (MDB finishes the write at once) | MDB does not model write durations | D-SIM-3 |
 | lib_spi, lib_i2c, lib_aht30, lib_rtcc | up to 9.6 M in MDB | library timeouts expire in MDB; `SpiStatus` 1 there | MDB does not complete the MSSP transfer |
 | lib_intosc, lib_intosc_div | 1000/3600970, 47/1440053 | oscillator-ready bits never set in MDB | D-SIM-14 |
 
 `lib_timer` is the one program with **equal cycles and a different byte** (`LT_A` 2 against 3, 4 against 5 at `-O0`);
 D-SIM-16 explains it: MDB keeps a Timer0 prescaler count across the `CLRF T0CON0`/`T0CON1`/`TMR0L` writes that DS40002043F
 19.2.4 p.297 says clear it. Probe: `tests/probe/t0_read_phase.S`.
+
+`gpr_snapshot.py` also reports `mdb-timeout` when MDB's own 300000-unit wait expires before `__halt`; none of the programs above
+did (MDB reached `__halt` for the library-timeout cases, which is why their counts are millions, not a wait artifact). That check
+was added after these runs; re-running the Q10 default build gave the same results for `lib_spi`, `lib_timer` and `abs_idiom`.
 
 ## What is not settled
 

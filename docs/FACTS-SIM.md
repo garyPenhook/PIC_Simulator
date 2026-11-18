@@ -1019,12 +1019,13 @@ declared results, after running each program to `__halt` in both engines. Result
   MDB's is about 18. This is the whole cycle difference of `lib_serial` and `serial_word_digits`. The cause in MDB is not known.
 * D-SIM-18 (open): on the Q10 one ADC conversion (`ADCON2` = A0h | ADCS 31, FOSC/64, polled `GO`) takes 289 cycles in the sim
   and 247 in MDB, 42 less (a repeated `AdcRead(13)`; the first call, which also selects the channel, differs by 84).
-  This is the opposite sign to D-SIM-12 (K22). `lib_adc` and `lib_adin` differ by exactly this. Not yet checked against the
+  This is the opposite sign to D-SIM-12 (K22). `lib_adc` (717 / 633, 84 = two conversions) and `lib_adin` (1345 / 1177, 168 = four) differ by whole multiples of it. Not yet checked against the
   Q10 data sheet's conversion-time table, so it is not known which engine is right.
 * D-SIM-19: with `RSTOSC = HFINTOSC_64MHZ` MDB's `SysClockHz` returns 0 (the `lib_system` test comment says MDB leaves the oscillator
   registers at 0 after reset; not re-measured here), the sim returns 64 000 000 because it loads them from the configuration
   (commit ec40006). The data sheet's reset-value text for these registers was not re-read for this entry.
-  `lib_system` differs in `SysClockHz`'s result bytes (GPR 16h-18h at `-O0`) and by 128 cycles for this reason. Its declared
+  `lib_system` differs in `SysClockHz`'s result bytes (GPR 16h-18h at `-O0`) and by 128 cycles; the MDB value 0 is measured by the
+  snapshot, that it is *because* the oscillator registers read 0 is the test comment's statement, not shown here. Do not change the sim from this entry alone. Its declared
   results do not include the value, the test's own comment on this ("the simulator does not load the oscillator registers") is out of date.
 * MDB does not complete the library's MSSP, oscillator-ready and RTCC/I2C waits, so its programs end by timeout: `lib_spi` has
   `SpiStatus` 1 (timeout) in MDB and 0 in the sim, and the cycle counts of `lib_spi`, `lib_i2c`, `lib_aht30`, `lib_rtcc`, `lib_intosc`

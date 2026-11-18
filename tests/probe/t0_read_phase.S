@@ -2,7 +2,18 @@
 ; READ = 0: MOVF TMR0L,W then MOVWF 20h; READ = 1: MOVFF TMR0L,20h; READ = 2: MOVFF TMR0L,20h behind an RCALL.
 ; PRE > 0 first runs Timer0 8-bit 1:2 for PRE NOPs and stops it (a leftover prescaler count).
 ; The byte at 20h is the count the read saw; the cycle count at `done` is the same in both engines.
+; Run: DFP="$HOME/.mchp_packs/Microchip/PIC18F-Q_DFP/1.31.492/xc8" tools/probe.py OUT tests/probe/t0_read_phase.S 18F27Q10 'READ=2 NOPS=0 PRE=1'
+; READ, NOPS and PRE are -D defines (defaults below: READ=2, NOPS=0, PRE=0).
 #include <xc.inc>
+#ifndef READ
+#define READ 2
+#endif
+#ifndef NOPS
+#define NOPS 0
+#endif
+#ifndef PRE
+#define PRE 0
+#endif
 PSECT resetVec,class=CODE,reloc=2
     goto start
 PSECT code,class=CODE,reloc=2

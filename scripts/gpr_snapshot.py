@@ -8,7 +8,8 @@ program variable that owns it (from the compiler's .S listing) and both values,
 and the cycle counts of both engines are shown beside it.
 
 Usage: gpr_snapshot.py --device 18F27Q10 [--flags=-O0] [--limit N] [prog.bas ...]
-Exit status is 1 when any program differs (it does not hide differences).
+Exit status is 1 when any program differs, MDB stopped at its wait limit instead of `__halt`
+(status `mdb-timeout`), a program failed to build, or nothing was compared.
 Requires the sibling Basic_Compiler checkout, release binaries and MPLAB X.
 """
 import argparse, glob, json, os, re, shutil, subprocess, sys, tempfile, tomllib
@@ -58,7 +59,13 @@ def main():
     a = ap.parse_args()
     comp = a.compiler_root.resolve()
     basil, sim = comp / "target/release/basil", ROOT / "target/release/basil-sim"
-    mdb = sorted(glob.glob("/opt/microchip/mplabx/v*/mplab_platform/bin/mdb.sh"))[-1]
+    found = glob.glob("/opt/microchip/mplabx/v*/mplab_platform/bin/mdb.sh")
+    if not found:
+        sys.exit("MDB (MPLAB X mdb.sh) not found")
+    mdb = max(found, key=lambda f: [int(x) for x in re.findall(r"\d+", f.split("/mplabx/")[1].split("/")[0])])
+    for tool in (basil, sim):
+        if not tool.exists():
+            sys.exit(f"{tool} not found; build it first")
     work = Path(tempfile.mkdtemp(prefix="gpr-snap-"))
     if not a.keep:
         import atexit
@@ -81,7 +88,8 @@ def main():
     built = []
     for src, name, text in jobs:
         for cf in re.findall(r'^\s*CFile\s+"([^"]+)"', text, re.M | re.I):
-            shutil.copy(src.parent / cf, work)
+            if (src.parent / cf).exists():
+                shutil.copy(src.parent / cf, work)
         for inc in re.findall(r'^\s*Include\s+"([^"]+)"', text, re.M | re.I):
             if (src.parent / (inc + ".bas")).exists():
                 shutil.copy(src.parent / (inc + ".bas"), work)
@@ -108,7 +116,13 @@ def main():
         script += [f"echo END_{name}", "delete"]
     script.append("quit")
     (work / "run.mdb").write_text("\n".join(script) + "\n")
-    out = subprocess.run([mdb, str(work / "run.mdb")], capture_output=True, text=True, timeout=7200).stdout
+    try:
+        run = subprocess.run([mdb, str(work / "run.mdb")], capture_output=True, text=True, timeout=7200)
+    except subprocess.TimeoutExpired:
+        sys.exit("MDB did not finish within 7200 s")
+    out = run.stdout
+    if run.returncode:
+        print(f"warning: MDB exited {run.returncode}; programs it did not reach are reported as errors", file=sys.stderr)
     chunks = re.split(r"^/\*END_(\S+?)\*/\s*$", out, flags=re.M)
     mdb_res = {}
     for i in range(1, len(chunks) - 1, 2):
@@ -116,21 +130,23 @@ def main():
         cy = re.findall(r"Stopwatch cycle count = (\d+)", body)
         data = bytearray()
         for line in body.splitlines():
-            if re.fullmatch(r"(?:[0-9a-f]{2}\s+)+", line + " ") and not line.lstrip().startswith(("Stop", "Single")):
+            if re.fullmatch(r"(?:[0-9a-fA-F]{2}\s+)+", line + " ") and not line.lstrip().startswith(("Stop", "Single")):
                 data += bytes(int(x, 16) for x in line.split())
-        mdb_res[chunks[i]] = (int(cy[-1]) if cy else None, bytes(data))
+        stop = re.search(r"Stop at\s+address:0x([0-9a-fA-F]+)", body)
+        mdb_res[chunks[i]] = (int(cy[-1]) if cy else None, bytes(data), bool(stop))
     want = sum(e - s for s, e in rng)
     results, bad = [], 0
     for name, halt, owners in built:
-        cyc_m, data_m = mdb_res.get(name, (None, b""))
+        cyc_m, data_m, mdb_halted = mdb_res.get(name, (None, b"", False))
         args = [sim, work / f"{name}.hex", "--device", a.device, "--asm", work / f"{name}.S",
                 "--dump", ",".join(f"0x{s:X}:{e - s}" for s, e in rng)]
         r = subprocess.run(list(map(str, args)), capture_output=True, text=True, timeout=3600)
         m = re.search(r"stop: (\w+).*cycles: (\d+)", r.stdout)
         data_s = bytearray()
         for line in r.stdout.splitlines():
-            if " = " in line and "(" in line:
-                data_s += bytes(int(x, 16) for x in line.split("(")[1].rstrip(")").split())
+            dm = re.fullmatch(r"0x[0-9A-F]+ = \d+\s+\(([0-9A-F ]+)\)", line)
+            if dm:
+                data_s += bytes(int(x, 16) for x in dm.group(1).split())
         row = {"program": name, "sim_cycles": int(m.group(2)) if m else None, "mdb_cycles": cyc_m}
         if len(data_m) != want or len(data_s) != want or not m or m.group(1) != "Halt":
             row["status"] = "error"
@@ -145,6 +161,10 @@ def main():
                         diffs.append({"addr": f"0x{addr:X}", "var": own, "sim": data_s[pos + k], "mdb": data_m[pos + k]})
                 pos += e - s
             row["status"] = "same" if not diffs else "differs"
+            if not mdb_halted:
+                # MDB's wait expired before __halt: its RAM and cycle count are from a timeout, not from the halt.
+                row["status"] = "mdb-timeout" if diffs else "same-but-mdb-timeout"
+            row["mdb_halted"] = mdb_halted
             row["diffs"] = diffs
         bad += row["status"] != "same"
         results.append(row)
@@ -152,7 +172,11 @@ def main():
         print(f"{row['status']:7} {name}  cycles sim={row['sim_cycles']} mdb={cyc_m}{extra}", flush=True)
         for d in row.get("diffs", [])[:8]:
             print(f"          {d['addr']} {d['var']}: sim={d['sim']:02X} mdb={d['mdb']:02X}")
-    print(f"{len(results) - bad} of {len(results)} programs have identical GPR snapshots; {len(skipped)} skipped")
+    print(f"{sum(r['status'] == 'same' for r in results)} of {len(results)} programs have identical GPR snapshots; {len(skipped)} skipped")
+    failed = [n for n, why in skipped if why in ("compile failed", "no __halt")]
+    if failed or not results:
+        print(f"ERROR: {len(failed)} programs did not build/halt ({', '.join(failed[:5])}) or none were compared", file=sys.stderr)
+        bad += 1
     if a.json:
         a.json.write_text(json.dumps({"device": a.device, "flags": a.flags, "results": results, "skipped": skipped}, indent=1) + "\n")
     return int(bad > 0)
