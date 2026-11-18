@@ -450,7 +450,8 @@ sends are printed by `basil-sim` as `spiN: ...`. Chip select (SS_out, SSET), SS_
 
 ## MSSP of the PIC18-Q10 (S5, `periph/mssp.rs`, DS40002043F ch.28)
 
-SPI host and I2C host. Slave modes, the firmware controlled I2C host (SSPM = 1011) and multi-master bus collisions are not modelled (a
+SPI host and I2C host, and the 7-bit I2C client mode (SSPM = 0110, 1110) against an external `[[i2c_host]]` (`[A160]`-`[A163]`). SPI slave modes, 10-bit
+client modes, the firmware controlled I2C host (SSPM = 1011) and multi-master bus collisions are not modelled (a
 note is printed; BCLxIF is never set). Pin waveforms, PPS/TRIS routing and SPI pin reception are covered by `[A155]`.
 The existing byte-level host engine still runs once SSPEN is set. The outside world comes
 from the stimulus file: `[[spi]]` (same as the Q41 SPI: `port` = MSSP number, `data`, `fill`) answers each exchanged byte, and `[[i2c]]`
@@ -490,6 +491,18 @@ NACKed and a read from nobody gives FFh.
   the enable or a Stop.
 * `[A59]` TXB written with TXBE = 0 sets TXWE and NACKIF and is dropped; RXB read with RXBF = 0 sets RXRE and NACKIF and returns the old byte.
 * `[A60]` TXB written with EN = 0 or MODE != 100 only fills TXB. Client modes, 10-bit addressing, bus time-out, collisions and clock
+* I2C client mode of the Q10 MSSP (DS40002043F 28.5 p.456-474, `periph/mssp.rs`, tests `tests/mssp.rs` `client_*`): sourced rules are in the module
+  header (address match under SSPxMSK on A[7:1], BF / R/W / D/A, SSPOV and BOEN, SEN stretch, read address clears CKP, WCOL, AHEN / DHEN with ACKTIM,
+  Start/Stop interrupts with SSPM = 1110 or SCIE / PCIE, CKP only holds SCL once the host has pulled it low).
+  * `[A160]` the host script runs only while SSPEN = 1 with SSPM = 0110 / 1110, from its `at` or the enable if later; disabling or changing SSPM drops the
+    operation in flight and the rest waits for the next enable; a warm reset keeps the rest of the script.
+  * `[A161]` timing: SCL period `period` cycles (default 40); Start and Stop half a period, a byte nine periods; a held clock resumes one cycle after CKP is set;
+    the host never releases SCL for a byte, Restart or Stop while CKP = 0 (so a client that never sets CKP stalls the bus).
+  * `[A162]` an overflowed byte still sets SSPxIF on the ninth falling edge; BF = 1, SSPOV = 0, BOEN = 0 updates SSPxBUF then sets SSPOV (as `[A48]`); any overflow
+    is NACKed; with AHEN / DHEN software owns the ACK.
+  * `[A163]` a host read of a client not addressed for reading returns FFh and touches no register.
+  * Not modelled: 10-bit addressing (UA), general call (GCEN), SBCDE slave bus collision, Sleep wake-up on an address match (the host is paused in Sleep), pin waveforms,
+    SDAHT, PIC16 parts (their stimulus loader does not accept `[[i2c_host]]`).
   stretching by a client are not modelled.
 * Tests: `crates/picsim/tests/mssp.rs`; `tests/sim/spi_q10` and `tests/sim/i2c_q10` run the library `Spi` and `I2c` modules (compiled with
   `basil`) against clients.
@@ -943,7 +956,8 @@ Sources below are the locally supplied DS40002214G. Tests are `tests/q41_dma.rs`
   K22 uses its fixed MSSP pins. The pin log includes serial transitions in Fosc ticks, including
   SPI half-cycle clock edges. Serial clocks and in-flight output levels pause in Sleep.
   Limits: I2C clients remain byte-level devices; arbitrary external pin-driven I2C clients,
-  clock stretching, arbitration/collisions and MSSP client mode are not modelled. Byte-level
+  clock stretching by a client device, arbitration/collisions and the MSSP client mode's pin behaviour are not modelled
+  (the client mode itself runs against a byte-level `[[i2c_host]]`, `[A160]`). Byte-level
   I2C stimuli retain their existing abstract bus interface even without physical routing;
   board I2C devices still require their configured wiring. SPI SMP does not change sampling
   (SDI is sampled at the end of each bit). No hardware validation is claimed.

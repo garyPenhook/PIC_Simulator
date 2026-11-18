@@ -748,6 +748,20 @@ readonly = false    # optional; true acknowledges writes but preserves register 
 
 The device has 256 byte registers and an eight-bit pointer. The first data byte after each write address selects the pointer; subsequent bytes write registers and advance it. Reads return the current register and advance the pointer. It wraps from 255 to 0 and persists across Stop and repeated Start, allowing the usual write-pointer / repeated-start / read transaction. Read-only writes still advance the pointer. An explicit simulator Reset restores the initial contents. The default `mode = "stream"` keeps the original fixed-list behavior; `readonly` requires memory mode. These devices are byte-level models without clock stretching or EEPROM write delays.
 
+## I2C host: `[[i2c_host]]`
+
+An external host that talks to the MSSP while it runs in I2C client mode (`SSPM` = `0110` or `1110`, 7-bit address; PIC18 Q10, tested there, and K22, which shares the module). It is byte level: there are no pin waveforms, so the pins are not checked.
+
+```toml
+[[i2c_host]]
+port = 1             # MSSP number, default 1
+at = 0               # the script starts at this cycle at the earliest, once SSPEN is set
+period = 40          # SCL period in instruction cycles, default 40 (at least 2)
+ops = ["S", "w 0xA0", "w 0x12", "Sr", "w 0xA1", "r", "rn", "P"]
+```
+
+`S`, `Sr` and `P` are Start, Repeated start and Stop. `"w 0xA0"` sends a byte (the address byte included, R/W in bit 0), `"r"` reads a byte and acknowledges it, `"rn"` reads a byte and does not. The run is shown in the `i2c` report like a host's traffic (`!` after a byte the MSSP did not acknowledge). The module honours SSPxADD / SSPxMSK, BF, SSPOV, BOEN, SEN, AHEN / DHEN, ACKDT / ACKTIM / ACKSTAT and CKP stretching: the host waits while CKP is 0. Clearing SSPEN or changing SSPM drops the operation in flight. 10-bit addressing, general call, Sleep wake-up and bus arbitration are not modelled. PIC16 parts do not accept the section yet.
+
 ## SPI client: `[[spi]]`
 
 The device at the other end of an SPI host (PIC18 only).

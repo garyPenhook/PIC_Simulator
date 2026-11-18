@@ -61,7 +61,7 @@ use nvmq::NvmQ;
 use quart::QUart;
 use uart::Uart;
 use spi::Spi;
-pub use mssp::{I2cClient, I2cEv};
+pub use mssp::{HostOp, I2cClient, I2cEv, I2cHost};
 pub use spi::SpiClient;
 
 /// Why the part resets without a power-on (DS40002043F Table 9-3 p.89-90).
@@ -1272,6 +1272,16 @@ impl Periph {
         }
     }
 
+    /// Set the external host that drives the I2C client mode of MSSP `num` (1-based). False when the part has no such MSSP.
+    pub fn i2c_host(&mut self, num: u8, h: I2cHost) -> bool {
+        if let Some(s) = self.mssps.iter_mut().find(|s| s.num == num) {
+            s.host = Some(h);
+            true
+        } else {
+            false
+        }
+    }
+
     /// Whether this part has a modelled UART or EUSART receiver.
     pub fn has_uart(&self, num: u8) -> bool {
         self.quarts.iter().any(|u| u.num == num) || self.uarts.iter().any(|u| u.num == num)
@@ -1696,6 +1706,7 @@ impl Periph {
                 s.spi = o.spi;
                 s.byte_client = o.byte_client;
                 s.i2c = o.i2c;
+                s.host = o.host; // the script goes on with the operation after the one in flight
             }
         }
         for o in old.i2cqs {

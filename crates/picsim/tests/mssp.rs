@@ -299,3 +299,201 @@ fn readonly_memory_client_acknowledges_writes_without_changing_registers() {
     run_for(&mut m, 80);
     assert_eq!(rd(&mut m, "SSP1BUF"), 0x12);
 }
+
+// ---- I2C client mode, driven by an external host (`[[i2c_host]]`) ----
+
+/// Host with a 20-cycle SCL period: Start at once, a byte takes 180 cycles (eight bits at 160, then the ninth clock).
+fn client(ops: &str, add: u8, con1: u8) -> (Machine, u64) {
+    let mut m = machine(&format!("[[i2c_host]]\nperiod = 20\nops = {ops}\n"));
+    w(&mut m, "SSP1ADD", add);
+    let e = m.cpu.cycles;
+    w(&mut m, "SSP1CON1", con1);
+    (m, e)
+}
+
+fn ack_log(m: &Machine) -> Vec<I2cEv> { log(m) }
+
+#[test]
+fn client_receives_address_and_data() {
+    let (mut m, e) = client(r#"["S", "w 0xA0", "w 0x12", "P"]"#, 0xA0, 0x36);
+    run_to(&mut m, e + 5);
+    assert_eq!(rd(&mut m, "SSP1STAT") & 0x18, 0x08, "S set by the Start");
+    assert!(!sspif(&m), "SSPM = 0110: no interrupt on Start");
+    run_to(&mut m, e + 10 + 160 - 1);
+    assert_eq!(rd(&mut m, "SSP1STAT") & 1, 0, "BF not before the eighth falling edge");
+    run_to(&mut m, e + 10 + 160 + 1);
+    assert_eq!(rd(&mut m, "SSP1STAT") & 0x27, 0x01, "BF, R/W = 0 (write), D/A = 0 (address)");
+    assert!(!sspif(&m));
+    run_to(&mut m, e + 10 + 180 + 1);
+    assert!(sspif(&m), "SSPxIF on the ninth falling edge");
+    assert_eq!(rd(&mut m, "SSP1BUF"), 0xA0);
+    assert_eq!(rd(&mut m, "SSP1STAT") & 1, 0);
+    clear_sspif(&mut m);
+    run_for(&mut m, 180);
+    assert_eq!(rd(&mut m, "SSP1STAT") & 0x21, 0x21, "data byte: D/A and BF");
+    assert!(sspif(&m));
+    assert_eq!(rd(&mut m, "SSP1BUF"), 0x12);
+    run_for(&mut m, 20);
+    assert_eq!(rd(&mut m, "SSP1STAT") & 0x18, 0x10, "P set, S clear");
+    assert_eq!(ack_log(&m), [I2cEv::Start, I2cEv::Addr(0xA0, true), I2cEv::Write(0x12, true), I2cEv::Stop]);
+}
+
+#[test]
+fn client_ignores_another_address_and_honours_the_mask() {
+    let (mut m, _) = client(r#"["S", "w 0xA2", "w 0x12", "P"]"#, 0xA0, 0x36);
+    run_for(&mut m, 700);
+    assert_eq!(rd(&mut m, "SSP1STAT") & 0x21, 0, "no BF, no D/A");
+    assert!(!sspif(&m));
+    assert_eq!(ack_log(&m), [I2cEv::Start, I2cEv::Addr(0xA2, false), I2cEv::Write(0x12, false), I2cEv::Stop]);
+    // SSPxMSK: a zero bit is a don't care on A[7:1]
+    let mut m = machine("[[i2c_host]]\nperiod = 20\nops = [\"S\", \"w 0xA6\", \"P\"]\n");
+    w(&mut m, "SSP1ADD", 0xA0);
+    w(&mut m, "SSP1MSK", 0xF9);
+    w(&mut m, "SSP1CON1", 0x36);
+    run_for(&mut m, 400);
+    assert_eq!(ack_log(&m)[1], I2cEv::Addr(0xA6, true));
+}
+
+#[test]
+fn client_overflow_is_nacked_and_sets_sspov() {
+    let (mut m, _) = client(r#"["S", "w 0xA0", "w 0x12", "w 0x13", "P"]"#, 0xA0, 0x36);
+    run_for(&mut m, 1000);
+    assert_eq!(rd(&mut m, "SSP1CON1") & 0x40, 0x40, "SSPOV: the buffer was never read");
+    assert_eq!(rd(&mut m, "SSP1STAT") & 1, 1);
+    let l = ack_log(&m);
+    assert_eq!(l[1], I2cEv::Addr(0xA0, true));
+    assert_eq!(l[2], I2cEv::Write(0x12, false), "BF still set from the address: NACK");
+}
+
+#[test]
+fn client_sen_stretches_until_ckp_is_set() {
+    let (mut m, e) = client(r#"["S", "w 0xA0", "w 0x12", "P"]"#, 0xA0, 0x36);
+    w(&mut m, "SSP1CON2", 1); // SEN
+    run_to(&mut m, e + 10 + 181);
+    assert_eq!(rd(&mut m, "SSP1CON1") & 0x10, 0, "CKP cleared after the acknowledged byte");
+    run_for(&mut m, 1000);
+    assert_eq!(ack_log(&m), [I2cEv::Start, I2cEv::Addr(0xA0, true)], "the host waits for the client");
+    assert_eq!(rd(&mut m, "SSP1BUF"), 0xA0);
+    let c = m.cpu.cycles;
+    w(&mut m, "SSP1CON1", 0x36); // CKP
+    run_to(&mut m, c + 1 + 160 + 1);
+    assert_eq!(rd(&mut m, "SSP1BUF"), 0x12, "the next byte starts after the release");
+}
+
+#[test]
+fn client_transmit_cycle() {
+    let (mut m, e) = client(r#"["S", "w 0xA1", "r", "rn", "P"]"#, 0xA0, 0x36);
+    run_to(&mut m, e + 10 + 181);
+    assert_eq!(rd(&mut m, "SSP1CON1") & 0x10, 0, "a read address clears CKP after the ACK");
+    assert_eq!(rd(&mut m, "SSP1STAT") & 4, 4, "R/W = read");
+    assert!(sspif(&m));
+    clear_sspif(&mut m);
+    assert_eq!(rd(&mut m, "SSP1BUF"), 0xA1);
+    w(&mut m, "SSP1BUF", 0x5A);
+    assert_eq!(rd(&mut m, "SSP1CON1") & 0x80, 0);
+    let c = m.cpu.cycles;
+    w(&mut m, "SSP1CON1", 0x36);
+    run_to(&mut m, c + 1 + 160 - 1);
+    assert_eq!(rd(&mut m, "SSP1STAT") & 1, 1, "BF until the eighth falling edge");
+    run_to(&mut m, c + 1 + 160 + 1);
+    assert_eq!(rd(&mut m, "SSP1STAT") & 1, 0);
+    assert_eq!(rd(&mut m, "SSP1STAT") & 0x20, 0x20, "D/A: data");
+    run_to(&mut m, c + 1 + 170 + 1);
+    assert_eq!(rd(&mut m, "SSP1CON2") & 0x40, 0, "ACKSTAT = 0: the host acknowledged");
+    assert!(!sspif(&m));
+    run_to(&mut m, c + 1 + 180 + 1);
+    assert!(sspif(&m));
+    assert_eq!(rd(&mut m, "SSP1CON1") & 0x10, 0, "after an ACK the clock is held again");
+    clear_sspif(&mut m);
+    w(&mut m, "SSP1BUF", 0x6B);
+    w(&mut m, "SSP1CON1", 0x36);
+    run_for(&mut m, 200);
+    assert_eq!(rd(&mut m, "SSP1CON2") & 0x40, 0x40, "ACKSTAT = 1: NACK");
+    assert!(sspif(&m));
+    assert_eq!(rd(&mut m, "SSP1CON1") & 0x10, 0x10, "the clock is not held after a NACK");
+    run_for(&mut m, 100);
+    assert_eq!(ack_log(&m), [I2cEv::Start, I2cEv::Addr(0xA1, true), I2cEv::Read(0x5A, true), I2cEv::Read(0x6B, false), I2cEv::Stop]);
+}
+
+#[test]
+fn client_transmit_wcol_while_bf_is_set() {
+    let (mut m, e) = client(r#"["S", "w 0xA1", "r", "P"]"#, 0xA0, 0x36);
+    run_to(&mut m, e + 10 + 181);
+    // the address is still in SSPxBUF (BF = 1): a write is a collision
+    w(&mut m, "SSP1BUF", 0x77);
+    assert_eq!(rd(&mut m, "SSP1CON1") & 0x80, 0x80);
+    assert_eq!(rd(&mut m, "SSP1BUF"), 0xA1, "SSPxBUF unchanged");
+}
+
+#[test]
+fn client_address_and_data_hold() {
+    let (mut m, e) = client(r#"["S", "w 0xA0", "w 0x12", "P"]"#, 0xA0, 0x36);
+    w(&mut m, "SSP1CON3", 0x03); // AHEN, DHEN
+    run_to(&mut m, e + 10 + 161);
+    assert!(sspif(&m), "SSPxIF after the eighth falling edge");
+    assert_eq!(rd(&mut m, "SSP1CON1") & 0x10, 0, "CKP cleared");
+    assert_eq!(rd(&mut m, "SSP1CON3") & 0x80, 0x80, "ACKTIM");
+    clear_sspif(&mut m);
+    run_for(&mut m, 500);
+    assert_eq!(ack_log(&m).len(), 1, "the host waits");
+    assert_eq!(rd(&mut m, "SSP1BUF"), 0xA0);
+    let c = m.cpu.cycles;
+    w(&mut m, "SSP1CON2", 0x00); // ACKDT = 0: acknowledge
+    w(&mut m, "SSP1CON1", 0x36);
+    run_to(&mut m, c + 1 + 10 + 1);
+    assert_eq!(rd(&mut m, "SSP1CON3") & 0x80, 0, "ACKTIM clears on the ninth rising edge");
+    assert!(!sspif(&m));
+    run_to(&mut m, c + 1 + 20 + 1);
+    assert!(sspif(&m), "SSPxIF again after the acknowledge");
+    clear_sspif(&mut m);
+    // data byte: NACK by software
+    run_for(&mut m, 170);
+    assert_eq!(rd(&mut m, "SSP1CON1") & 0x10, 0, "DHEN clears CKP");
+    assert_eq!(rd(&mut m, "SSP1BUF"), 0x12);
+    clear_sspif(&mut m);
+    w(&mut m, "SSP1CON2", 0x20); // ACKDT = 1
+    w(&mut m, "SSP1CON1", 0x36);
+    run_for(&mut m, 60);
+    assert!(!sspif(&m), "no SSPxIF after a NACK");
+    assert!(ack_log(&m).contains(&I2cEv::Write(0x12, false)));
+}
+
+#[test]
+fn client_start_stop_interrupts() {
+    let (mut m, e) = client(r#"["S", "w 0xA0", "P"]"#, 0xA0, 0x3E); // SSPM = 1110
+    run_to(&mut m, e + 2);
+    assert!(sspif(&m), "SSPM = 1110: interrupt on Start");
+    clear_sspif(&mut m);
+    run_for(&mut m, 500);
+    assert_eq!(rd(&mut m, "SSP1STAT") & 0x10, 0x10);
+    assert!(sspif(&m));
+    // SSPM = 0110 with SCIE and PCIE
+    let mut m = machine("[[i2c_host]]\nperiod = 20\nops = [\"S\", \"P\"]\n");
+    w(&mut m, "SSP1CON3", 0x60);
+    w(&mut m, "SSP1CON1", 0x36);
+    run_for(&mut m, 5);
+    assert!(sspif(&m), "SCIE");
+}
+
+#[test]
+fn client_host_waits_for_enable_and_for_ckp() {
+    let mut m = machine("[[i2c_host]]\nat = 100\nperiod = 20\nops = [\"S\", \"w 0xA0\"]\n");
+    run_for(&mut m, 300);
+    assert_eq!(ack_log(&m), []);
+    w(&mut m, "SSP1ADD", 0xA0);
+    w(&mut m, "SSP1CON1", 0x26); // CKP = 0
+    run_for(&mut m, 500);
+    assert_eq!(ack_log(&m), [I2cEv::Start], "CKP = 0 holds the clock, the byte never starts");
+    w(&mut m, "SSP1CON1", 0x36);
+    run_for(&mut m, 300);
+    assert_eq!(ack_log(&m)[1], I2cEv::Addr(0xA0, true));
+}
+
+#[test]
+fn i2c_host_stimulus_errors() {
+    let dev = Device::load(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../../devices/18F27Q10.toml")).unwrap();
+    for bad in ["ops = [\"X\"]", "ops = [\"w 300\"]", "period = 1\nops = []", "port = 3\nops = []", "ops = [\"S\"]\nbogus = 1", "period = 20"] {
+        let mut m = Machine::new(dev.clone()).unwrap();
+        assert!(m.load_stimulus(&format!("[[i2c_host]]\n{bad}\n")).is_err(), "{bad}");
+    }
+}

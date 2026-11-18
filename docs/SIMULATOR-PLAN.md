@@ -87,9 +87,10 @@ These are bounded follow-on tasks, not claims of complete silicon coverage:
   hardware load-request exclusion/propagation delays.
 * PIC16: additional ADC coverage and computation modes, physical MSSP SPI/I2C
   waveforms and external clients beyond the existing OLED interface.
+* MSSP (Q10/K22): 7-bit I2C client mode against a byte-level `[[i2c_host]]` is done (`[A160]`-`[A163]`). Left: 10-bit client modes, general call, SBCDE, Sleep
+  wake-up on an address match, SPI client modes, pin-level client mode and clock stretching by external clients, PIC16 `[[i2c_host]]`, Q41 I2C client modes.
 * K22: CCP capture/compare, external Timer0 clock, remaining analog peripherals.
-* Across families: synchronous serial modes, I2C stretching/arbitration/client
-  modes, oscillator start-up/fail-safe behavior and electrical/analog behavior.
+* Across families: I2C arbitration and the remaining client modes, oscillator start-up/fail-safe behavior and electrical/analog behavior.
 
 New models require a datasheet citation, explicit assumptions, meaningful
 engine-level tests, and updates to the manual and facts before being advertised.

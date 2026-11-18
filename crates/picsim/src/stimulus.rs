@@ -29,6 +29,12 @@
 //! data = [0x12, 0x34]
 //! fill = 0xFF         # default 0xFF
 //!
+//! [[i2c_host]]       # an external host on the bus of MSSP `port` (Q10), talking to the MSSP in I2C client mode (SSPM = 0110 / 1110)
+//! port = 1            # MSSP number, default 1
+//! at = 0              # the script starts at this instruction cycle at the earliest, once SSPEN is set
+//! period = 40         # SCL period in instruction cycles, default 40
+//! ops = ["S", "w 0xA0", "w 0x12", "Sr", "w 0xA1", "r", "rn", "P"]   # S, Sr, P; "w b" sends a byte (the address included); "r" / "rn" reads a byte and acknowledges / not
+//!
 //! [[spi]]            # the client on an SPI host (Q41 SPI, Q10 MSSP): answers each exchanged byte with the next of `data`
 //! port = 1            # SPI number, default 1
 //! data = [0x12, 0x34] # bytes the client sends back, in order
@@ -97,6 +103,8 @@ pub struct Stimulus {
     pub spi: Vec<(u8, SpiClient)>,
     /// (MSSP number, client)
     pub i2c: Vec<(u8, I2cClient)>,
+    /// (MSSP number, external host driving the client mode)
+    pub i2c_host: Vec<(u8, crate::periph::I2cHost)>,
     /// (channel, from cycle, code)
     pub adc: Vec<(u8, u64, u16)>,
     /// (port letter, pin, from cycle, volts)
@@ -359,6 +367,39 @@ impl Stimulus {
                 }
                 continue;
             }
+            if k == "i2c_host" {
+                for e in v.as_array().ok_or("i2c_host must be [[i2c_host]] entries")? {
+                    let t = e.as_table().ok_or("i2c_host entry must be a table")?;
+                    for k in t.keys() {
+                        if !["port", "at", "period", "ops"].contains(&k.as_str()) {
+                            return Err(format!("i2c_host: unknown key {k}"));
+                        }
+                    }
+                    let num = |key: &str, default: u64| t.get(key).map_or(Ok(default), |x| x.as_integer().and_then(|i| u64::try_from(i).ok()).ok_or(format!("i2c_host.{key} must be a non-negative integer")));
+                    let port = u8::try_from(num("port", 1)?).map_err(|_| "bad i2c_host.port".to_string())?;
+                    let period = num("period", 40)?;
+                    if period < 2 { return Err("i2c_host.period must be at least 2 cycles".into()); }
+                    let at = num("at", 0)?;
+                    let mut ops = std::collections::VecDeque::new();
+                    for o in t.get("ops").and_then(|x| x.as_array()).ok_or("i2c_host needs ops = [...]")? {
+                        let o = o.as_str().ok_or("i2c_host.ops entries are strings")?.trim();
+                        ops.push_back(match o {
+                            "S" => crate::periph::HostOp::Start,
+                            "Sr" => crate::periph::HostOp::Restart,
+                            "P" => crate::periph::HostOp::Stop,
+                            "r" => crate::periph::HostOp::Read(true),
+                            "rn" => crate::periph::HostOp::Read(false),
+                            _ => {
+                                let v = o.strip_prefix('w').map(str::trim).ok_or(format!("i2c_host: unknown op {o:?} (S, Sr, P, w <byte>, r, rn)"))?;
+                                let n = match v.strip_prefix("0x") { Some(h) => u8::from_str_radix(h, 16).ok(), None => v.parse().ok() };
+                                crate::periph::HostOp::Write(n.ok_or(format!("i2c_host: bad byte in {o:?}"))?)
+                            }
+                        });
+                    }
+                    st.i2c_host.push((port, crate::periph::I2cHost { ops, period, at }));
+                }
+                continue;
+            }
             if k == "analog" {
                 for e in v.as_array().ok_or("analog must be [[analog]] entries")? {
                     let t = e.as_table().ok_or("analog entry must be a table")?;
@@ -466,6 +507,7 @@ impl Stimulus {
         let other = [
             ("spi", !self.spi.is_empty()),
             ("i2c", !self.i2c.is_empty()),
+            ("i2c_host", !self.i2c_host.is_empty()),
             ("analog", !self.analog.is_empty()),
             ("mclr", !self.mclr.is_empty()),
         ];
@@ -549,6 +591,11 @@ impl Stimulus {
         }
         for (port, c) in self.i2c {
             if !p.i2c_client(port, c) {
+                return Err(format!("{}: no MSSP{port} in the simulator", dev.device.name));
+            }
+        }
+        for (port, h) in self.i2c_host {
+            if !p.i2c_host(port, h) {
                 return Err(format!("{}: no MSSP{port} in the simulator", dev.device.name));
             }
         }
