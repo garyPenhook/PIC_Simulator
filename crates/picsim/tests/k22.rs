@@ -218,6 +218,7 @@ fn oscillator_status_follows_scs_and_the_pll() {
 #[test]
 fn ccp1_pwm_drives_rc2() {
     let mut m = machine("18F25K22");
+    m.cpu.write(a(&m, "ANSELC"), 0);
     let (pr2, t2con, ccp1con, ccpr1l, trisc, portc) = (a(&m, "PR2"), a(&m, "T2CON"), a(&m, "CCP1CON"), a(&m, "CCPR1L"), a(&m, "TRISC"), a(&m, "PORTC"));
     m.cpu.write(pr2, 49); // 50 counts, 200 cycles at 1:1
     m.cpu.write(ccpr1l, 25); // duty 100 of 200: half

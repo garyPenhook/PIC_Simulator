@@ -542,6 +542,9 @@ struct Port {
     lat: usize,
     tris: usize,
     ansel: Option<usize>,
+    wpu: Option<usize>,
+    odcon: Option<usize>,
+    wpu_disable: Option<(usize, u8)>,
 }
 
 #[derive(Clone)]
@@ -851,7 +854,12 @@ impl Periph {
             let l = letter as char;
             if let (Some(port), Some(lat), Some(tris)) = (addr(dev, &format!("PORT{l}")), addr(dev, &format!("LAT{l}")), addr(dev, &format!("TRIS{l}"))) {
                 hook(port, PORT0 + p.ports.len() as u8);
-                p.ports.push(Port { letter, port, lat, tris, ansel: addr(dev, &format!("ANSEL{l}")) });
+                let wpu_disable = if letter == b'B' {
+                    dev.sfr.iter().find_map(|s| s.fields.iter().find(|f| f.name == "nRBPU" || f.name == "RBPU")
+                        .map(|f| (s.addr as usize, 1u8 << f.pos)))
+                } else { None };
+                p.ports.push(Port { letter, port, lat, tris, ansel: addr(dev, &format!("ANSEL{l}")),
+                    wpu: addr(dev, &format!("WPU{l}")), odcon: addr(dev, &format!("ODCON{l}")), wpu_disable });
             }
         }
         // The Q10's NVMCON registers, or the EECON1/EECON2 of the PIC18(L)F2x/4xK22 (`Nvm::find_k22`).
@@ -1070,6 +1078,9 @@ impl Periph {
         for port in &p.ports {
             regs.extend([port.lat, port.tris]);
             regs.extend(port.ansel);
+            regs.extend(port.wpu);
+            regs.extend(port.odcon);
+            regs.extend(port.wpu_disable.map(|(a, _)| a));
         }
         regs.extend(p.ppsout.iter().map(|o| o.0));
         // the baud rate registers the EUSART model reads from the stored bytes (not unmodelled)
@@ -3026,25 +3037,33 @@ impl Periph {
         }
     }
 
-    /// Levels of the pins of port `i` at cycle `now`. An output pin shows its latch, an input pin what the outside world
-    /// drives (0 until a stimulus says otherwise `[A16]`: no pull-up is modelled), and 0 when ANSELx makes it analog.
-    fn port_levels(&self, i: usize, m: &DataMem, now: u64) -> u8 {
+    /// Physical driver mask and pin levels, before the analog input buffer.
+    fn port_physical(&self, i: usize, m: &DataMem, now: u64) -> (u8, u8) {
         let p = &self.ports[i];
-        let ext = self.drive.level(i, now);
         let tris = m.mem[p.tris];
-        let ana = p.ansel.map_or(0, |a| m.mem[a]);
-        let mut v = m.mem[p.lat] & !tris | ext & tris & !ana;
+        let output = !tris & m.implemented[p.tris] & m.implemented[p.port];
+        let mut high = m.mem[p.lat];
         for &(reg, bit) in &self.pps_by_port[i] {
-            // A pin driven by a modelled peripheral source (RxyPPS, TRIS clear) shows the source level, not the latch.
             let code = self.output_code(m, reg);
-            if tris >> bit & 1 == 0 && (self.sig_src >> code & 1 != 0 || ((1..=4).contains(&code) && self.cwg.as_ref().is_some_and(|c| c.hiz >> (code - 1) & 1 == 0))) {
-                v = v & !(1 << bit) | u8::from(self.sig >> code & 1 != 0) << bit;
+            if self.sig_src >> code & 1 != 0 || ((1..=4).contains(&code) && self.cwg.as_ref().is_some_and(|c| c.hiz >> (code - 1) & 1 == 0)) {
+                high = high & !(1 << bit) | u8::from(self.sig >> code & 1 != 0) << bit;
             }
         }
-        // The OLED's bus lines: external pull-up on a released pin, held low while the OLED acknowledges or answers.
-        v |= self.pullup.get(i).copied().unwrap_or(0) & tris;
-        v &= !self.forced.get(i).copied().unwrap_or(0);
-        v & m.implemented[p.port]
+        let od = p.odcon.map_or(0, |a| m.mem[a]);
+        let driven = output & !(od & high);
+        // Internal WPU is disabled for outputs, even while open drain releases them.
+        let weak = if p.wpu_disable.is_some_and(|(a, mask)| m.mem[a] & mask != 0) { 0 }
+            else { p.wpu.map_or(0, |a| m.mem[a]) & !output };
+        let pull = weak | self.pullup.get(i).copied().unwrap_or(0);
+        let input = self.drive.level(i, now) | pull & !self.drive.mask(i, now);
+        let levels = (high & driven | input & !driven)
+            & !self.forced.get(i).copied().unwrap_or(0) & m.implemented[p.port];
+        (driven, levels)
+    }
+
+    /// Digital PORT/PPS readback; ANSEL disables the input buffer, including on outputs.
+    fn port_levels(&self, i: usize, m: &DataMem, now: u64) -> u8 {
+        self.port_physical(i, m, now).1 & !self.ports[i].ansel.map_or(0, |a| m.mem[a])
     }
 
     /// Level of the pin a PPS input register selects (PORT field at bits 5:3, PIN at 2:0).

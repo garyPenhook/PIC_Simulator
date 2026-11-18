@@ -1141,12 +1141,13 @@ struct PeriphPins<'a> {
 impl PinView for PeriphPins<'_> {
     fn pin(&self, p: Pin) -> Option<(bool, bool)> {
         let i = self.p.ports.iter().position(|q| q.letter == p.0)?;
-        Some((self.m.mem[self.p.ports[i].tris] >> p.1 & 1 == 0, self.p.port_levels(i, self.m, self.now) >> p.1 & 1 != 0))
+        let (driven, levels) = self.p.port_physical(i, self.m, self.now);
+        Some((driven >> p.1 & 1 != 0, levels >> p.1 & 1 != 0))
     }
 
     fn open_drain(&self, p: Pin) -> bool {
         match self.p.ports.iter().find(|q| q.letter == p.0) {
-            Some(q) => !(self.m.mem[q.tris] >> p.1 & 1 == 0 && self.m.mem[q.lat] >> p.1 & 1 == 0),
+            Some(_) => self.pin(p).is_none_or(|(driven, high)| !driven || high),
             None => true,
         }
     }

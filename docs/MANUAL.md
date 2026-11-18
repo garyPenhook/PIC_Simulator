@@ -50,7 +50,7 @@ Because time is simulated, it is independent of how fast the host runs the simul
 
 * It is not a hardware debugger. You cannot change a register or memory cell from the window; you change the program or the stimulus and run again.
 * Only peripherals that are modelled behave. A register belonging to a peripheral without a model is plain storage, and both programs tell you which such registers the program touched (section 9).
-* Analogue behaviour is not simulated. The ADC converts a code that you supply; pull-ups, drive strength and input thresholds are not modelled.
+* Analogue behaviour is not simulated. The ADC converts a code that you supply; pull-up resistance, drive strength and input thresholds are not modelled.
 
 ---
 
@@ -899,7 +899,7 @@ PIC16F171xx and PIC16F132xx PWM1/2 share the 16-bit engine described above: two 
 
 **Pins on a PIC16 part.** GPIO and modelled PPS outputs (CCP/PWM, CLB and asynchronous EUSART) feed timer clock/gate, capture, IOC and INT inputs. Select the output's pin in an input PPS register to loop it back. GPIO and CCP/CLB changes reach edge consumers on the instruction clock following the boundary where they are observed; pulses within one instruction are not reconstructed. EUSART bit boundaries follow the configured baud rate. Set the TX pin's `RxyPPS` to its family's TX code and the receiver's `RXnPPS` (`RXPPS` on PIC16F183xx) to the desired digital pin. SPEN/TXEN enable the TX driver automatically. RX supports eight/nine bits, framing errors and overrun recovery; `[[uart]]` and interactive input inject characters directly and take precedence while active.
 
-PIC16 `WPUx` raises otherwise undriven inputs; an explicit low stimulus wins. `ODCONx` makes a high output release the pin and a low output sink. A TRIS output's weak pull-up is disabled even while open drain releases it; use an external pull-up, such as the board OLED's bus pull-ups. ANSEL disables digital PORT/PPS readback while the board still sees the physical output. PIC18 weak pull-ups and open-drain control remain unmodelled.
+PIC16 and PIC18 `WPUx` raise otherwise undriven inputs; an explicit low stimulus wins. `ODCONx` makes a high output release the pin and a low output sink. A TRIS output's weak pull-up is disabled even while open drain releases it; use an external pull-up, such as the board OLED's bus pull-ups. ANSEL disables digital PORT/PPS readback while the board still sees the physical output. PIC18 K22 also honors the global active-low RBPU enable in INTCON2.
 
 **CCP on a PIC16 part.** CCP1 to CCP4 drive the pin whose `RxyPPS` holds the CCP's output code while that pin is an output (TRIS bit clear); PORTx and the board's LEDs see it. Compare and PWM run on the same Timer1/Timer2 as the program (CCPTMRS picks the timer). Compare and PWM timing follow MDB where the data sheet's equations differ from it: a compare match is the Timer1 clock after TMR1 reached CCPR; after a match of MODE 0001 or 1011 TMR1 restarts at 1, so the period is CCPR clocks; a PWM pin is set at the first cycle of the last Timer2 count and stays set for `ceil(duty / 4) + 1` counts (one count is 2^n cycles for a 1:2^n prescaler). Not modelled: the compare pulse modes (MODE 1010, 1011 set the flag only), capture sources other than the `CCPxPPS` pin, capture in Sleep, a timer clocked from Fosc, and the PIC16F180x6 (no output code table). CCPxIF in PWM mode is set when the pulse ends.
 

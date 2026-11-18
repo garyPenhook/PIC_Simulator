@@ -8,6 +8,8 @@ fn machine(stim: &str) -> Machine {
     let dev = Device::load(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../../devices/18F27Q10.toml")).unwrap();
     let mut m = Machine::new(dev).unwrap();
     m.load_stimulus(stim).unwrap();
+    // GPIO bus reads require digital input buffers, as on hardware.
+    w(&mut m, "ANSELC", 0);
     m
 }
 
@@ -210,6 +212,12 @@ fn released_bus_pins_read_high_with_the_pull_ups() {
     let mut m = machine(BB);
     w(&mut m, "TRISC", 0xFF);
     assert_eq!(rd(&mut m, "PORTC") & 3, 3);
+    w(&mut m, "ODCONC", 3);
+    w(&mut m, "LATC", 3);
+    w(&mut m, "TRISC", 0xFC);
+    assert_eq!(rd(&mut m, "PORTC") & 3, 3, "OLED pull-ups raise released open-drain outputs");
+    w(&mut m, "LATC", 0);
+    assert_eq!(rd(&mut m, "PORTC") & 3, 0, "open-drain outputs sink the bus");
     let mut m = machine("");
     w(&mut m, "TRISC", 0xFF);
     assert_eq!(rd(&mut m, "PORTC") & 3, 0, "no OLED: inputs read 0 until driven");

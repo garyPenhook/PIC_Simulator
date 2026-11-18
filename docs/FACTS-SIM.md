@@ -208,8 +208,10 @@ through `raise_flag`, so it is a request arriving while the program runs (`[A108
 * `PORTx` read gives the pin levels, a write goes to `LATx` (DS40002043F ch.17: the pin is read, the latch written). An
   output pin (TRISx = 0) shows its latch; an input pin shows what the stimulus drives, 0 when its ANSELx bit is set
   (digital input buffer off). A read-modify-write on PORTx therefore reads the pins and writes the latch, as on the part.
-  `[A16]` An input nobody drives reads 0; weak pull-ups (WPUx), open-drain (ODCONx) and the input level thresholds are
-  not modelled; a pin driven by a peripheral output (RxyPPS) is not either.
+  `[A16]` An input nobody drives reads 0 unless WPUx or a board pull-up raises it; explicit low stimulus overrides
+  pull-ups. WPUx is disabled for outputs; K22 also requires INTCON2.nRBPU clear. ODCONx makes a high output
+  release and a low output sink, after selecting LATx or a modelled peripheral PPS source. ANSEL masks digital
+  readback, while the board sees physical levels. Input thresholds and pull-up resistance are not modelled.
 * Timer1 GVAL (T1GCON bit 2): the gate source after GPOL, for the pin source (T1GATE = 0, pin chosen by T1GPPS, reset
   RB5 on the Q10). `[A17]` MDB reads GVAL = 0 while GE = 0 and the polarity-adjusted pin level while GE = 1, whatever
   GTM, GSPM, GGO and ON are (probed on all combinations on a low pin); the data sheet says GVAL is unaffected by GE
