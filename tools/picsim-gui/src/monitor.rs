@@ -804,4 +804,21 @@ mod tests {
         assert!((0..40).any(|_| { m.step(); m.cpu.depth() > 0 }), "the interrupt was not taken");
         assert_eq!(m.cpu.pc, vector, "and it went to the vector");
     }
+
+    #[test]
+    fn the_debugger_tab_draws_with_conditions_listed() {
+        use picsim::debugger::{Cmp, Condition, Debugger};
+        let mut d = Debugger::default();
+        d.conditions.push(Condition { name: "TMR1".into(), addr: 0x20, wide: true, cmp: Cmp::Ge, value: 0x1000, at: Some(0x40), after: 3, hits: 1 });
+        d.conditions.push(Condition { name: "PORTB".into(), addr: 0x21, wide: false, cmp: Cmp::BitSet(2), value: 0, at: None, after: 1, hits: 0 });
+        let mut tools = crate::debugger::Tools::default();
+        let ctx = egui::Context::default();
+        for _ in 0..2 {
+            frame(&ctx, |ui| {
+                let actions = tools.show(ui, &mut d, true, &[], |_| Some(0x20), |a| a as u8, 0x10);
+                assert!(actions.is_empty());
+            });
+        }
+        assert_eq!(d.conditions.len(), 2, "drawing changes nothing");
+    }
 }

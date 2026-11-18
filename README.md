@@ -57,7 +57,7 @@ python3 scripts/install-local.py            # binaries, devices and manual under
 ```
 
 Keep the `devices/` folder beside the binaries when running them in place. Release archives, the manual and the VS Code
-extension are produced by `python3 scripts/package-release.py` (see [`docs/RELEASE-0.2.14.md`](docs/RELEASE-0.2.14.md)).
+extension are produced by `python3 scripts/package-release.py` (see [`docs/RELEASE-0.2.15.md`](docs/RELEASE-0.2.15.md)).
 
 ## Quick start
 

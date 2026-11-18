@@ -170,6 +170,9 @@ impl Machine16 {
             if self.breakpoints.contains(&pc) {
                 return Some(Some(Stop::Breakpoint(pc)));
             }
+            if let Some((index, value)) = self.debugger.cond_hit_at(pc, |a| self.cpu.peek(a)) {
+                return Some(Some(Stop::Condition { index, value }));
+            }
             let d = self.cpu.depth();
             if s.out {
                 if d < u32::from(s.d0) {
@@ -222,6 +225,9 @@ impl Machine16 {
             if !first && self.breakpoints.contains(&pc) {
                 return Stop::Breakpoint(pc);
             }
+            if !first && let Some((index, value)) = self.debugger.cond_hit_at(pc, |a| self.cpu.peek(a)) {
+                return Stop::Condition { index, value };
+            }
             first = false;
             if let Some(stop) = self.step() {
                 return stop;
@@ -244,11 +250,15 @@ impl Machine16 {
         }
         self.cpu.settle();
         let before = self.debugger.snapshot(|a| self.cpu.peek(a));
+        let cond_before = self.debugger.cond_state(|a| self.cpu.peek(a));
         self.debugger.sample(self.cpu.board.time_ns(self.cpu.cycles) as u64, |a| self.cpu.peek(a));
         self.cpu.step();
         self.cpu.settle();
         self.debugger.sample(self.cpu.board.time_ns(self.cpu.cycles) as u64, |a| self.cpu.peek(a));
-        self.debugger.changed(&before, |a| self.cpu.peek(a)).map(Stop::Watchpoint)
+        if let Some(c) = self.debugger.changed(&before, |a| self.cpu.peek(a)) {
+            return Some(Stop::Watchpoint(c));
+        }
+        self.debugger.cond_hit_data(&cond_before, |a| self.cpu.peek(a)).map(|(index, value)| Stop::Condition { index, value })
     }
 
     /// Bytes of a variable (little endian) as the CPU would read them, without side effects.

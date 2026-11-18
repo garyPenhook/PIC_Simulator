@@ -24,9 +24,86 @@ pub struct Sample {
     pub values: Vec<u8>,
 }
 
+/// How a conditional breakpoint compares the watched value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Cmp {
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+    /// Bit `n` of the value is 1 / 0.
+    BitSet(u8),
+    BitClear(u8),
+}
+
+/// Stop when a data byte (or a 16-bit little-endian pair) satisfies a comparison.
+///
+/// Without `at` the condition is edge-triggered: it stops after the instruction that makes the comparison true, not on
+/// every instruction while it stays true (so a condition that already holds when the run starts does not stop it until it
+/// has become false and true again). With `at` it is a conditional code breakpoint: it stops before the instruction at
+/// that program address executes, when the comparison holds then. A stop needs `after` hits (1 = the first).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Condition {
+    pub name: String,
+    pub addr: u32,
+    /// Two bytes, `addr` low and `addr + 1` high.
+    pub wide: bool,
+    pub cmp: Cmp,
+    pub value: u32,
+    pub at: Option<u32>,
+    pub after: u32,
+    pub hits: u32,
+}
+
+impl Condition {
+    pub fn read(&self, peek: impl Fn(u32) -> u8) -> u32 {
+        u32::from(peek(self.addr)) | if self.wide { u32::from(peek(self.addr + 1)) << 8 } else { 0 }
+    }
+
+    pub fn holds(&self, peek: impl Fn(u32) -> u8) -> bool {
+        let v = self.read(peek);
+        match self.cmp {
+            Cmp::Eq => v == self.value,
+            Cmp::Ne => v != self.value,
+            Cmp::Lt => v < self.value,
+            Cmp::Le => v <= self.value,
+            Cmp::Gt => v > self.value,
+            Cmp::Ge => v >= self.value,
+            Cmp::BitSet(b) => v >> b.min(15) & 1 != 0,
+            Cmp::BitClear(b) => v >> b.min(15) & 1 == 0,
+        }
+    }
+
+    pub fn describe(&self) -> String {
+        let w = if self.wide { format!("{}:2", self.name) } else { self.name.clone() };
+        let test = match self.cmp {
+            Cmp::Eq => format!("{w} == 0x{:X}", self.value),
+            Cmp::Ne => format!("{w} != 0x{:X}", self.value),
+            Cmp::Lt => format!("{w} < 0x{:X}", self.value),
+            Cmp::Le => format!("{w} <= 0x{:X}", self.value),
+            Cmp::Gt => format!("{w} > 0x{:X}", self.value),
+            Cmp::Ge => format!("{w} >= 0x{:X}", self.value),
+            Cmp::BitSet(b) => format!("{w} bit {b} set"),
+            Cmp::BitClear(b) => format!("{w} bit {b} clear"),
+        };
+        let at = self.at.map_or(String::new(), |a| format!(" at 0x{a:X}"));
+        let after = if self.after > 1 { format!(", hit {}", self.after) } else { String::new() };
+        format!("{test}{at}{after}")
+    }
+
+    /// Counts a hit; true when it is time to stop.
+    fn hit(&mut self) -> bool {
+        self.hits = self.hits.saturating_add(1);
+        self.hits >= self.after.max(1)
+    }
+}
+
 #[derive(Default)]
 pub struct Debugger {
     pub watchpoints: Vec<u32>,
+    pub conditions: Vec<Condition>,
     pub signals: Vec<Signal>,
     pub samples: Vec<Sample>,
     pub recording: bool,
@@ -51,13 +128,42 @@ impl Debugger {
     }
 
     pub fn active(&self) -> bool {
-        !self.watchpoints.is_empty() || self.recording
+        !self.watchpoints.is_empty() || !self.conditions.is_empty() || self.recording
+    }
+
+    /// Whether each data condition (those without `at`) holds now: taken before an instruction, so that the stop is on the
+    /// instruction that makes it true.
+    pub fn cond_state(&self, peek: impl Fn(u32) -> u8) -> Vec<bool> {
+        self.conditions.iter().map(|c| c.at.is_none() && c.holds(&peek)).collect()
+    }
+
+    /// After an instruction: the first data condition that was false before and holds now, and its value.
+    pub fn cond_hit_data(&mut self, before: &[bool], peek: impl Fn(u32) -> u8) -> Option<(usize, u32)> {
+        for (i, c) in self.conditions.iter_mut().enumerate() {
+            if c.at.is_none() && !before.get(i).copied().unwrap_or(true) && c.holds(&peek) && c.hit() {
+                return Some((i, c.read(&peek)));
+            }
+        }
+        None
+    }
+
+    /// Before the instruction at `pc`: the first conditional code breakpoint there whose comparison holds, and its value.
+    pub fn cond_hit_at(&mut self, pc: u32, peek: impl Fn(u32) -> u8) -> Option<(usize, u32)> {
+        for (i, c) in self.conditions.iter_mut().enumerate() {
+            if c.at == Some(pc) && c.holds(&peek) && c.hit() {
+                return Some((i, c.read(&peek)));
+            }
+        }
+        None
     }
 
     /// Clear the capture on a power-on reset, retaining signal and watchpoint choices.
     pub fn reset(&mut self) {
         self.samples.clear();
         self.full = false;
+        for c in &mut self.conditions {
+            c.hits = 0;
+        }
     }
 
     pub fn snapshot(&self, peek: impl Fn(u32) -> u8) -> Vec<u8> {
@@ -172,5 +278,53 @@ mod tests {
         d.reset();
         assert!(d.add_signal(sig(0x11, None)));
         assert_eq!(d.signals.len(), 3);
+    }
+
+    fn cond(cmp: Cmp, value: u32) -> Condition {
+        Condition { name: "X".into(), addr: 0, wide: false, cmp, value, at: None, after: 1, hits: 0 }
+    }
+
+    #[test]
+    fn comparisons_read_a_byte_or_a_little_endian_pair() {
+        let mem = [0x34u8, 0x12];
+        let peek = |a: u32| mem[a as usize];
+        assert!(cond(Cmp::Eq, 0x34).holds(peek) && cond(Cmp::Ne, 0).holds(peek));
+        assert!(cond(Cmp::Gt, 0x33).holds(peek) && !cond(Cmp::Gt, 0x34).holds(peek) && cond(Cmp::Ge, 0x34).holds(peek));
+        assert!(cond(Cmp::Lt, 0x35).holds(peek) && cond(Cmp::Le, 0x34).holds(peek));
+        assert!(cond(Cmp::BitSet(2), 0).holds(peek) && cond(Cmp::BitClear(0), 0).holds(peek));
+        let wide = Condition { wide: true, ..cond(Cmp::Eq, 0x1234) };
+        assert!(wide.holds(peek));
+        assert!(Condition { wide: true, ..cond(Cmp::BitSet(12), 0) }.holds(peek), "bit 12 of 0x1234");
+        assert_eq!(wide.describe(), "X:2 == 0x1234");
+    }
+
+    #[test]
+    fn a_data_condition_stops_on_the_change_that_makes_it_true_and_not_while_it_stays_true() {
+        let mut d = Debugger::default();
+        d.conditions.push(cond(Cmp::Eq, 5));
+        let before = d.cond_state(|_| 4);
+        assert_eq!(d.cond_hit_data(&before, |_| 5), Some((0, 5)));
+        // Already true before the instruction: no stop, however long it stays true.
+        let before = d.cond_state(|_| 5);
+        assert_eq!(d.cond_hit_data(&before, |_| 5), None);
+        // False, then true again: stops again.
+        let before = d.cond_state(|_| 6);
+        assert_eq!(d.cond_hit_data(&before, |_| 5), Some((0, 5)));
+        assert!(d.active());
+    }
+
+    #[test]
+    fn a_code_condition_needs_its_address_and_its_hit_count() {
+        let mut d = Debugger::default();
+        d.conditions.push(Condition { at: Some(0x40), after: 3, ..cond(Cmp::Ne, 0) });
+        assert_eq!(d.cond_hit_at(0x42, |_| 1), None, "another address");
+        assert_eq!(d.cond_hit_at(0x40, |_| 0), None, "the comparison is false");
+        assert_eq!(d.cond_hit_at(0x40, |_| 1), None, "hit 1 of 3");
+        assert_eq!(d.cond_hit_at(0x40, |_| 1), None, "hit 2 of 3");
+        assert_eq!(d.cond_hit_at(0x40, |_| 1), Some((0, 1)), "hit 3 of 3");
+        d.reset();
+        assert_eq!(d.conditions[0].hits, 0, "a reset starts the count again");
+        // A condition with an address is never an edge-triggered data condition.
+        assert_eq!(d.cond_state(|_| 1), vec![false]);
     }
 }

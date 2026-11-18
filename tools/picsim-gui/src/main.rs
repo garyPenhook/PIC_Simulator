@@ -714,6 +714,10 @@ impl eframe::App for App {
                 (_, true) => format!("running at {:.1}% of real time ({:.2} Mcycles/s); a wait on a UART or timer flag shows as one line for a long time", 100.0 * self.rate.2 / real, self.rate.2 / 1e6),
                 _ if self.job.is_some() => "stepping... (Pause cancels)".to_string(),
                 (Some(Stop::Watchpoint(c)), _) => format!("{} — data watchpoint at 0x{:04X}: {:02X} → {:02X}", self.msg, c.addr, c.before, c.after),
+                (Some(Stop::Condition { index, value }), _) => {
+                    let what = self.m.as_ref().and_then(|m| m.debugger.conditions.get(*index).map(|c| c.describe())).or_else(|| self.m16.as_ref().and_then(|m| m.debugger.conditions.get(*index).map(|c| c.describe()))).unwrap_or_default();
+                    format!("{} — condition met: {what} (value 0x{value:X})", self.msg)
+                }
                 (Some(s), _) => format!("{} — stopped: {s:?}", self.msg),
                 _ => self.msg.clone(),
             });

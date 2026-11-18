@@ -1,23 +1,25 @@
-# PicSim 0.2.14
+# PicSim 0.2.15
 
 PIC16/PIC18 firmware simulation with a graphical debugger, command-line runner,
 programmable stimulus and editor debugging through the Debug Adapter Protocol.
 
 ## Changes
 
-* Peripherals tab: **Fire an interrupt**. Every interrupt flag of the part is
-  listed with a **Fire** or **Clear** button. **Also enable it** sets the
-  flag's enable bit and the global enables that block it (`PEIE`, `GIE`/`GIEH`,
-  `GIEL`). The status line reports whether the interrupt will be taken, what
-  blocks it, or that the flag is read-only on the part.
-* Earlier in the 0.2.x line: interrupt gating in the Peripherals tab,
-  right-click trace from the Pins and SFRs tabs, Pins tab, change highlighting
-  and an interactive Waves tab.
+* Conditional breakpoints (Debugger tab, **Break when**): stop when a data byte
+  or 16-bit value satisfies `==`, `!=`, `<`, `<=`, `>`, `>=` or a bit test.
+  Without an address the condition is edge-triggered (it stops on the
+  instruction that makes it true); with **at** it is a conditional code
+  breakpoint; **hit** skips the first hits. Run, Step over, Line and Out all
+  stop on one, and the status line says which.
+* `Stop::Condition`, `Debugger::conditions` and the `Condition` and `Cmp`
+  types in the library; tests on PIC18 and PIC16.
+* Earlier in the 0.2.x line: fire an interrupt, interrupt gating, right-click
+  trace, Pins tab, change highlighting and an interactive Waves tab.
 * Manual rebuilt.
 
 ## Downloads and installation
 
-`picsim-0.2.14-linux-x86_64.tar.gz` contains `pic-sim`, `basil-sim`,
+`picsim-0.2.15-linux-x86_64.tar.gz` contains `pic-sim`, `basil-sim`,
 `basil-sim-dap`, device descriptions, documentation and a blink example.
 Extract it and run the binaries in place; keep `devices/` beside them.
 This binary bundle targets x86-64 Linux and was built on Kali Linux 2026.3 with
@@ -33,7 +35,7 @@ From source, build with `cargo build --release --workspace` and run
 manual under `~/.local` (or pass `--prefix`).
 
 After building, `python3 scripts/package-release.py` creates the Linux archive,
-manual, VSIX and checksums under `target/dist/0.2.14/`.
+manual, VSIX and checksums under `target/dist/0.2.15/`.
 
 ## Validation and limits
 

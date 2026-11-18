@@ -1,5 +1,5 @@
 use eframe::egui;
-use picsim::debugger::{Debugger, Signal};
+use picsim::debugger::{Cmp, Condition, Debugger, Signal};
 use picsim::periph::{Pin, parse_pin, pin_name};
 
 pub enum Action {
@@ -7,6 +7,31 @@ pub enum Action {
     Pc(u32),
     Pin(Pin, bool),
     Adc(u8, u16),
+}
+
+/// The fields of the "Break when" form.
+struct CondForm {
+    target: String,
+    wide: bool,
+    /// Index into `OPS`.
+    op: usize,
+    value: u32,
+    bit: u8,
+    at: String,
+    after: u32,
+    message: String,
+}
+
+impl Default for CondForm {
+    fn default() -> Self {
+        Self { target: String::new(), wide: false, op: 0, value: 0, bit: 0, at: String::new(), after: 1, message: String::new() }
+    }
+}
+
+const OPS: [&str; 8] = ["==", "!=", "<", "<=", ">", ">=", "bit set", "bit clear"];
+
+fn cmp_of(op: usize, bit: u8) -> Cmp {
+    [Cmp::Eq, Cmp::Ne, Cmp::Lt, Cmp::Le, Cmp::Gt, Cmp::Ge, Cmp::BitSet(bit), Cmp::BitClear(bit)][op.min(7)]
 }
 
 pub struct Tools {
@@ -17,6 +42,8 @@ pub struct Tools {
     channel: u8,
     adc: u16,
     message: String,
+    /// The conditional breakpoint being composed.
+    cond: CondForm,
     /// Visible time window of the Waves tab in ns since the capture began; `None` shows the whole capture.
     view: Option<(f64, f64)>,
 }
@@ -32,6 +59,7 @@ impl Default for Tools {
             adc: 0,
             message: String::new(),
             view: None,
+            cond: CondForm::default(),
         }
     }
 }
@@ -106,6 +134,69 @@ impl Tools {
         ui.small(
             "Stops after an instruction changes a watched byte, including peripheral changes.",
         );
+        ui.separator();
+        ui.label("Break when (conditional breakpoint)");
+        {
+            let f = &mut self.cond;
+            ui.horizontal(|ui| {
+                ui.add(egui::TextEdit::singleline(&mut f.target).hint_text("SFR, variable or address").desired_width(150.0));
+                ui.checkbox(&mut f.wide, "16-bit").on_hover_text("read two bytes, the named one and the next, as a little-endian value (TMR1, a 16-bit variable)");
+            });
+            ui.horizontal(|ui| {
+                egui::ComboBox::from_id_salt("cond_op").selected_text(OPS[f.op]).show_ui(ui, |ui| {
+                    for (i, o) in OPS.iter().enumerate() {
+                        ui.selectable_value(&mut f.op, i, *o);
+                    }
+                });
+                if f.op >= 6 {
+                    ui.label("bit");
+                    ui.add(egui::DragValue::new(&mut f.bit).range(0..=if f.wide { 15 } else { 7 }));
+                } else {
+                    ui.add(egui::DragValue::new(&mut f.value).hexadecimal(2, false, true).range(0..=if f.wide { 0xFFFF } else { 0xFF }));
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.label("at");
+                ui.add(egui::TextEdit::singleline(&mut f.at).hint_text("optional hex address").desired_width(100.0))
+                    .on_hover_text("Empty: stop right after the instruction that makes the condition true (once, until it goes false again). A program address (PIC18 byte address, PIC16 word address): stop before that instruction runs whenever the condition holds there.");
+                if ui.small_button("PC").on_hover_text("the current program counter").clicked() {
+                    f.at = format!("{pc:X}");
+                }
+                ui.label("hit");
+                ui.add(egui::DragValue::new(&mut f.after).range(1..=1_000_000)).on_hover_text("stop on this hit and later ones (1 = the first)");
+            });
+            let at = if f.at.trim().is_empty() { Some(None) } else { u32::from_str_radix(f.at.trim().trim_start_matches("0x").trim_start_matches("0X"), 16).ok().map(Some) };
+            let target = f.target.trim().to_string();
+            let a = resolve(&target);
+            if ui.add_enabled(idle && a.is_some() && at.is_some(), egui::Button::new("Add condition")).clicked() {
+                let value = f.value;
+                d.conditions.push(Condition { name: target, addr: a.unwrap(), wide: f.wide, cmp: cmp_of(f.op, f.bit), value, at: at.unwrap(), after: f.after, hits: 0 });
+                f.message.clear();
+            } else if !target.is_empty() && a.is_none() {
+                f.message = "Unknown data address".into();
+            } else if at.is_none() {
+                f.message = "The address after \"at\" must be hex".into();
+            } else {
+                f.message.clear();
+            }
+            if !f.message.is_empty() {
+                ui.small(&f.message);
+            }
+        }
+        let mut remove_cond = None;
+        for (i, c) in d.conditions.iter().enumerate() {
+            ui.horizontal(|ui| {
+                let now = c.read(&peek);
+                ui.label(egui::RichText::new(format!("{}  [now 0x{now:X}, hits {}]", c.describe(), c.hits)).monospace().color(if c.holds(&peek) { egui::Color32::from_rgb(255, 170, 60) } else { ui.visuals().text_color() }));
+                if ui.add_enabled(idle, egui::Button::new("Remove")).clicked() {
+                    remove_cond = Some(i);
+                }
+            });
+        }
+        if let Some(i) = remove_cond {
+            d.conditions.remove(i);
+        }
+        ui.small("Without an address a condition stops once, on the instruction that makes it true. Run, Step over, Line and Out all stop on it.");
         ui.separator();
         ui.label("External inputs");
         ui.add_enabled_ui(idle, |ui| {

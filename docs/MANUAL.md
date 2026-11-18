@@ -1,6 +1,6 @@
 # pic-sim Manual
 
-Revision for **pic-sim 0.2.14** and **basil-sim 0.2.14** (one workspace version). Simulated families: **PIC18** (PIC18F27Q10, the PIC18F04/05/06/14/15/16Q41 and the PIC18(L)F23/24/25/26/43/44/45/46K22) and **PIC16 enhanced mid-range** (PIC16F131xx, 132xx, 152xx, 171xx, 180x6 and 183xx).
+Revision for **pic-sim 0.2.15** and **basil-sim 0.2.15** (one workspace version). Simulated families: **PIC18** (PIC18F27Q10, the PIC18F04/05/06/14/15/16Q41 and the PIC18(L)F23/24/25/26/43/44/45/46K22) and **PIC16 enhanced mid-range** (PIC16F131xx, 132xx, 152xx, 171xx, 180x6 and 183xx).
 
 This manual describes what the simulator does today. It is organised in the order you meet the tools: what the simulator is, how to build and start it, how to prepare a program for it, the graphical front end `pic-sim`, the command-line front end `basil-sim`, the stimulus file that describes the outside world, the simulated board (LEDs and OLED), and finally what is and is not modelled. Anything not listed here is not supported.
 
@@ -342,6 +342,13 @@ Available for both PIC16 and PIC18. The CPU panel's **Edit…** button opens thi
 Enter an SFR name, global variable (the same names and `name@file.c` syntax as Watch), or a decimal/`0x` data address. The current byte is shown in hex; choose a new hex value and press **Write**. To change the program counter, enter `PC` (PIC16: word address; PIC18: even byte address). PC values wrap within the part's program memory. Register writes obey the hardware model, including read-only bits and side effects. Multi-byte registers can be edited through their individual byte members. PIC16 linear RAM addresses are translated to banked data addresses.
 
 **Break on value change** adds a data watchpoint on the selected byte. Run, Step, Step over, Line, Line over and Out stop after an instruction changes it; the stop reason reports the address and old/new values. Peripheral changes also count. Reads, same-value writes, and changes that return to the original value within one instruction do not trigger. Edits made while paused become the next step's starting value. **Remove** deletes a watchpoint.
+
+**Break when (conditional breakpoint)** stops the simulator when a data byte satisfies a comparison. Enter an SFR, variable or data address (the same names as above), choose `==`, `!=`, `<`, `<=`, `>`, `>=` and a hex value, or *bit set* / *bit clear* and a bit number, and press **Add condition**. Tick **16-bit** to read the named byte and the next as one little-endian value (`TMR1L`, a 16-bit variable; the comparison and the value then run to 0xFFFF). Two kinds:
+
+* *Without an address*, the condition is **edge-triggered**: the run stops after the instruction that makes it true, not on every instruction while it stays true, so `PORTB bit 2 set` stops when the pin goes high, and a condition that already holds when you press Run does not stop the run until it has become false and true again. A change made by a peripheral between instructions counts, as it does for **Break on value change**.
+* With an address in **at** (hex; the **PC** button fills in the current program counter; a PIC18 byte address, a PIC16 word address) the condition is a **conditional code breakpoint**: the simulator stops *before* that instruction runs, whenever the comparison holds at that moment.
+
+**hit** makes it stop on that hit and every later one (`hit 3`: ignore the first two); the count starts again at Reset. Each condition is listed with its current value and hit count and turns orange while it holds. Run, Step over, Line, Line over and Out all stop on a condition, and the status line says which one. Conditions are kept until removed (Load clears them) and, like watchpoints, make the simulator check after every instruction, so a run with conditions is slower. They are not available in `basil-sim` or the VS Code debug adapter, which keep their own breakpoints.
 
 **External inputs:** enter an existing pin such as `RA0`, select **High**, and press **Drive pin** to drive high or low at the current cycle. Enter a decimal ADC channel and conversion code and press **Apply** to change the ADC input. Codes use the part's ADC resolution. These changes use the stimulus model, persist until overridden by a later stimulus/input change, and are cleared by Reset or Load. Pin direction and analog selection still apply.
 
