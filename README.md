@@ -18,6 +18,17 @@ second can finish in milliseconds, or be paced to real time.
 All three use the same simulated parts and read the same TOML **stimulus** file, which says what the outside world does
 to the pins, serial receiver, ADC and so on.
 
+## Screenshots
+
+`pic-sim` running the blink example (`tests/sim/blink_q10.hex`, PIC18F27Q10) with a simulated LED on RB0: BASIC source
+with the current line, CPU registers, stopwatch and call stack, and the board strip along the bottom.
+
+![pic-sim source view with the LED on RB0 lit](docs/images/pic-sim-source.png)
+
+The same program in the disassembly view, with the special function register list (address, hex and binary values) beside it.
+
+![pic-sim disassembly and SFR view](docs/images/pic-sim-disassembly.png)
+
 ## Supported devices
 
 64 device descriptions generated from Microchip device packs and cross-checked against the data sheets:
