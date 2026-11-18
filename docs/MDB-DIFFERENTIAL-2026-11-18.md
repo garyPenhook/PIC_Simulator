@@ -71,8 +71,12 @@ compare (`devices:`/`engine:`/`stim:`/`dma:` lines, compile failures, C programs
 * PIC16 `lib_i2c` and `lib_spi`: MDB runs 3.2-16.8 million cycles and `SpiStatus` is 1 (timeout) there, 0 in the sim: the same
   MSSP-never-completes behaviour as the Q10 (lib_spi/lib_i2c). `lib_intosc` on the 17146: same oscillator-ready wait (D-SIM-14 is
   measured on the Q10; the 17146 timeout is consistent with it, not separately checked).
-* PIC16F17146 `lib_pwm`: MDB 2 222 740 cycles against 2730, one scratch byte differs. A bounded wait expires in MDB; which
-  register it waits on was **not** identified, so this one is unexplained.
+* PIC16F17146 `lib_pwm`: MDB 2 222 740 cycles against 2730, one scratch byte differs (`__A1` 0xEA, the high byte of
+  60000). Explained: `Basic_Compiler/lib/pwm.bas` `WaitLoad` polls `PWM1CON.LD` (bit 2) with a 60000-iteration cap, 37 cycles per
+  iteration (60000 x 37 = 2 220 000 of the 2 220 010 extra cycles). MDB never clears `LD`: read in MDB at entry to the second
+  `PWM_LOADDUTY`, `PWM1CON` = 0x84 (EN and LD still set from the first load). The sim clears `LD` at the period reload
+  (FACTS-SIM.md, PWM load), as the data sheet describes. MDB does not model the PWM reload, so the sim is right and the library is
+  unchanged; `lib_pwm` is a known MDB gap (same class as `CCPxCON.OUT`, REVIEW-FINDINGS T3).
 * The K22 parts and the 16F13145/13245 parts have identical snapshots on every program the tool compares. The PIC16 exec
   suites are small (4-33 programs per part), so that is narrower evidence than the Q10's 221 programs.
 * Every PIC16 cycle-count agreement that the tool reports as `same` with a very different count (`lib_serial` 4235/463 on the 17146)
