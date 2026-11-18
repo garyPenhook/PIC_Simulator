@@ -29,7 +29,7 @@
 //! data = [0x12, 0x34]
 //! fill = 0xFF         # default 0xFF
 //!
-//! [[i2c_host]]       # an external host on the bus of MSSP `port` (Q10), talking to the MSSP in I2C client mode (SSPM = 0110 / 1110)
+//! [[i2c_host]]       # an external host on the bus of MSSP `port` (Q10, K22, PIC16: byte level there, no pin waveforms), talking to the MSSP in I2C client mode (SSPM = 0110 / 1110)
 //! port = 1            # MSSP number, default 1
 //! at = 0              # the script starts at this instruction cycle at the earliest, once SSPEN is set
 //! period = 40         # SCL period in instruction cycles, default 40
@@ -507,7 +507,6 @@ impl Stimulus {
         let other = [
             ("spi", !self.spi.is_empty()),
             ("i2c", !self.i2c.is_empty()),
-            ("i2c_host", !self.i2c_host.is_empty()),
             ("analog", !self.analog.is_empty()),
             ("mclr", !self.mclr.is_empty()),
         ];
@@ -515,7 +514,7 @@ impl Stimulus {
             return Err(format!("{}: the part has no CLB", dev.device.name));
         }
         if let Some((n, _)) = other.iter().find(|(_, used)| *used) {
-            return Err(format!("{}: [[{n}]] is not modelled on PIC16 parts yet; only [[uart]], [[uart_device]], [[adc]], [[pin]]/[[port]], [[bounce]], [[clock]], [[led]] and [[oled]] are", dev.device.name));
+            return Err(format!("{}: [[{n}]] is not modelled on PIC16 parts yet; only [[uart]], [[uart_device]], [[i2c_host]] (byte level), [[adc]], [[pin]]/[[port]], [[bounce]], [[clock]], [[led]] and [[oled]] are", dev.device.name));
         }
         for o in &self.board.oleds {
             if let Bus::I2c(n) = o.bus
@@ -524,6 +523,7 @@ impl Stimulus {
                 return Err(format!("{}: the part has no MSSP{n} in the simulator; an [[oled]] needs bus = \"gpio\" (bit-banged) or an MSSP the part has", dev.device.name));
             }
         }
+        if let Some((port, _)) = self.i2c_host.iter().find(|(port, _)| !cpu.has_mssp(*port)) { return Err(format!("{}: no MSSP{port} in the simulator", dev.device.name)); }
         if let Some((port, _)) = self.uart_devices.iter().find(|(port, _)| !cpu.has_uart(*port)) { return Err(format!("{}: no UART{port}", dev.device.name)); }
         let pins = cpu.pins();
         for p in self.board.leds.iter().map(|l| l.pin).chain(self.board.oleds.iter().flat_map(|o| [o.scl, o.sda])).chain(self.bounce_pins.iter().copied()).chain(self.clocks.iter().map(|c| c.pin)) {
@@ -560,6 +560,9 @@ impl Stimulus {
             cpu.adc_feed(ch, at, v);
         }
         for clock in self.clocks { cpu.clock_feed(clock); }
+        for (port, h) in self.i2c_host {
+            if !cpu.i2c_host(port, h) { return Err(format!("{}: no MSSP{port} in the simulator", dev.device.name)); }
+        }
         for (port, rule) in self.uart_devices { cpu.uart_reply(port, rule); }
         for (port, s) in self.uart {
             cpu.rx_send(port, s);

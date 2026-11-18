@@ -2002,6 +2002,13 @@ impl Pic16 {
         self.mssps.iter().any(|q| q.num == num)
     }
 
+    /// Set the external host that drives the I2C client mode of MSSP `num` (1-based). False when the part has no such MSSP.
+    /// Byte level only: the PIC16 pin model does not put the MSSP waveforms on the pins.
+    pub fn i2c_host(&mut self, num: u8, h: crate::periph::I2cHost) -> bool {
+        self.due = 0;
+        if let Some(s) = self.mssps.iter_mut().find(|s| s.num == num) { s.host = Some(h); true } else { false }
+    }
+
     /// A register read as the program sees it (for tests and tools): the models are brought to the current cycle first.
     pub fn read(&mut self, a: u32) -> u8 {
         self.rd(Tgt::Mem(a as usize))

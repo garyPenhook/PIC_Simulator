@@ -41,7 +41,7 @@
 //! * `[A50]` An SSPxBUF write with SSPEN = 0 only fills SSPxBUF.
 //!
 //! I2C client (slave) mode, 7-bit addressing (SSPM = 0110, 1110), driven by an external host from the stimulus file
-//! (`[[i2c_host]]`, byte level; SCL / SDA waveforms are put on the pins (`[A164]`), no bus arbitration; 10-bit modes, general call and Sleep wake-up are not modelled):
+//! (`[[i2c_host]]`, byte level; SCL / SDA waveforms are put on the pins on PIC18 / K22 only (`[A164]`), no bus arbitration; 10-bit modes, general call and Sleep wake-up are not modelled):
 //! * The first byte after a Start/Restart is compared with SSPxADD under SSPxMSK on A[7:1] (28.5.1.1 p.457, 28.5.9 p.474); a
 //!   mismatch leaves the module idle without any indication (28.5.1 p.456). A match loads the byte into SSPxBUF (BF), copies R/W
 //!   and clears D/A, acknowledges, and sets SSPxIF on the ninth falling edge (28.5.2 p.457, Figure 28-14 p.459, SSPxSTAT p.491-492).
@@ -68,7 +68,7 @@
 //! * `[A164]` The pins show the bus: SCL low from the host between bits (rising in the middle of the bit, falling at its end), SDA the
 //!   data bit of whoever sends, the ninth clock with SDA low when the receiver acknowledges, Start / Stop as SDA edges while SCL is high.
 //!   Both are open-drain (the board needs a pull-up, `[[pin]] level = 1`); with no host script they stay released. A clock stretched by
-//!   CKP is SCL left low, so the next edge simply comes later. Levels the firmware drives onto the pins are not fed back to the module.
+//!   CKP is SCL left low, so the next edge simply comes later. With SSPEN set the module owns both pins (TRISx must be input, LATx is ignored) and reads nothing back; the PIC16 core runs the host at byte level without pin waveforms.
 //! * `[A163]` A read the host makes of a client that is not addressed for reading returns FFh and touches no register.
 
 use crate::log::Log;
@@ -357,7 +357,7 @@ impl Mssp {
         let mode = m[self.con1] & 15;
         if matches!(mode, 6 | 14) {
             if self.host.is_none() {
-                notes.insert(format!("MSSP{} I2C client mode is modelled only with an [[i2c_host]] stimulus (PIC18); nothing drives the bus", self.num));
+                notes.insert(format!("MSSP{} I2C client mode is modelled only with an [[i2c_host]] stimulus (byte level on PIC16, with pin waveforms on PIC18 / K22); nothing drives the bus", self.num));
             }
             while let Some(t) = self.hdue && t <= now {
                 self.hdue = None;

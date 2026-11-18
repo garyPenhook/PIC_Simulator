@@ -268,3 +268,30 @@ fn the_pic16_clock_defaults_to_the_family_maximum() {
     let e = machine("16F17146", "fosc_mhz = 48\n").err().unwrap();
     assert!(e.contains("above the part's 32 MHz"), "{e}");
 }
+
+#[test]
+fn i2c_host_drives_the_client_mode_of_a_pic16_mssp() {
+    for part in PARTS {
+        let mut m = machine(part, "[[i2c_host]]\nperiod = 20\nops = [\"S\", \"w 0xA0\", \"w 0x12\", \"P\"]\n").unwrap();
+        let (add, con1, stat, buf) = (addr(&m, "SSP1ADD"), addr(&m, "SSP1CON1"), addr(&m, "SSP1STAT"), addr(&m, "SSP1BUF"));
+        m.cpu.mem[add] = 0xA0;
+        // SSPEN, CKP, SSPM = 0110
+        m.cpu.write(con1 as u32, 0x36);
+        let mut got = None;
+        for _ in 0..700 {
+            m.cpu.pc = 0x100;
+            m.cpu.step();
+            if got.is_none() && m.cpu.read(stat as u32) & 0x21 == 0x21 { got = Some(m.cpu.read(buf as u32)); }
+        }
+        assert_eq!(got, Some(0x12), "{part}: the data byte of the host reaches SSP1BUF");
+        assert_eq!(m.cpu.read(stat as u32) & 0x18, 0x10, "{part}: P set after the Stop");
+    }
+}
+
+#[test]
+fn i2c_host_on_a_pic16_needs_the_mssp_it_names() {
+    for part in PARTS {
+        let e = machine(part, "[[i2c_host]]\nport = 3\nops = [\"S\"]\n").err().unwrap();
+        assert!(e.contains("MSSP"), "{part}: {e}");
+    }
+}

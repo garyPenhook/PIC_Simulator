@@ -750,7 +750,7 @@ The device has 256 byte registers and an eight-bit pointer. The first data byte 
 
 ## I2C host: `[[i2c_host]]`
 
-An external host that talks to the MSSP while it runs in I2C client mode (`SSPM` = `0110` or `1110`, 7-bit address; PIC18 Q10, tested there, and K22, which shares the module). It is byte level for the module, and the bus is shown on the pins: with SCL and SDA selected through PPS (both pins inputs, pulled up by a `[[pin]] level = 1`), PORTx reads the host's Start, bits, acknowledge and Stop as they happen. Levels the firmware drives onto the pins are not fed back to the module.
+An external host that talks to the MSSP while it runs in I2C client mode (`SSPM` = `0110` or `1110`, 7-bit address; PIC18 Q10, tested there, and K22, which shares the module). It is byte level for the module, and the bus is shown on the pins: with SCL and SDA selected through PPS (both pins inputs, pulled up by a `[[pin]] level = 1`), PORTx reads the host's Start, bits, acknowledge and Stop as they happen. With SSPEN set the module owns the two pins, so LATx / TRISx do not change them and the module never reads them back.
 
 ```toml
 [[i2c_host]]
@@ -760,7 +760,7 @@ period = 40          # SCL period in instruction cycles, default 40 (at least 2)
 ops = ["S", "w 0xA0", "w 0x12", "Sr", "w 0xA1", "r", "rn", "P"]
 ```
 
-`S`, `Sr` and `P` are Start, Repeated start and Stop. `"w 0xA0"` sends a byte (the address byte included, R/W in bit 0), `"r"` reads a byte and acknowledges it, `"rn"` reads a byte and does not. The run is shown in the `i2c` report like a host's traffic (`!` after a byte the MSSP did not acknowledge). The module honours SSPxADD / SSPxMSK, BF, SSPOV, BOEN, SEN, AHEN / DHEN, ACKDT / ACKTIM / ACKSTAT and CKP stretching: the host waits while CKP is 0. Clearing SSPEN or changing SSPM drops the operation in flight. 10-bit addressing, general call, Sleep wake-up and bus arbitration are not modelled. PIC16 parts do not accept the section yet.
+`S`, `Sr` and `P` are Start, Repeated start and Stop. `"w 0xA0"` sends a byte (the address byte included, R/W in bit 0), `"r"` reads a byte and acknowledges it, `"rn"` reads a byte and does not. The run is shown in the `i2c` report like a host's traffic (`!` after a byte the MSSP did not acknowledge). The module honours SSPxADD / SSPxMSK, BF, SSPOV, BOEN, SEN, AHEN / DHEN, ACKDT / ACKTIM / ACKSTAT and CKP stretching: the host waits while CKP is 0. Clearing SSPEN or changing SSPM drops the operation in flight. 10-bit addressing, general call, Sleep wake-up and bus arbitration are not modelled. On PIC16 parts the section is accepted at byte level only: the module runs against the host, but the PIC16 pin model does not put the MSSP waveforms on the pins. Levels driven onto the pins by anything else are not fed back to the module either: with SSPEN set the module owns SCL / SDA, and clock stretching by an outside device is not modelled.
 
 ## SPI client: `[[spi]]`
 

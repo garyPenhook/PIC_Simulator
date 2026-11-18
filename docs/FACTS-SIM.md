@@ -503,7 +503,7 @@ NACKed and a read from nobody gives FFh.
   * `[A163]` a host read of a client not addressed for reading returns FFh and touches no register.
   * `[A164]` the pins show the bus: SCL / SDA waveforms of the host and the client's acknowledge (and read data) reach the PPS-selected pins as open-drain levels (the board needs a pull-up, `[[pin]] level = 1`); a clock held by CKP is SCL left low. Levels the firmware drives are not fed back to the module. Test `client_pins_*` in `tests/mssp.rs`.
   * Not modelled: 10-bit addressing (UA), general call (GCEN), SBCDE slave bus collision, Sleep wake-up on an address match (the host is paused in Sleep), pins driven by an external device other than the host script,
-    SDAHT, PIC16 parts (their stimulus loader does not accept `[[i2c_host]]`).
+    SDAHT, pin waveforms on PIC16 parts (their `[[i2c_host]]` runs at byte level only, test `i2c_host_drives_the_client_mode_of_a_pic16_mssp` in `tests/pic16_board.rs`).
   stretching by a client are not modelled.
 * Tests: `crates/picsim/tests/mssp.rs`; `tests/sim/spi_q10` and `tests/sim/i2c_q10` run the library `Spi` and `I2c` modules (compiled with
   `basil`) against clients.
