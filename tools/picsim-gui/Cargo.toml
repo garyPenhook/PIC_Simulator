@@ -1,6 +1,7 @@
 [package]
 name = "picsim-gui"
 version.workspace = true
+license.workspace = true
 edition = "2024"
 description = "Graphical front end of the PIC simulator"
 

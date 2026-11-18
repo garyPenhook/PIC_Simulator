@@ -86,3 +86,7 @@ devices/           device descriptions
 tests/probe/       assembly probes compared against MDB
 scripts/           regression, MDB differential and packaging tools
 ```
+
+## License
+
+MIT, see [`LICENSE`](LICENSE).

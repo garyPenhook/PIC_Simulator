@@ -4,3 +4,4 @@ resolver = "3"
 
 [workspace.package]
 version = "0.2.11"
+license = "MIT"
