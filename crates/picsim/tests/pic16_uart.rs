@@ -166,3 +166,36 @@ fn auto_baud_wake_up_and_break_give_notes() {
         assert!(m.cpu.notes.iter().any(|n| n.contains(f)), "{f}: {:?}", m.cpu.notes);
     }
 }
+
+const SP1BRGL: u16 = 0x0E;
+
+/// Synchronous master (DS40002043F 29.3.1; Table 29-1: n+1 cycles a bit, no Start or Stop bit): SP1BRGL = 3 gives
+/// 4 cycles a bit and 32 a character; TX1REG is written by the 9th instruction (cycle 9).
+#[test]
+fn synchronous_master_transmit_timing() {
+    let prog: Vec<u16> = [vec![movlb(14), movlw(3), movwf(SP1BRGL), movlw(0x80), movwf(RC1STA), movlw(0xB0), movwf(TX1STA), movlw(b'A' as u16), movwf(TX1REG)], vec![NOP; 100]].concat();
+    let mut m = machine(&prog, &[], None);
+    run_to(&mut m, 30);
+    assert_eq!(m.cpu.mem[0x700 + TX1STA as usize] & 2, 0, "TRMT clear while the eight clocks run");
+    run_to(&mut m, 39);
+    assert_eq!(m.cpu.mem[0x700 + TX1STA as usize] & 2, 0, "9 + 8 * 4 = 41: not yet");
+    run_to(&mut m, 45);
+    assert_eq!(m.cpu.mem[0x700 + TX1STA as usize] & 2, 2, "TRMT set after the last clock");
+    assert!(!m.cpu.notes.iter().any(|n| n.contains("nothing is sent")), "{:?}", m.cpu.notes);
+}
+
+/// SREN receives one character on the master's own clocks and clears itself (29.3.1.5).
+#[test]
+fn synchronous_master_single_receive() {
+    let prog: Vec<u16> = [vec![movlb(14), movlw(3), movwf(SP1BRGL), movlw(0x90), movwf(TX1STA), movlw(0xA0), movwf(RC1STA)], vec![NOP; 50], vec![movf_w(RC1REG), movwf(0x70)], vec![NOP; 20]].concat();
+    let stim = "[[uart]]\nport = 1\nbytes = \"U\"\nat = 20\n";
+    let mut m = machine(&prog, &[], Some(stim));
+    run_to(&mut m, 45);
+    assert_eq!(pir4(&m) & RCIF, 0, "20 + 8 * 4 = 52: the trailing edge of the eighth clock");
+    assert_eq!(m.cpu.mem[0x700 + RC1STA as usize] & 0x20, 0x20, "SREN still set");
+    run_to(&mut m, 56);
+    assert_eq!(pir4(&m) & RCIF, RCIF);
+    assert_eq!(m.cpu.mem[0x700 + RC1STA as usize] & 0x20, 0, "SREN cleared at the end of one character");
+    run_to(&mut m, 70);
+    assert_eq!(m.cpu.peek(0x70), b'U');
+}

@@ -71,7 +71,15 @@ DS40002043F ch.29 p.503-505.
   neither: 16(n+1); 10 bits, 11 with TX9. `[A6]` the held byte starts in the cycle the Stop bit ends.
   `[A7]` clearing TXEN abandons the shift register and a held byte; a TXREG write with TXEN = 0 is dropped.
   `[A8]` TXIF does not dip for a cycle after a write that goes straight to the shift register.
-* Synchronous mode is not modelled (a note is logged; nothing is sent or received).
+* `[A156]` Synchronous mode (SYNC = 1; DS40002043F 29.3 p.518-523, Table 29-1 p.511; the PIC16 and K22 EUSARTs share the model).
+  Bit time is `n+1` instruction cycles for the 8-bit and 16-bit BRG, BRGH ignored; no Start or Stop bit, so a character is
+  8 (9 with TX9/RX9) bit times. Master (CSRC = 1): TXREG/TSR/TXIF/TRMT as in asynchronous mode; SREN (one character) or
+  CREN (continuous) starts the clocks, a character is complete at the trailing edge of its last clock, SREN clears itself
+  when it ends with CREN clear, clearing both stops the clocks and drops a character in flight; OERR from SREN-only
+  reception is cleared by reading RCREG (29.3.1.6). Data comes from byte stimuli (`[[uart]]`, `[[uart_device]]`). Slave
+  (CSRC = 0): receives byte stimuli with CREN; a TXREG write waits for master clocks that are not modelled. Not modelled:
+  the CK and DT pin waveforms and PPS routing in synchronous mode, an external clock on CK, slave operation in Sleep.
+  A note is logged. Tests: `tests/pic16_uart.rs`. The Q41 UART has no synchronous mode.
 * `basil-sim` prints the transmitted bytes as `tx1: ...` / `tx2: ...`; `Periph::tx` holds (EUSART, start cycle, byte).
 
 ### Receiver (DS40002043F 29.1.2 p.507-510, RCxSTA 29.6.4 p.529)

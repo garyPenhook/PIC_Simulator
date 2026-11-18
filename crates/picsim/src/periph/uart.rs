@@ -52,6 +52,8 @@ pub(crate) struct Uart {
     pub asleep: bool,
     /// Receive FIFO, two deep: (word with the ninth bit at bit 8, framing error).
     pub fifo: VecDeque<(u16, bool)>,
+    /// Synchronous master: the cycle SREN or CREN was last set; clocks, and so a character, start no earlier.
+    arm: u64,
 }
 
 impl Uart {
@@ -77,13 +79,18 @@ impl Uart {
             replies: Vec::new(), sent: 0,
             num: n, reg, sta, baud, brgl, brgh, flag, tsr_end: None, pending: None, rcreg, rcsta, rcflag,
             tx_frames: VecDeque::new(), pending_ninth: false, pin_paused: None, pin_prev: None, pin_rx: None,
-            rx_in: VecDeque::new(), rx_free: 0, rx_cur: None, asleep: false, fifo: VecDeque::new(),
+            rx_in: VecDeque::new(), rx_free: 0, rx_cur: None, asleep: false, fifo: VecDeque::new(), arm: 0,
         };
         Some((u, [reg, sta, baud, rcreg, rcsta]))
     }
 
     /// Instruction cycles one bit takes at the current baud settings.
     pub fn bit_cycles(&self, mem: &[u8]) -> u64 {
+        if self.is_sync(mem) {
+            // Table 29-1: SYNC = 1 is FOSC/[4(n+1)] for the 8-bit and the 16-bit BRG, BRGH ignored: n+1 cycles a bit.
+            let n = if mem[self.baud] & 8 != 0 { u64::from(mem[self.brgh]) << 8 | u64::from(mem[self.brgl]) } else { u64::from(mem[self.brgl]) };
+            return n + 1;
+        }
         let sta = mem[self.sta];
         let brg16 = mem[self.baud] & 8 != 0;
         let n = if brg16 { u64::from(mem[self.brgh]) << 8 | u64::from(mem[self.brgl]) } else { u64::from(mem[self.brgl]) };
@@ -94,8 +101,14 @@ impl Uart {
         }
     }
 
+    /// SYNC = 1 (TXxSTA bit 4): synchronous mode, master when CSRC (bit 7) is set.
+    pub fn is_sync(&self, mem: &[u8]) -> bool { mem[self.sta] & 0x10 != 0 }
+
+    fn sync_master(&self, mem: &[u8]) -> bool { self.is_sync(mem) && mem[self.sta] & 0x80 != 0 }
+
     fn start_frame(&mut self, mem: &[u8], at: u64, byte: u8, ninth: bool) {
         self.sent = byte;
+        if self.is_sync(mem) { return; } // no Start/Stop bits; the pin waveform is not modelled
         let width = if mem[self.sta] & 0x40 != 0 { 9 } else { 8 };
         let word = u16::from(byte) | if width == 9 { u16::from(ninth) << 8 } else { 0 };
         self.tx_frames.push_back((at, self.bit_cycles(mem), word, width));
@@ -126,6 +139,7 @@ impl Uart {
 
     /// Sample a resolved RX pin at bit centers. Character stimuli use the existing stream path.
     pub fn rx_pin(&mut self, mem: &mut [u8], at: u64, high: bool) {
+        if self.is_sync(mem) { self.pin_prev = Some(high); return; }
         if !self.rx_on(mem) || !self.rx_in.is_empty() || self.rx_cur.is_some() {
             self.pin_rx = None;
             self.pin_prev = Some(high);
@@ -167,11 +181,19 @@ impl Uart {
 
     /// Instruction cycles one transmitted character takes at the current baud settings.
     pub fn char_cycles(&self, mem: &[u8]) -> u64 {
-        self.bit_cycles(mem) * (if mem[self.sta] & 0x40 != 0 { 11 } else { 10 })
+        let data = if mem[self.sta] & 0x40 != 0 { 9 } else { 8 };
+        // Synchronous: one clock a data bit, no Start or Stop bit (29.3.1.1).
+        self.bit_cycles(mem) * if self.is_sync(mem) { data } else { data + 2 }
     }
 
     /// The receiver listens: serial port and receiver enabled, asynchronous, no overrun pending.
     fn rx_on(&self, mem: &[u8]) -> bool {
+        if self.is_sync(mem) {
+            // 29.3.1.5: SREN or CREN starts the clocks (master); a slave listens with CREN and sees no more than
+            // the byte stimuli (no external clock is modelled). OERR stops reception (29.3.1.6).
+            let en = if self.sync_master(mem) { mem[self.rcsta] & 0x30 != 0 } else { mem[self.rcsta] & 0x10 != 0 };
+            return !self.asleep && mem[self.rcsta] & 0x82 == 0x80 && en;
+        }
         !self.asleep && mem[self.rcsta] & 0x92 == 0x90 && mem[self.sta] & 0x10 == 0
     }
 
@@ -182,7 +204,8 @@ impl Uart {
         if self.tsr_end.is_none() { mem[self.sta] |= 2 } else { mem[self.sta] &= !2 }
         // RCIF: receiver enabled and an unread character in the FIFO (29.1.2.3). FERR and RX9D describe the top one.
         let (w, fe) = self.fifo.front().copied().unwrap_or((0, false));
-        if mem[self.rcsta] & 0x90 == 0x90 && !self.fifo.is_empty() { self.rcflag.set_in(mem) } else { self.rcflag.clear_in(mem) }
+        let rx_en = if self.is_sync(mem) { mem[self.rcsta] & 0x80 != 0 } else { mem[self.rcsta] & 0x90 == 0x90 }; // sync: SREN clears at the end of a character
+        if rx_en && !self.fifo.is_empty() { self.rcflag.set_in(mem) } else { self.rcflag.clear_in(mem) }
         mem[self.rcsta] = mem[self.rcsta] & !5 | u8::from(fe) << 2 | (w >> 8) as u8 & 1;
         if self.rx_cur.is_none() && self.pin_rx.is_none() { mem[self.baud] |= 0x40 } else { mem[self.baud] &= !0x40 }
     }
@@ -198,7 +221,11 @@ impl Uart {
                     return;
                 }
                 self.rx_cur = None;
-                let skip = mem[self.rcsta] & 0x48 == 0x48 && word & 0x100 == 0; // ADDEN with RX9: only address bytes
+                let sync = self.is_sync(mem);
+                if sync && self.sync_master(mem) && mem[self.rcsta] & 0x10 == 0 {
+                    mem[self.rcsta] &= !0x20; // SREN clears itself at the end of one character (29.3.1.5)
+                }
+                let skip = !sync && mem[self.rcsta] & 0x48 == 0x48 && word & 0x100 == 0; // ADDEN with RX9: only address bytes
                 if skip {
                     continue;
                 }
@@ -210,9 +237,12 @@ impl Uart {
                 }
                 continue;
             }
+            let listening = self.rx_on(mem);
             let Some(st) = self.rx_in.front_mut() else { return };
-            let start = st.at.max(self.rx_free);
-            if start > now {
+            let mut start = st.at.max(self.rx_free);
+            let sync_master = mem[self.sta] & 0x90 == 0x90;
+            if sync_master { start = start.max(self.arm); }
+            if start > now || (sync_master && !listening) {
                 return;
             }
             let Some(word) = st.words.pop_front() else {
@@ -221,7 +251,8 @@ impl Uart {
             };
             let bit = st.bit.unwrap_or_else(|| self.bit_cycles(mem));
             let st = self.rx_in.front_mut().unwrap();
-            let n = if st.nine { 11 } else { 10 };
+            let sync = mem[self.sta] & 0x10 != 0;
+            let n = if sync { if st.nine { 9 } else { 8 } } else if st.nine { 11 } else { 10 };
             self.rx_free = bit.saturating_mul(n).saturating_add(start).saturating_add(st.gap);
             st.at = self.rx_free;
             let (bad, nine) = (st.bad_stop, st.nine);
@@ -229,7 +260,13 @@ impl Uart {
                 // The receiver's own width decides how many bits it takes in; the sender's decides the timing.
                 let nr = if mem[self.rcsta] & 0x40 != 0 { 11 } else { 10 };
                 let word = if nine && nr == 11 { word & 0x1FF } else { word & 0xFF };
+                if sync {
+                    // Sampled on the trailing edge of the last clock: after 8 (9 with RX9) bit times; no framing error.
+                    let nb = nr - 2;
+                    self.rx_cur = Some((start.saturating_add(bit.saturating_mul(nb)), word, false));
+                } else {
                 self.rx_cur = Some((start.saturating_add(bit.saturating_mul(2 * nr - 1) / 2), word, bad));
+                }
             }
         }
     }
@@ -237,7 +274,10 @@ impl Uart {
     /// Bring the transmitter and the receiver to cycle `now` and refresh the flag bits.
     pub fn sync(&mut self, mem: &mut [u8], now: u64, ev: &mut Vec<u64>, tx: &mut Log<(u8, u64, u8)>, notes: &mut BTreeSet<String>) {
         if mem[self.sta] & 0x10 != 0 {
-            notes.insert(format!("EUSART{} synchronous mode is not modelled; nothing is sent", self.num));
+            if mem[self.sta] & 0x80 == 0 {
+                notes.insert(format!("EUSART{} synchronous slave: no external clock is modelled, so it sends nothing and receives only byte stimuli", self.num));
+            }
+            notes.insert(format!("EUSART{} synchronous mode: the CK and DT pin waveforms are not modelled; data moves through the register model and byte stimuli", self.num));
         } else {
             // Asynchronous-only features that are not modelled (BAUDxCON bits 0, 1; TXxSTA bit 3; DS40002519D p.428, 432):
             // the bits stay set, so a program polling for the hardware to clear them waits for ever.
@@ -270,6 +310,8 @@ impl Uart {
         if let Some((w, _)) = self.fifo.pop_front() {
             mem[self.rcreg] = w as u8;
         }
+        // 29.3.1.6: an overrun during single receive (SREN, CREN clear) is cleared by reading RCREG.
+        if self.sync_master(mem) && mem[self.rcsta] & 0x30 == 0 { mem[self.rcsta] &= !2; }
         self.bits(mem);
         mem[self.rcreg]
     }
@@ -280,7 +322,11 @@ impl Uart {
             0 => {
                 mem[self.reg] = v;
                 if mem[self.sta] & 0x20 != 0 {
-                    if self.tsr_end.is_none() {
+                    if self.is_sync(mem) && mem[self.sta] & 0x80 == 0 {
+                        // Slave: shifted out only by the master's clocks, which are not modelled; the byte waits.
+                        self.pending = Some(v);
+                        self.pending_ninth = mem[self.sta] & 1 != 0;
+                    } else if self.tsr_end.is_none() {
                         self.start_frame(mem, now, v, mem[self.sta] & 1 != 0);
                         tx.push((self.num, now, v));
                         self.tsr_end = Some(now + self.char_cycles(mem));
@@ -303,6 +349,8 @@ impl Uart {
                 // OERR, FERR and RX9D belong to the hardware. `[A11]` Clearing CREN clears OERR and abandons the
                 // character in flight (the FIFO keeps its characters); clearing SPEN resets the receiver.
                 let mut new = v & !7 | mem[self.rcsta] & 7;
+                if v & 0x30 != 0 && mem[self.rcsta] & 0x30 == 0 { self.arm = now; }
+                if self.sync_master(mem) && v & 0x30 == 0 { self.rx_cur = None; } // clocks stop at once (29.3.1.5)
                 if v & 0x80 == 0 {
                     self.fifo.clear();
                     self.rx_cur = None;
