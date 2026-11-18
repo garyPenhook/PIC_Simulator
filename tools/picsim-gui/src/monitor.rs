@@ -31,9 +31,49 @@ pub fn memory_row(ui: &mut egui::Ui, a: usize, bytes: &[Option<u8>; 16], prev: O
     ui.label(job);
 }
 
+/// What the user asked of the Pins tab.
+pub enum PinAction {
+    /// Drive this input to the level.
+    Drive(Pin, bool),
+    /// Add the pin to the Waves capture.
+    Trace(Pin),
+}
+
+/// A right-click menu with one item, "Trace <what> in Waves". True when it was chosen. The item is disabled (with the
+/// reason) while a capture exists or is recording, because every sample holds one value per signal.
+pub fn trace_menu(r: &egui::Response, what: &str, can_edit: bool) -> bool {
+    let mut chosen = false;
+    r.context_menu(|ui| {
+        if ui.add_enabled(can_edit, egui::Button::new(format!("Trace {what} in Waves"))).on_disabled_hover_text("Clear the capture in the Waves tab first: the signal list cannot change while a capture exists").clicked() {
+            chosen = true;
+            ui.close();
+        }
+    });
+    chosen
+}
+
+/// Adds the PORT bit of `pin` to the capture; the message says what happened.
+pub fn trace_pin(d: &mut picsim::debugger::Debugger, dev: &Device, pin: Pin) -> String {
+    let name = pin_name(pin);
+    let Some(port) = sfr(dev, &format!("PORT{}", pin.0 as char)) else { return format!("{name}: this part has no PORT{} register", pin.0 as char) };
+    let added = d.add_signal(picsim::debugger::Signal { name: name.clone(), addr: port.addr, bit: Some(pin.1) });
+    if added { format!("{name} added to the Waves capture - press Record in the Waves tab") } else if !d.can_edit_signals() { format!("{name} not added: clear the capture first") } else { format!("{name} is already in the Waves capture") }
+}
+
+/// Adds a data byte (an SFR) to the capture; the message says what happened.
+pub fn trace_byte(d: &mut picsim::debugger::Debugger, name: &str, addr: u32) -> String {
+    if d.add_signal(picsim::debugger::Signal { name: name.to_string(), addr, bit: None }) {
+        format!("{name} added to the Waves capture - press Record in the Waves tab")
+    } else if !d.can_edit_signals() {
+        format!("{name} not added: clear the capture first")
+    } else {
+        format!("{name} is already in the Waves capture")
+    }
+}
+
 /// The Pins tab: every pin's level and direction at the current cycle. Returns a pin the user clicked to drive, with the
 /// level to drive it to (only an input can be driven, and only when `can_drive`).
-pub fn pins_ui(ui: &mut egui::Ui, pins: &[PinInfo], can_drive: bool, prev: &HashMap<Pin, bool>) -> Option<(Pin, bool)> {
+pub fn pins_ui(ui: &mut egui::Ui, pins: &[PinInfo], can_drive: bool, can_trace: bool, prev: &HashMap<Pin, bool>) -> Option<PinAction> {
     let mut out = None;
     ui.label("Level and direction of every pin at the current cycle.");
     let by_port: BTreeMap<u8, Vec<&PinInfo>> = pins.iter().fold(BTreeMap::new(), |mut m, p| {
@@ -73,9 +113,12 @@ pub fn pins_ui(ui: &mut egui::Ui, pins: &[PinInfo], can_drive: bool, prev: &Hash
                 }
                 let r = ui.add_sized([26.0, 22.0], button);
                 let state = if p.analog { "analog" } else if p.output { if p.high { "output, high" } else { "output, low" } } else if p.high { "input, high" } else { "input, low" };
-                let r = r.on_hover_text(format!("{}: {state}{}", pin_name(p.pin), if !p.output && !p.analog && can_drive { "\nclick to drive it to the opposite level" } else { "" }));
+                let r = r.on_hover_text(format!("{}: {state}{}\nright-click: trace in Waves", pin_name(p.pin), if !p.output && !p.analog && can_drive { "\nclick to drive it to the opposite level" } else { "" }));
                 if r.clicked() && can_drive && !p.output && !p.analog {
-                    out = Some((p.pin, !p.high));
+                    out = Some(PinAction::Drive(p.pin, !p.high));
+                }
+                if trace_menu(&r, &pin_name(p.pin), can_trace) {
+                    out = Some(PinAction::Trace(p.pin));
                 }
             }
             ui.end_row();
@@ -83,7 +126,7 @@ pub fn pins_ui(ui: &mut egui::Ui, pins: &[PinInfo], can_drive: bool, prev: &Hash
     });
     ui.add_space(4.0);
     ui.small("H/L: output high/low   1/0: input high/low   A: analog (digital input off)   orange outline: the level changed since the last Step or Run began");
-    ui.small("Clicking an input drives it to the opposite level (when stopped); the drive lasts until overridden or Reset.");
+    ui.small("Clicking an input drives it to the opposite level (when stopped); the drive lasts until overridden or Reset. Right-click a pin to add it to the Waves capture.");
     out
 }
 
@@ -189,27 +232,101 @@ fn is_timer_reg(n: &str, t: &str) -> bool {
     n.strip_prefix(&format!("T{t}")).and_then(|r| r.chars().next()).is_some_and(|c| c.is_ascii_alphabetic()) && !n.starts_with("TMR")
 }
 
-/// Flags of the form `xxxIF`, with whether the matching `xxxIE` is set, for every interrupt flag that is set.
-fn pending(dev: &Device, peek: &dyn Fn(u32) -> u8) -> Vec<(String, Option<bool>)> {
-    let mut enables: HashMap<String, (u32, u8)> = HashMap::new();
+/// Whether an interrupt whose flag and enable are set can actually be taken, from the global enables.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Gate {
+    /// Nothing blocks it; the priority is named when the part has priority levels (`IPEN` = 1).
+    Open(Option<&'static str>),
+    /// The global enables that are clear and block it.
+    Blocked(Vec<&'static str>),
+}
+
+/// A set interrupt flag, whether its enable is set, and (with the enable) what the global enables say.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Pending {
+    pub name: String,
+    pub enable: Option<bool>,
+    pub gate: Option<Gate>,
+}
+
+/// A single-bit field by any of its names, in the named registers (`RCON` holds `IPEN` on the K22).
+fn bit(dev: &Device, peek: &dyn Fn(u32) -> u8, regs: &[&str], names: &[&str]) -> Option<bool> {
+    for r in regs {
+        let Some(s) = sfr(dev, r) else { continue };
+        if let Some(f) = s.fields.iter().chain(&s.legacy).find(|f| f.width == 1 && f.pos < 8 && names.contains(&f.name.as_str())) {
+            return Some(peek(s.addr) >> f.pos & 1 != 0);
+        }
+    }
+    None
+}
+
+/// The global enables decide whether a flag whose enable is set interrupts (DS40002043F 15.13.1 p.198 and 15.13.2 p.199
+/// Q10; DS40002214G 11.13.1 p.127 Q41; DS40001412H Reg. 9-1 p.109 K22; DS40002343F 12.10.1-2 p.114-115 and the other
+/// PIC16 data sheets):
+/// * `IPEN` = 0 (or none): `GIE` enables everything; `PEIE` also gates the sources of PIE1 and up (not PIE0, not the
+///   INTCON sources; the Q41 has no `PEIE`).
+/// * `IPEN` = 1: a high-priority source needs `GIEH`; a low-priority one needs `GIEH` and `GIEL`.
+pub fn gate(dev: &Device, peek: &dyn Fn(u32) -> u8, enable_reg: &str, priority_high: bool) -> Gate {
+    let core = ["INTCON", "INTCON0"];
+    let ipen = bit(dev, peek, &["INTCON", "INTCON0", "RCON"], &["IPEN"]).unwrap_or(false);
+    let gie = bit(dev, peek, &core, &["GIE_GIEH", "GIE", "GIEH"]);
+    let bit6 = bit(dev, peek, &core, &["PEIE_GIEL", "PEIE", "GIEL"]);
+    let vic = sfr(dev, "INTCON0").is_some();
+    let peripheral = enable_reg.strip_prefix("PIE").is_some_and(|n| n != "0");
+    let mut why = Vec::new();
+    if gie == Some(false) {
+        why.push(if ipen { "GIEH=0" } else { "GIE=0" });
+    }
+    if ipen {
+        if !priority_high && bit6 == Some(false) {
+            why.push("GIEL=0");
+        }
+        Gate::from_why(why, Some(if priority_high { "high priority" } else { "low priority" }))
+    } else {
+        if peripheral && !vic && bit6 == Some(false) {
+            why.push("PEIE=0");
+        }
+        Gate::from_why(why, None)
+    }
+}
+
+impl Gate {
+    fn from_why(why: Vec<&'static str>, prio: Option<&'static str>) -> Gate {
+        if why.is_empty() { Gate::Open(prio) } else { Gate::Blocked(why) }
+    }
+}
+
+/// Every interrupt flag (`xxxIF`) that is set, with its enable (`xxxIE`) and, when the enable is set, the gate.
+pub fn pending(dev: &Device, peek: &dyn Fn(u32) -> u8) -> Vec<Pending> {
+    let mut enables: HashMap<String, (u32, u8, String)> = HashMap::new();
+    let mut priorities: HashMap<String, (u32, u8)> = HashMap::new();
     for s in &dev.sfr {
         for f in s.fields.iter().chain(&s.legacy) {
-            if f.width == 1 && f.name.len() > 2 && f.name.ends_with("IE") {
-                enables.entry(f.name.clone()).or_insert((s.addr, f.pos));
+            if f.width == 1 && f.name.len() > 2 && f.pos < 8 {
+                if f.name.ends_with("IE") {
+                    enables.entry(f.name.clone()).or_insert((s.addr, f.pos, s.name.clone()));
+                } else if f.name.ends_with("IP") {
+                    priorities.entry(f.name.clone()).or_insert((s.addr, f.pos));
+                }
             }
         }
     }
-    let mut out: Vec<(String, Option<bool>)> = Vec::new();
+    let mut out: Vec<Pending> = Vec::new();
     for s in &dev.sfr {
         let v = peek(s.addr);
         for f in s.fields.iter().chain(&s.legacy) {
-            if f.width == 1 && f.name.len() > 2 && f.name.ends_with("IF") && f.pos < 8 && v >> f.pos & 1 != 0 && !out.iter().any(|(n, _)| *n == f.name) {
-                let en = enables.get(&format!("{}E", &f.name[..f.name.len() - 1])).map(|&(a, p)| peek(a) >> p & 1 != 0);
-                out.push((f.name.clone(), en));
+            if f.width == 1 && f.name.len() > 2 && f.name.ends_with("IF") && f.pos < 8 && v >> f.pos & 1 != 0 && !out.iter().any(|p| p.name == f.name) {
+                let stem = &f.name[..f.name.len() - 1];
+                let en = enables.get(&format!("{stem}E"));
+                let enable = en.map(|&(a, p, _)| peek(a) >> p & 1 != 0);
+                // No priority bit (INT0 on the K22 is always high priority) reads as high.
+                let high = priorities.get(&format!("{stem}P")).is_none_or(|&(a, p)| peek(a) >> p & 1 != 0);
+                let gate = en.filter(|_| enable == Some(true)).map(|(_, _, reg)| gate(dev, peek, reg, high));
+                out.push(Pending { name: f.name.clone(), enable, gate });
             }
         }
     }
-    out.sort_by_key(|(n, e)| (!e.unwrap_or(false), n.clone()));
+    out.sort_by_key(|p| (!matches!(p.gate, Some(Gate::Open(_))), !p.enable.unwrap_or(false), p.name.clone()));
     out
 }
 
@@ -231,15 +348,16 @@ pub fn periph_ui(ui: &mut egui::Ui, dev: &Device, peek: &dyn Fn(u32) -> u8, prev
                 ui.monospace(gates.join("  "));
             }
             let p = pending(dev, peek);
-            let ready = p.iter().filter(|(_, e)| *e == Some(true)).count();
-            ui.label(format!("{} flag(s) set, {ready} with their enable set (the global enables above still decide whether it interrupts)", p.len()));
-            for (n, e) in &p {
-                let (txt, col) = match e {
-                    Some(true) => ("flag and enable set", CHANGED),
-                    Some(false) => ("flag only (enable clear)", ui.visuals().weak_text_color()),
-                    None => ("flag only (no enable bit)", ui.visuals().weak_text_color()),
+            let ready = p.iter().filter(|x| matches!(x.gate, Some(Gate::Open(_)))).count();
+            ui.label(format!("{} flag(s) set, {ready} can interrupt now", p.len()));
+            for x in &p {
+                let (txt, col) = match (&x.gate, x.enable) {
+                    (Some(Gate::Open(prio)), _) => (format!("will interrupt{}", prio.map_or(String::new(), |p| format!(" ({p})"))), CHANGED),
+                    (Some(Gate::Blocked(why)), _) => (format!("enabled, blocked by {}", why.join(" ")), egui::Color32::from_rgb(220, 120, 120)),
+                    (None, Some(false)) => ("flag only (enable clear)".to_string(), ui.visuals().weak_text_color()),
+                    (None, _) => ("flag only (no enable bit)".to_string(), ui.visuals().weak_text_color()),
                 };
-                ui.label(egui::RichText::new(format!("{n:<10} {txt}")).monospace().color(col));
+                ui.label(egui::RichText::new(format!("{:<10} {txt}", x.name)).monospace().color(col));
             }
         });
         egui::CollapsingHeader::new("Timers").default_open(true).show(ui, |ui| {
@@ -334,22 +452,77 @@ mod tests {
         Device::load(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("../../devices/{part}.toml"))).unwrap()
     }
 
+    /// A peek over the named registers; every other byte reads 0.
+    fn regs(dev: &Device, set: &[(&str, u8)]) -> impl Fn(u32) -> u8 + use<> {
+        let m: HashMap<u32, u8> = set.iter().map(|(n, v)| (dev.find_sfr(n).unwrap_or_else(|| panic!("no {n}")).addr, *v)).collect();
+        move |a| m.get(&a).copied().unwrap_or(0)
+    }
+
+    fn find<'a>(p: &'a [Pending], n: &str) -> &'a Pending {
+        p.iter().find(|x| x.name == n).unwrap_or_else(|| panic!("{n} not pending: {p:?}"))
+    }
+
     #[test]
     fn pending_flags_pair_with_their_enables_on_real_parts() {
-        for part in ["18F27Q10", "18F26K22", "16F18056"] {
+        for part in ["18F27Q10", "18F26K22", "16F18056", "18F16Q41"] {
             let dev = load(part);
-            // Every flag set, every enable clear: nothing is pending, but flags are listed.
-            let sfr_ie: Vec<u32> = dev.sfr.iter().filter(|s| s.name.starts_with("PIE") || s.name == "INTCON").map(|s| s.addr).collect();
-            let peek = |a: u32| if sfr_ie.contains(&a) { 0 } else { 0xFF };
-            let p = pending(&dev, &peek);
-            assert!(!p.is_empty(), "{part}");
-            assert!(p.iter().any(|(n, _)| n == "TMR1IF"), "{part}: {p:?}");
-            assert!(p.iter().filter_map(|(_, e)| *e).all(|e| !e) || part == "18F26K22", "{part}: no enable should read set");
-            // Enables set too: TMR1IF is pending, and pending flags sort first.
-            let all = pending(&dev, &|_| 0xFF);
-            assert_eq!(all.iter().find(|(n, _)| n == "TMR1IF").map(|x| x.1), Some(Some(true)), "{part}");
-            assert!(all.first().is_some_and(|(_, e)| *e == Some(true)), "{part}");
+            let p = pending(&dev, &|_| 0xFF);
+            assert!(p.len() > 5, "{part}");
+            assert_eq!(find(&p, "TMR1IF").enable, Some(true), "{part}");
+            // Flags whose enable is set come before the rest.
+            let first_flag_only = p.iter().position(|x| x.gate.is_none()).unwrap_or(p.len());
+            assert!(p[first_flag_only..].iter().all(|x| x.gate.is_none()), "{part}: gated flags sort first");
         }
+        // Every enable clear: flags are listed, none gated.
+        let dev = load("18F27Q10");
+        let p = pending(&dev, &regs(&dev, &[("PIR1", 0xFF)]));
+        assert!(p.iter().all(|x| x.enable == Some(false) && x.gate.is_none()), "{p:?}");
+    }
+
+    #[test]
+    fn q10_gates_follow_gie_peie_and_the_priority_bits() {
+        let dev = load("18F27Q10");
+        let all = |intcon: u8, ipr: u8| {
+            let peek = regs(&dev, &[("INTCON", intcon), ("PIR0", 0xFF), ("PIE0", 0xFF), ("PIR1", 0xFF), ("PIE1", 0xFF), ("IPR0", ipr), ("IPR1", ipr)]);
+            pending(&dev, &peek)
+        };
+        // IPEN = 0: GIE alone is enough for PIE0 sources; PIE1 sources also need PEIE.
+        let p = all(0x00, 0xFF);
+        assert_eq!(find(&p, "TMR0IF").gate, Some(Gate::Blocked(vec!["GIE=0"])));
+        assert_eq!(find(&p, "ADIF").gate, Some(Gate::Blocked(vec!["GIE=0", "PEIE=0"])));
+        let p = all(0x80, 0xFF);
+        assert_eq!(find(&p, "TMR0IF").gate, Some(Gate::Open(None)));
+        assert_eq!(find(&p, "ADIF").gate, Some(Gate::Blocked(vec!["PEIE=0"])));
+        let p = all(0xC0, 0xFF);
+        assert_eq!(find(&p, "ADIF").gate, Some(Gate::Open(None)));
+        // IPEN = 1: high priority needs GIEH; low priority also GIEL.
+        let p = all(0xA0, 0xFF);
+        assert_eq!(find(&p, "ADIF").gate, Some(Gate::Open(Some("high priority"))));
+        let p = all(0xA0, 0x00);
+        assert_eq!(find(&p, "ADIF").gate, Some(Gate::Blocked(vec!["GIEL=0"])));
+        let p = all(0xE0, 0x00);
+        assert_eq!(find(&p, "ADIF").gate, Some(Gate::Open(Some("low priority"))));
+        let p = all(0x60, 0xFF);
+        assert_eq!(find(&p, "ADIF").gate, Some(Gate::Blocked(vec!["GIEH=0"])));
+    }
+
+    #[test]
+    fn k22_keeps_ipen_in_rcon_and_int0_is_always_high_priority() {
+        let dev = load("18F26K22");
+        let peek = regs(&dev, &[("INTCON", 0x80 | 0x02 | 0x10), ("RCON", 0x80)]); // GIEH, INT0IF + INT0IE, IPEN = 1
+        let p = pending(&dev, &peek);
+        assert_eq!(find(&p, "INT0IF").gate, Some(Gate::Open(Some("high priority"))));
+    }
+
+    #[test]
+    fn the_q41_has_no_peie_and_pic16_group_0_ignores_it() {
+        let q41 = load("18F16Q41");
+        let p = pending(&q41, &regs(&q41, &[("INTCON0", 0x80), ("PIR1", 0xFF), ("PIE1", 0xFF)]));
+        assert!(p.iter().filter(|x| x.gate.is_some()).all(|x| x.gate == Some(Gate::Open(None))), "{p:?}");
+        let p16 = load("16F17146");
+        let p = pending(&p16, &regs(&p16, &[("INTCON", 0x80), ("PIR0", 0xFF), ("PIE0", 0xFF), ("PIR1", 0xFF), ("PIE1", 0xFF)]));
+        assert_eq!(find(&p, "TMR0IF").gate, Some(Gate::Open(None)));
+        assert_eq!(find(&p, "TMR1IF").gate, Some(Gate::Blocked(vec!["PEIE=0"])));
     }
 
     #[test]
@@ -376,7 +549,7 @@ mod tests {
         let ctx = egui::Context::default();
         for round in 0..2 {
             frame(&ctx, |ui| {
-                let clicked = pins_ui(ui, &pins, true, &prev);
+                let clicked = pins_ui(ui, &pins, true, true, &prev);
                 assert!(clicked.is_none(), "{round}: nothing was clicked");
                 periph_ui(ui, &dev, &|a| (a & 0xFF) as u8, Some(&snap));
                 memory_row(ui, 0x10, &std::array::from_fn(|i| (i % 5 != 0).then_some(i as u8 * 17)), Some(&snap));
@@ -399,5 +572,21 @@ mod tests {
         frame(&ctx, |ui| tools.waves(ui, &mut d, true));
         d.samples.clear();
         frame(&ctx, |ui| tools.waves(ui, &mut d, true));
+    }
+
+    #[test]
+    fn tracing_a_pin_or_register_adds_one_signal_and_says_why_it_cannot() {
+        use picsim::debugger::{Debugger, Sample};
+        let dev = load("18F27Q10");
+        let mut d = Debugger::default();
+        let port_b = dev.find_sfr("PORTB").unwrap().addr;
+        assert!(trace_pin(&mut d, &dev, (b'B', 3)).contains("added"));
+        assert_eq!((d.signals[0].addr, d.signals[0].bit, d.signals[0].name.as_str()), (port_b, Some(3), "RB3"));
+        assert!(trace_pin(&mut d, &dev, (b'B', 3)).contains("already"));
+        assert!(trace_byte(&mut d, "LATB", dev.find_sfr("LATB").unwrap().addr).contains("added"));
+        assert!(trace_pin(&mut d, &dev, (b'Z', 0)).contains("no PORTZ"));
+        d.samples.push(Sample { ns: 0, values: vec![0, 0] });
+        assert!(trace_byte(&mut d, "TRISB", 1).contains("clear the capture"));
+        assert_eq!(d.signals.len(), 2);
     }
 }

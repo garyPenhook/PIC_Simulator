@@ -329,7 +329,7 @@ A hex dump of data memory, 16 bytes a row with an ASCII column. On a PIC16 an ad
 
 ### SFRs
 
-A list of the special function registers with address, hex and binary value, in alphabetical order. The *filter* box matches part of a name (case-insensitive). Reading is without side effects: viewing a register does not clear a flag or pop a receive buffer. While paused, edit the hex value directly; writes use the normal CPU register path, including implemented-bit masks, read-only bits and peripheral side effects. A register that changed since the last Step or Run began is shown in orange (name and binary value), as in the Memory tab; tick **changed only** to list just those registers.
+A list of the special function registers with address, hex and binary value, in alphabetical order. The *filter* box matches part of a name (case-insensitive). Reading is without side effects: viewing a register does not clear a flag or pop a receive buffer. While paused, edit the hex value directly; writes use the normal CPU register path, including implemented-bit masks, read-only bits and peripheral side effects. A register that changed since the last Step or Run began is shown in orange (name and binary value), as in the Memory tab; tick **changed only** to list just those registers. Right-click a register's name and choose **Trace NAME in Waves** to add the byte to the capture.
 
 ### Watch
 
@@ -359,13 +359,18 @@ Every pin of the part at the current cycle, one row per port and one cell per bi
 | `1` / `0` | an input reading high / low (a floating input reads low unless a stimulus, a pull-up or the board drives it) |
 | `A` | analog: ANSEL selects the analog function, so the digital input is off and the pin reads 0 |
 
-A cell with an **orange outline** has a different level from when the last Step or Run began. Hover a cell for the pin name and state. While the simulator is stopped, click an input cell to drive it to the opposite level; this is the same input as the Debugger tab's **Drive pin** (it persists until overridden, Reset or Load). An open-drain output that is releasing the pin shows as an input. The view reads the pins without side effects and, as everywhere in `pic-sim`, at instruction boundaries.
+Right-click a pin and choose **Trace RBn in Waves** to add its PORT bit to the capture (the same as **Trace pin** in the Debugger tab). A cell with an **orange outline** has a different level from when the last Step or Run began. Hover a cell for the pin name and state. While the simulator is stopped, click an input cell to drive it to the opposite level; this is the same input as the Debugger tab's **Drive pin** (it persists until overridden, Reset or Load). An open-drain output that is releasing the pin shows as an input. The view reads the pins without side effects and, as everywhere in `pic-sim`, at instruction boundaries.
 
 ### Peripherals
 
 The state of the timers, the EUSART, the ADC and the interrupt flags, decoded from the special function registers (there is no separate model state: it is what the registers hold, so it is exactly what the program can read). Reading is without side effects.
 
-* **Interrupts**: the global enables (`GIE`, `GIEH`/`GIEL`, `PEIE`, `IPEN`, where the part has them) and every interrupt flag (`xxxIF`) that is set, with its enable (`xxxIE`): *flag and enable set* in orange (it interrupts only if the global enables shown above allow it), *flag only* when the enable is clear. A flag with no enable bit of that name is listed as such.
+* **Interrupts**: the global enables (`GIE`, `GIEH`/`GIEL`, `PEIE`, `IPEN`, where the part has them) and every interrupt flag (`xxxIF`) that is set, with its enable (`xxxIE`). A flag whose enable is set is checked against the global enables:
+  * *will interrupt* (orange): nothing blocks it; with `IPEN` = 1 the priority is named (from the flag's `xxxIP` bit; a source with no priority bit, such as INT0 on the K22, is high priority);
+  * *enabled, blocked by …* (red): the clear global enables that block it, for example `GIE=0` or `PEIE=0`;
+  * *flag only*: the enable is clear (or the flag has no enable bit of that name).
+
+  The rules follow the data sheets (Q10 DS40002043F 15.13.1 p.198; Q41 DS40002214G 11.13.1 p.127; K22 DS40001412H Register 9-1 p.109; PIC16F17126/46 DS40002343F 12.10.1-2 p.114-115, and the same note in the F131xx/F132xx/F152xx/F180x6 data sheets). With `IPEN` = 0, `GIE` enables everything and `PEIE` also gates the sources of PIE1 and up (not PIE0, and not the INTCON sources); the Q41 has no `PEIE`. With `IPEN` = 1, a high-priority source needs `GIEH` and a low-priority one needs `GIEH` and `GIEL`. The PIC16F183xx data sheet says `PEIE` must be set for "any peripheral interrupt" without naming PIE0; the simulator treats PIE0 as not gated, like the other PIC16 families. The view says whether the interrupt *can* be taken: it does not know about an interrupt already in service (the Q41 and the PIC18 priority logic hold off an interrupt of the same or lower priority).
 * **Timers**: for each `TMRn` the count in hex and decimal (a 16-bit timer is read as one value), its period register `PRn` where it has one, and the timer's control registers (`TnCON`, `TnCLK`, `TnGCON` ...) with the bits that are set.
 * **EUSART** and **ADC**: the control, status and baud/result registers with their set bits; the baud-rate generator and ADC result are joined into one value.
 
@@ -373,7 +378,7 @@ A register that changed since the last Step or Run began is orange. For a bit fi
 
 ### Waves
 
-The waveform captured with the Debugger tab (choose the signals there; **Record**, **Stop capture**, **Clear capture** and **Export VCD…** are repeated here). Each signal has a lane under a time axis: a pin is a high/low trace, a data byte is a bus with its hex value. Scroll over the plot to zoom about the pointer, drag to pan, or use **Zoom in**, **Zoom out** and **Fit**; hover to read the time and every signal's value at that point. Every transition in the visible window is drawn (a capture is at most 100,000 samples). The Waves tab shows the same samples the VCD export writes, so nothing needs an external viewer for a first look.
+The waveform captured for the signals chosen in the Debugger tab, or by right-clicking a pin in Pins or a register in SFRs. The signal list can change only while there is no capture (press **Clear capture** first; the menu item is disabled otherwise). **Record**, **Stop capture**, **Clear capture** and **Export VCD…** are repeated here. Each signal has a lane under a time axis: a pin is a high/low trace, a data byte is a bus with its hex value. Scroll over the plot to zoom about the pointer, drag to pan, or use **Zoom in**, **Zoom out** and **Fit**; hover to read the time and every signal's value at that point. Every transition is drawn unless the window holds more than about 4,000 samples, when the plot is thinned for speed (zoom in to see the detail; the export always keeps every sample; a capture is at most 100,000 samples). The Waves tab shows the same samples the VCD export writes, so nothing needs an external viewer for a first look.
 
 ### Board
 

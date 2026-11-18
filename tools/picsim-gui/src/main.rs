@@ -852,7 +852,10 @@ impl eframe::App for App {
                             let mut v = m.cpu.peek(*a);
                             ui.horizontal(|ui| {
                                 let col = if is_changed(*a, v) { monitor::CHANGED } else { ui.visuals().text_color() };
-                                ui.label(egui::RichText::new(format!("{n:<14} {a:04X}")).monospace().color(col));
+                                let r = ui.add(egui::Label::new(egui::RichText::new(format!("{n:<14} {a:04X}")).monospace().color(col)).sense(egui::Sense::click())).on_hover_text("right-click: trace in Waves");
+                                if monitor::trace_menu(&r, n, m.debugger.can_edit_signals()) {
+                                    self.msg = monitor::trace_byte(&mut m.debugger, n, *a);
+                                }
                                 if ui.add_enabled(!self.running && self.job.is_none(), egui::DragValue::new(&mut v).hexadecimal(2, false, true)).on_hover_text("Edit hex value; normal register write semantics apply").changed() {
                                     m.cpu.write(*a, v);
                                     m.cpu.settle();
@@ -907,8 +910,12 @@ impl eframe::App for App {
                 7 => {
                     let idle = !self.running && self.job.is_none();
                     let pins = m.cpu.p.pin_overview(&m.cpu.m, m.cpu.cycles);
-                    if let Some(((letter, bit), high)) = monitor::pins_ui(ui, &pins, idle, &self.pin_snap) {
-                        m.cpu.p.pin_feed(letter, m.cpu.cycles, 1 << bit, u8::from(high) << bit);
+                    match monitor::pins_ui(ui, &pins, idle, m.debugger.can_edit_signals(), &self.pin_snap) {
+                        Some(monitor::PinAction::Drive((letter, bit), high)) => {
+                            m.cpu.p.pin_feed(letter, m.cpu.cycles, 1 << bit, u8::from(high) << bit);
+                        }
+                        Some(monitor::PinAction::Trace(pin)) => self.msg = monitor::trace_pin(&mut m.debugger, &m.dev, pin),
+                        None => {}
                     }
                 }
                 8 => monitor::periph_ui(ui, &m.dev, &|a| m.cpu.peek(a), self.view_snap.as_deref()),
@@ -1245,7 +1252,10 @@ impl App {
                             let mut v = m.cpu.peek(*a);
                             ui.horizontal(|ui| {
                                 let col = if is_changed(*a, v) { monitor::CHANGED } else { ui.visuals().text_color() };
-                                ui.label(egui::RichText::new(format!("{n:<14} {a:04X}")).monospace().color(col));
+                                let r = ui.add(egui::Label::new(egui::RichText::new(format!("{n:<14} {a:04X}")).monospace().color(col)).sense(egui::Sense::click())).on_hover_text("right-click: trace in Waves");
+                                if monitor::trace_menu(&r, n, m.debugger.can_edit_signals()) {
+                                    self.msg = monitor::trace_byte(&mut m.debugger, n, *a);
+                                }
                                 if ui.add_enabled(!self.running && self.job.is_none(), egui::DragValue::new(&mut v).hexadecimal(2, false, true)).on_hover_text("Edit hex value; normal register write semantics apply").changed() {
                                     m.cpu.write(*a, v);
                                     m.cpu.settle();
@@ -1304,8 +1314,12 @@ impl App {
                 7 => {
                     let idle = !self.running && self.job.is_none();
                     let pins = m.cpu.pin_overview();
-                    if let Some(((letter, bit), high)) = monitor::pins_ui(ui, &pins, idle, &self.pin_snap) {
-                        m.cpu.pin_feed(letter, m.cpu.cycles, 1 << bit, u8::from(high) << bit);
+                    match monitor::pins_ui(ui, &pins, idle, m.debugger.can_edit_signals(), &self.pin_snap) {
+                        Some(monitor::PinAction::Drive((letter, bit), high)) => {
+                            m.cpu.pin_feed(letter, m.cpu.cycles, 1 << bit, u8::from(high) << bit);
+                        }
+                        Some(monitor::PinAction::Trace(pin)) => self.msg = monitor::trace_pin(&mut m.debugger, &m.dev, pin),
+                        None => {}
                     }
                 }
                 8 => monitor::periph_ui(ui, &m.dev, &|a| m.cpu.peek(a), self.view_snap.as_deref()),

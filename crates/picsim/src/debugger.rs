@@ -36,6 +36,20 @@ pub struct Debugger {
 impl Debugger {
     pub const MAX_SAMPLES: usize = 100_000;
 
+    /// The signal list can change only while no capture exists (a sample holds one value per signal).
+    pub fn can_edit_signals(&self) -> bool {
+        !self.recording && self.samples.is_empty()
+    }
+
+    /// Add `signal` to the capture; false when the list cannot change now or the signal is already there.
+    pub fn add_signal(&mut self, signal: Signal) -> bool {
+        if !self.can_edit_signals() || self.signals.iter().any(|s| s.addr == signal.addr && s.bit == signal.bit) {
+            return false;
+        }
+        self.signals.push(signal);
+        true
+    }
+
     pub fn active(&self) -> bool {
         !self.watchpoints.is_empty() || self.recording
     }
@@ -133,5 +147,30 @@ impl Debugger {
             last = Some(&s.values);
         }
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sig(addr: u32, bit: Option<u8>) -> Signal {
+        Signal { name: "x".into(), addr, bit }
+    }
+
+    #[test]
+    fn a_signal_is_added_once_and_only_while_no_capture_exists() {
+        let mut d = Debugger::default();
+        assert!(d.add_signal(sig(0x10, Some(1))));
+        assert!(!d.add_signal(sig(0x10, Some(1))), "the same pin twice");
+        assert!(d.add_signal(sig(0x10, None)), "the whole byte is another signal");
+        d.recording = true;
+        assert!(!d.add_signal(sig(0x11, None)), "not while recording");
+        d.recording = false;
+        d.samples.push(Sample { ns: 0, values: vec![0, 0] });
+        assert!(!d.add_signal(sig(0x11, None)), "not while a capture exists");
+        d.reset();
+        assert!(d.add_signal(sig(0x11, None)));
+        assert_eq!(d.signals.len(), 3);
     }
 }
