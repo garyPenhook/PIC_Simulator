@@ -3211,13 +3211,13 @@ impl Periph {
             if self.sig_src >> code & 1 != 0 || ((1..=4).contains(&code) && self.cwg.as_ref().is_some_and(|c| c.hiz >> (code - 1) & 1 == 0)) { state.codes[usize::from(bit)] = code; }
             for q in &self.mssps {
                 if q.enabled(&m.mem) && (code == 0x0F + 2 * (q.num - 1) || code == 0x10 + 2 * (q.num - 1)) {
-                    if q.i2c_mode(&m.mem) {
+                    if q.i2c_pins(&m.mem) {
                         let selected = self.i2c_pps.iter().find(|pp| pp.num == q.num).map(|pp| m.mem[if code == pp.scl_code { pp.scl_in } else { pp.sda_in }]);
                         let pin = ((p.letter - b'A') << 3) | bit;
                         if selected != Some(pin) { continue; }
                     }
                     state.codes[usize::from(bit)] = code;
-                    if q.i2c_mode(&m.mem) {
+                    if q.i2c_pins(&m.mem) {
                         // MSSP owns the output enable in I2C mode; both TRIS bits must be inputs.
                         if m.mem[p.tris] & (1 << bit) != 0 { state.output |= 1 << bit; state.od |= 1 << bit; }
                     }
@@ -3241,7 +3241,7 @@ impl Periph {
         }
         for &(num, scl, sda) in &self.i2c_fixed {
             let Some(q) = self.mssps.iter().find(|q| q.num == num && q.enabled(&m.mem)) else { continue; };
-            let i2c = q.i2c_mode(&m.mem);
+            let i2c = q.i2c_pins(&m.mem);
             let data = if i2c { sda } else if num == 1 { (b'C', 5) } else if scl.0 == b'D' { (b'D', 4) } else { (b'B', 3) };
             for (pin, code) in [(scl, 0x0F + 2 * (num - 1)), (data, 0x10 + 2 * (num - 1))] {
                 if pin.0 != p.letter { continue; }

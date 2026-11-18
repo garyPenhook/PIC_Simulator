@@ -497,3 +497,62 @@ fn i2c_host_stimulus_errors() {
         assert!(m.load_stimulus(&format!("[[i2c_host]]\n{bad}\n")).is_err(), "{bad}");
     }
 }
+
+// ---- I2C client mode: the bus on the pins (`[A164]`) ----
+
+/// SCL = RC0, SDA = RC1, both pulled up; returns the machine and the cycle SSPEN was set. Reads give bit 0 = SCL, bit 1 = SDA.
+fn client_pins(ops: &str, add: u8) -> (Machine, u64) {
+    let mut m = machine(&format!("[[pin]]\nport = \"C\"\nbit = 0\nlevel = 1\n[[pin]]\nport = \"C\"\nbit = 1\nlevel = 1\n[[i2c_host]]\nperiod = 20\nops = {ops}\n"));
+    w(&mut m, "ANSELC", 0);
+    w(&mut m, "RC0PPS", 0x0F);
+    w(&mut m, "RC1PPS", 0x10);
+    w(&mut m, "SSP1CLKPPS", 0x10);
+    w(&mut m, "SSP1DATPPS", 0x11);
+    w(&mut m, "SSP1ADD", add);
+    let e = m.cpu.cycles;
+    assert_eq!(rd(&mut m, "PORTC") & 3, 0b11, "idle: both pulled up");
+    w(&mut m, "SSP1CON1", 0x36);
+    (m, e)
+}
+
+fn bus(m: &mut Machine, at: u64) -> u8 {
+    run_to(m, at);
+    rd(m, "PORTC") & 3
+}
+
+#[test]
+fn client_pins_show_start_bits_ack_and_stop() {
+    let (mut m, e) = client_pins(r#"["S", "w 0xA0", "P"]"#, 0xA0);
+    assert_eq!(bus(&mut m, e + 5), 0b01, "Start: SDA low while SCL high");
+    assert_eq!(bus(&mut m, e + 15), 0b10, "SCL follows, SDA takes bit 7 (1)");
+    assert_eq!(bus(&mut m, e + 25), 0b11, "bit 7 of 0xA0 (1): SCL high, SDA high");
+    assert_eq!(bus(&mut m, e + 35), 0b00, "SCL low between bits, SDA already bit 6 (0)");
+    assert_eq!(bus(&mut m, e + 45), 0b01, "bit 6 of 0xA0 is 0: SDA low, SCL high");
+    assert_eq!(bus(&mut m, e + 185), 0b01, "ninth clock: SCL high, the client pulls SDA low (ACK)");
+    assert_eq!(bus(&mut m, e + 192), 0b00, "SCL low, SDA pulled low ready for the Stop");
+    assert_eq!(bus(&mut m, e + 197), 0b01, "Stop: SCL released while SDA is low");
+    assert_eq!(bus(&mut m, e + 205), 0b11, "SDA rises while SCL is high");
+}
+
+#[test]
+fn client_pins_show_no_ack_for_another_address() {
+    let (mut m, e) = client_pins(r#"["S", "w 0xA2"]"#, 0xA0);
+    assert_eq!(bus(&mut m, e + 185), 0b11, "no acknowledge: SDA stays high on the ninth clock");
+}
+
+#[test]
+fn client_pins_show_a_stretched_clock_and_read_data() {
+    // SEN = 1, so the address byte stretches the clock until CKP is set; then the host reads a byte.
+    let (mut m, e) = client_pins(r#"["S", "w 0xA1", "r"]"#, 0xA0);
+    w(&mut m, "SSP1CON2", 1);
+    assert_eq!(bus(&mut m, e + 195), 0b10, "address acknowledged, then SCL held low by the client (CKP = 0 after a read address)");
+    run_to(&mut m, e + 600);
+    assert_eq!(bus(&mut m, e + 600) & 1, 0, "SCL stays low while CKP = 0");
+    w(&mut m, "SSP1BUF", 0x80);
+    w(&mut m, "SSP1CON1", 0x36);
+    let t = m.cpu.cycles;
+    // first data bit (1) goes out with the clock released a half period after the host resumes
+    let mut seen_scl_high_sda_high = false;
+    for k in 0..40 { if bus(&mut m, t + k) == 0b11 { seen_scl_high_sda_high = true; } }
+    assert!(seen_scl_high_sda_high, "bit 7 of the byte the client sends appears on SDA");
+}

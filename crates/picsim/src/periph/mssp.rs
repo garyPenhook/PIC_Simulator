@@ -41,7 +41,7 @@
 //! * `[A50]` An SSPxBUF write with SSPEN = 0 only fills SSPxBUF.
 //!
 //! I2C client (slave) mode, 7-bit addressing (SSPM = 0110, 1110), driven by an external host from the stimulus file
-//! (`[[i2c_host]]`, byte level: no pin waveforms, no bus arbitration; 10-bit modes, general call and Sleep wake-up are not modelled):
+//! (`[[i2c_host]]`, byte level; SCL / SDA waveforms are put on the pins (`[A164]`), no bus arbitration; 10-bit modes, general call and Sleep wake-up are not modelled):
 //! * The first byte after a Start/Restart is compared with SSPxADD under SSPxMSK on A[7:1] (28.5.1.1 p.457, 28.5.9 p.474); a
 //!   mismatch leaves the module idle without any indication (28.5.1 p.456). A match loads the byte into SSPxBUF (BF), copies R/W
 //!   and clears D/A, acknowledges, and sets SSPxIF on the ninth falling edge (28.5.2 p.457, Figure 28-14 p.459, SSPxSTAT p.491-492).
@@ -65,6 +65,10 @@
 //! * `[A162]` An overflowed received byte still sets SSPxIF on the ninth falling edge (the data sheet only says an interrupt is
 //!   generated for each transferred byte); BF = 1 with SSPOV = 0 and BOEN = 0 updates SSPxBUF, then sets SSPOV, as `[A48]`; any
 //!   overflow is NACKed whatever BOEN. With AHEN / DHEN software owns the ACK and overflow does not change it.
+//! * `[A164]` The pins show the bus: SCL low from the host between bits (rising in the middle of the bit, falling at its end), SDA the
+//!   data bit of whoever sends, the ninth clock with SDA low when the receiver acknowledges, Start / Stop as SDA edges while SCL is high.
+//!   Both are open-drain (the board needs a pull-up, `[[pin]] level = 1`); with no host script they stay released. A clock stretched by
+//!   CKP is SCL left low, so the next edge simply comes later. Levels the firmware drives onto the pins are not fed back to the module.
 //! * `[A163]` A read the host makes of a client that is not addressed for reading returns FFh and touches no register.
 
 use crate::log::Log;
@@ -234,7 +238,8 @@ pub struct Mssp {
 
 impl Mssp {
     pub fn enabled(&self, m: &[u8]) -> bool { self.en(m) }
-    pub fn i2c_mode(&self, m: &[u8]) -> bool { self.en(m) && m[self.con1] & 15 == 8 }
+    /// I2C host or client mode: the module owns SCL / SDA as open-drain pins.
+    pub fn i2c_pins(&self, m: &[u8]) -> bool { self.en(m) && matches!(m[self.con1] & 15, 6 | 8 | 14) }
     pub fn freeze_pins(&mut self, now: u64) { self.pin_paused = Some(4 * now); }
     pub fn pin_level(&self, tick: u64) -> (bool, bool) {
         let tick = self.pin_paused.map_or(tick, |t| tick.min(t));
@@ -251,7 +256,10 @@ impl Mssp {
         while self.samples.front().is_some_and(|&t| t <= now) { times.push(self.samples.pop_front().unwrap()); }
         times
     }
-    fn wire_at(&mut self, tick: u64, clk: bool, data: bool) { self.wire.push_back((tick, clk, data)); }
+    fn wire_at(&mut self, tick: u64, clk: bool, data: bool) {
+        self.wire.push_back((tick, clk, data));
+        while self.wire.len() > 512 { self.wire.pop_front(); }
+    }
     fn wire_byte(&mut self, now: u64, period: u64, byte: u8, idle: bool, cke: bool, ack: Option<bool>) {
         let start = 4 * now;
         for n in 0..8u64 {
@@ -472,16 +480,28 @@ impl Mssp {
                 self.host.as_mut().unwrap().ops.pop_front();
                 match op {
                     HostOp::Start => self.cond(m, t, false, ev, log),
-                    HostOp::Restart => { self.ph = Ph::Cond; self.hdue = Some(t + half); }
-                    HostOp::Stop => { self.ph = Ph::StopEv; self.hdue = Some(t + half); }
+                    HostOp::Restart => {
+                        // SDA released, SCL released, then the Start.
+                        self.wire_at(4 * t, false, true);
+                        self.wire_at(4 * t + 2 * half, true, true);
+                        self.ph = Ph::Cond; self.hdue = Some(t + half);
+                    }
+                    HostOp::Stop => {
+                        // SDA pulled low with SCL low, SCL released, then SDA released.
+                        self.wire_at(4 * t, false, false);
+                        self.wire_at(4 * t + 2 * half, true, false);
+                        self.ph = Ph::StopEv; self.hdue = Some(t + half);
+                    }
                     HostOp::Write(b) => {
                         let addr = self.expect_addr;
+                        self.wire_bits(t, period, b);
                         self.ph = Ph::W8 { b, addr };
                         self.hdue = Some(t + 8 * period);
                     }
                     HostOp::Read(ack) => {
                         let mine = self.cl_sel == Some(true);
                         let b = if mine { m[self.buf] } else { 0xFF };
+                        self.wire_bits(t, period, b);
                         self.ph = Ph::R8 { b, mine, ack };
                         self.hdue = Some(t + 8 * period);
                     }
@@ -493,6 +513,7 @@ impl Mssp {
                 m[self.stat] = m[self.stat] & !8 | 0x10;
                 if mode == 14 || m[self.con3] & 0x40 != 0 { self.sspif.set_in(m); ev.push(t); }
                 log.push((self.num, t, I2cEv::Stop));
+                self.wire_at(4 * t, true, true);
                 self.ph = Ph::Next;
                 self.hdue = Some(t + half);
             }
@@ -502,6 +523,7 @@ impl Mssp {
                 if !mine {
                     if addr { self.cl_sel = None; }
                     self.expect_addr = false;
+                    self.wire_ack(t, half, false);
                     self.ph = Ph::W9r { b, addr, mine: false, ack: false, held: false };
                     self.hdue = Some(t + half);
                     return;
@@ -519,6 +541,7 @@ impl Mssp {
                     self.hblock = true;
                 } else {
                     if addr && !acked { self.cl_sel = None; }
+                    self.wire_ack(t, half, acked);
                     self.ph = Ph::W9r { b, addr, mine, ack: acked, held: false };
                     self.hdue = Some(t + half);
                 }
@@ -527,6 +550,7 @@ impl Mssp {
                 // CKP was set: the acknowledge is ACKDT.
                 let ack = m[self.con2] & 0x20 == 0;
                 if addr && !ack { self.cl_sel = None; }
+                self.wire_ack(t, half, ack);
                 self.ph = Ph::W9r { b, addr, mine, ack, held: true };
                 self.hdue = Some(t + half);
             }
@@ -543,6 +567,7 @@ impl Mssp {
                 self.hdue = Some(t);
             }
             Ph::R8 { b, mine, ack } => {
+                self.wire_ack(t, half, ack);
                 if mine { m[self.stat] = m[self.stat] & !1 | 0x20; }
                 self.ph = Ph::R9r { b, mine, ack };
                 self.hdue = Some(t + half);
@@ -571,8 +596,29 @@ impl Mssp {
         self.cl_sel = None;
         if m[self.con1] & 15 == 14 || m[self.con3] & 0x20 != 0 { self.sspif.set_in(m); ev.push(t); }
         log.push((self.num, t, if restart { I2cEv::Restart } else { I2cEv::Start }));
+        // SDA falls while SCL is high; SCL follows half a period later.
+        self.wire_at(4 * t, true, false);
+        self.wire_at(4 * (t + self.half()), false, false);
         self.ph = Ph::Next;
         self.hdue = Some(t + self.half());
+    }
+
+    /// The eight data bits of a byte on the bus (whoever sends them) from cycle `t`, SCL low between bits, and the last falling edge.
+    fn wire_bits(&mut self, t: u64, period: u64, byte: u8) {
+        for n in 0..8u64 {
+            let d = byte & (0x80 >> n) != 0;
+            let s = 4 * (t + n * period);
+            self.wire_at(s, false, d);
+            self.wire_at(s + 2 * period, true, d);
+        }
+        self.wire_at(4 * (t + 8 * period), false, byte & 1 != 0);
+    }
+
+    /// The ninth clock from the eighth falling edge at `t`: the receiver pulls SDA low to acknowledge.
+    fn wire_ack(&mut self, t: u64, half: u64, ack: bool) {
+        self.wire_at(4 * t, false, !ack);
+        self.wire_at(4 * (t + half), true, !ack);
+        self.wire_at(4 * (t + 2 * half), false, true);
     }
 
     /// CKP was written 1 while the host waited for it.
@@ -692,7 +738,7 @@ impl Mssp {
                 }
                 if old & 0x10 == 0 && v & 0x10 != 0 { self.host_resume(now); }
                 if v & 0x20 != 0 && matches!(v & 15, 6 | 14) { self.host_arm(now); }
-                if v & 0x20 != 0 && self.wire.is_empty() { self.wire_at(now * 4, v & 15 == 8 || v & 0x10 != 0, v & 15 == 8); }
+                if v & 0x20 != 0 && self.wire.is_empty() { self.wire_at(now * 4, matches!(v & 15, 6 | 8 | 14) || v & 0x10 != 0, matches!(v & 15, 6 | 8 | 14)); }
             }
             CON2 => {
                 if !(en && m[self.con1] & 15 == 8) {

@@ -750,7 +750,7 @@ The device has 256 byte registers and an eight-bit pointer. The first data byte 
 
 ## I2C host: `[[i2c_host]]`
 
-An external host that talks to the MSSP while it runs in I2C client mode (`SSPM` = `0110` or `1110`, 7-bit address; PIC18 Q10, tested there, and K22, which shares the module). It is byte level: there are no pin waveforms, so the pins are not checked.
+An external host that talks to the MSSP while it runs in I2C client mode (`SSPM` = `0110` or `1110`, 7-bit address; PIC18 Q10, tested there, and K22, which shares the module). It is byte level for the module, and the bus is shown on the pins: with SCL and SDA selected through PPS (both pins inputs, pulled up by a `[[pin]] level = 1`), PORTx reads the host's Start, bits, acknowledge and Stop as they happen. Levels the firmware drives onto the pins are not fed back to the module.
 
 ```toml
 [[i2c_host]]
