@@ -1021,14 +1021,29 @@ declared results, after running each program to `__halt` in both engines. Result
   1:1 counts one more in its first cycles. The sim clears the prescaler on a write to TMR0L, T0CON0 or T0CON1 (DS40002043F
   19.2.4 p.297), all of which `Timer0Start16` does. `tests/probe/t0_read_phase.S` (`PRE` = NOPs spent in an earlier 1:2 run
   before the stop; `READ=2 NOPS=0`): the byte read at 20h is 2 in the sim for every PRE; MDB gives 2, 3, 2, 3, 3 for PRE = 0, 1, 2, 3, 5
-  (an odd PRE leaves an odd prescaler count). Same family as D-SIM-1; it makes `exec/lib_timer` `LT_A` 2 against 3
+  (an odd PRE leaves an odd prescaler count). Re-run 2026-11-18 with PRE = 0..8: MDB reads 2 for even PRE and 3 for odd PRE; with PRE = 1
+  and NOPS = 0..4 it reads 3, 4, 5, 6, 7 against the sim's 2..6, so the leftover is a constant +1 that does not decay, as if MDB's
+  1:2 prescaler phase is simply not reset by the CLRF/MOVWF writes to T0CON0, T0CON1 and TMR0L. (The cycle counts MDB prints for this probe are
+  not meaningful, see below.) Same family as D-SIM-1; it makes `exec/lib_timer` `LT_A` 2 against 3
   (4 against 5 at `-O0`) with identical cycle counts, the only snapshot difference at equal cycles. (`tools/probe.py`
   compares the cycle count at `done` too, which does not stop on this PIC18 probe; read the 20h byte only.)
 * D-SIM-17: MDB's EUSART transmitter takes about 1.8 times the data sheet's character time. The data sheet gives one Start
   bit, eight data bits and one Stop bit, each 1/baud (DS40002043F 29.1.1.1 p.504), 10 bit times; `SerialInit` then
   `SerialWriteByte` n times and `SerialFlush` at 64 MHz give, sim against MDB: 115200 baud 1 byte 1419 / 2529, 2 bytes 2810 / 5033,
   3 bytes 4202 / 7535; 9600 baud 1 byte 16699 / 30034, 2 bytes 33372 / 60042. The sim's step per byte is 10 bit times;
-  MDB's is about 18. This is the whole cycle difference of `lib_serial` and `serial_word_digits`. The cause in MDB is not known.
+  MDB's is about 18. This is the whole cycle difference of `lib_serial` and `serial_word_digits`. 
+  Probe `tests/probe/eusart_char.S` (Q10, one character written to TX1REG, passes of a 7-cycle loop counted until TRMT; the same
+  code in both engines, MDB's stopwatch not used), 2026-11-18. Data sheet: BRG base clock FOSC/64 (BRG16 = 0, BRGH = 0), FOSC/16
+  (BRG16 = 0, BRGH = 1 and BRG16 = 1, BRGH = 0, p.515), FOSC/4 (BRG16 = 1, BRGH = 1, TXxSTA BRGH p.530); bit time = base divisor x (n+1)
+  Fosc clocks, divisor/4 x (n+1) instruction cycles.
+  * BRG16 = 0 (both BRGH): MDB and the sim give identical counts for n = 3, 15, 63, one and three characters, TX9 0 and 1 (TX9 adds one bit time).
+  * BRG16 = 1, BRGH = 1: MDB takes 18 (n+1) cycles per character (n = 3: 77, 7: 147, 15: 294, 63: 1155, 255: 4613, 300: 5418), the
+    sim 10 (n+1). MDB's bit time is the data sheet's, the character is 18 bit times long; TX9 adds one bit time in both.
+  * BRG16 = 1, BRGH = 0: MDB takes 288 (n+1) cycles (n = 3: 1155, 15: 4613, 63: 18438) = 18 bit times of 16 (n+1) cycles, i.e. the
+    FOSC/64 base clock instead of FOSC/16; the sim takes 40 (n+1) (10 bit times of 4 (n+1)), as the data sheet.
+  So the 1.8 of `lib_serial` (BRG16 = 1, BRGH = 1) is 8 extra bit times per character whenever BRG16 = 1 (a 16-bit BRG treated as 16
+  data bits, 1 + 16 + 1 = 18, is a guess that fits both the count and TX9; not shown), and BRG16 = 1 with BRGH = 0 has a base clock four
+  times too slow in MDB. The sim stays on the data sheet. Receive side and the K22/PIC16 EUSARTs not probed.
 * D-SIM-18 (decided: the sim stays, MDB differs from the data sheet; silicon not measured): on the Q10 one ADC conversion (`ADCON2` = A0h | ADCS 31, FOSC/64, polled `GO`) takes 289 cycles in the sim
   and 247 in MDB, 42 less (a repeated `AdcRead(13)`; the first call, which also selects the channel, differs by 84).
   This is the opposite sign to D-SIM-12 (K22). `lib_adc` (717 / 633, 84 = two conversions) and `lib_adin` (1345 / 1177, 168 = four) differ by whole multiples of it. Probe `tests/probe/adc_q10.S`
@@ -1043,7 +1058,9 @@ declared results, after running each program to `__halt` in both engines. Result
   an `ADACQ` sweep before changing the sim.
 * D-SIM-19: with `RSTOSC = HFINTOSC_64MHZ` MDB's `SysClockHz` returns 0 (the `lib_system` test comment says MDB leaves the oscillator
   registers at 0 after reset; not re-measured here), the sim returns 64 000 000 because it loads them from the configuration
-  (commit ec40006). The data sheet's reset-value text for these registers was not re-read for this entry.
+  (commit ec40006). Data sheet check (DS40002043F Table 5-1 p.53, OSCFRQ 5.6.5 p.58): CONFIG1[RSTOSC] = 000 gives the SFR reset values
+  NOSC/COSC = 110 (HFINTOSC), NDIV/CDIV = 0000, OSCFRQ = 64 MHz (HFFRQ 1000 = 64), so the registers are not 0 after reset and
+  MDB's 0 contradicts the data sheet; the sim is right.
   `lib_system` differs in `SysClockHz`'s result bytes (GPR 16h-18h at `-O0`) and by 128 cycles; the MDB value 0 is measured by the
   snapshot, that it is *because* the oscillator registers read 0 is the test comment's statement, not shown here. Do not change the sim from this entry alone. Its declared
   results do not include the value, the test's own comment on this ("the simulator does not load the oscillator registers") is out of date.

@@ -49,14 +49,14 @@ for i, v in enumerate(variants):
     done = int(re.search(r"\bdone ([0-9A-F]{4})\b", lst).group(1), 16)  # word address, from the symbol table
     open(os.path.join(d, "p.S"), "w").write(f";SYM done 0x{done:X}\n;SYM buf 0x20\n")
     s = subprocess.run([SIM, os.path.join(d, "p.hex"), "--device", part, "--asm", os.path.join(d, "p.S"),
-                        "--until", "done", "--dump", f"buf:{NB}", "--max-cycles", "100000"], capture_output=True, text=True).stdout
+                        "--until", "done", "--dump", f"buf:{NB}", "--max-cycles", os.environ.get("MAXCYC", "100000")], capture_output=True, text=True).stdout
     sc = re.search(r"cycles: (\d+)", s).group(1)
     sb = re.search(r"buf = \d+  \(([0-9A-F ]+)\)", s).group(1)
     jobs.append((v, os.path.join(d, "p.hex"), done, sc, sb))
 
 script = [f"device PIC{part}", "hwtool SIM"]
 for i, (v, hexf, done, _, _) in enumerate(jobs):
-    script += [f"program {hexf}", f"break *0x{done:X}", "run", "wait 20000", "stopwatch", f"x /{NB}xb 0x20", f"echo END_{i}", "delete"]
+    script += [f"program {hexf}", f"break *0x{done:X}", "run", "wait " + os.environ.get("MDBWAIT", "20000"), "stopwatch", f"x /{NB}xb 0x20", f"echo END_{i}", "delete"]
 script.append("quit")
 sp = os.path.join(out, "run.mdb")
 open(sp, "w").write("\n".join(script) + "\n")
