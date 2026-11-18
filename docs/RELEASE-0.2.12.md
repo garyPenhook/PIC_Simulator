@@ -1,25 +1,26 @@
-# PicSim 0.2.11
+# PicSim 0.2.12
 
 PIC16/PIC18 firmware simulation with a graphical debugger, command-line runner,
 programmable stimulus and editor debugging through the Debug Adapter Protocol.
 
 ## Changes
 
-* Add `basil-sim-dap` and a local VS Code extension: source/instruction
-  breakpoints, stepping into/over/out, stack frames, typed variables,
-  pause/continue and restart on PIC16 and PIC18.
-* Model the Q41 CRC scanner with flash/EEPROM sources, CPU/DMA priority
-  arbitration, burst/concurrent operation and selected triggers.
-* Add center/variable alignment to shared Q41/PIC16 16-bit PWM models.
-* Model K22 watchdogs and fixed INT0–2/PORTB mismatch interrupts, including
-  Sleep wake-up, RCON flags and mismatch-latch handling.
-* Correct the PIC16F18056/76 PCON0 implemented-bit mask.
-* Add repeatable regression reporting, native DMA integration coverage,
-  installation/extension packaging tools, and updated roadmap/manual/PDF.
+* `pic-sim` Pins tab: level and direction of every pin at the current cycle
+  (driven high/low, input high/low, analog); click an input to drive it.
+* Orange change highlighting in the Memory and SFRs tabs (with a
+  changed-only filter) and on pins, against the state when the last Step or
+  Run began.
+* Peripherals tab: pending interrupt flags with their enables, timer counts
+  with period and control registers, and EUSART and ADC registers, decoded
+  from the SFRs.
+* Waves tab: interactive capture plot with time axis, zoom, pan and a hover
+  readout; VCD export is unchanged.
+* New `Periph::pin_overview` / `Pic16::pin_overview` with tests.
+* Manual updated for the new tabs.
 
 ## Downloads and installation
 
-`picsim-0.2.11-linux-x86_64.tar.gz` contains `pic-sim`, `basil-sim`,
+`picsim-0.2.12-linux-x86_64.tar.gz` contains `pic-sim`, `basil-sim`,
 `basil-sim-dap`, device descriptions, documentation and a blink example.
 Extract it and run the binaries in place; keep `devices/` beside them.
 This binary bundle targets x86-64 Linux and was built on Kali Linux 2026.3 with
@@ -35,7 +36,7 @@ From source, build with `cargo build --release --workspace` and run
 manual under `~/.local` (or pass `--prefix`).
 
 After building, `python3 scripts/package-release.py` creates the Linux archive,
-manual, VSIX and checksums under `target/dist/0.2.11/`.
+manual, VSIX and checksums under `target/dist/0.2.12/`.
 
 ## Validation and limits
 
