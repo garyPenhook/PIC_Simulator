@@ -19,7 +19,7 @@ use crate::periph::nvm16::Nvm16;
 use crate::periph::uart::{self, Uart};
 use crate::periph::wdt::{self, Wdt};
 use crate::periph::mssp::{self, I2cEv, Mssp};
-use crate::periph::{pin_name, Board, Bus, Pin, PinView, RxStream};
+use crate::periph::{pin_name, Board, Bus, Pin, PinInfo, PinView, RxStream};
 use devdesc::Device;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
@@ -1410,6 +1410,20 @@ impl Pic16 {
     /// Every pin of the part, for a pin chooser.
     pub fn pins(&self) -> Vec<Pin> {
         self.ports.iter().flat_map(|q| (0..8u8).filter(move |b| self.implemented[q.port] >> b & 1 != 0).map(move |b| (q.letter, b))).collect()
+    }
+
+    /// Direction, level and analog selection of every pin at the current cycle, without side effects.
+    pub fn pin_overview(&self) -> Vec<PinInfo> {
+        let mut out = Vec::new();
+        for (i, q) in self.ports.iter().enumerate() {
+            let s = self.pin_state(i, self.cycles);
+            let level = self.resolve_pins(i, self.cycles, s, self.cycles);
+            let driven = self.electrical_output(s, self.cycles).0;
+            for b in (0..8u8).filter(|b| self.implemented[q.port] >> b & 1 != 0) {
+                out.push(PinInfo { pin: (q.letter, b), output: driven >> b & 1 != 0, high: level >> b & 1 != 0, analog: s.analog >> b & 1 != 0 });
+            }
+        }
+        out
     }
 
     /// Replace the parts on the board (their states start at power-on); an OLED on a hardware I2C bus is registered on

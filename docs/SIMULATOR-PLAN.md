@@ -52,6 +52,10 @@ rules, datasheet citations, assumptions and known MDB differences.
   wake-up; K22 TO/PD flags correctly use RCON. PIC16F18056/76 PCON0 bit 5 is
   masked as unimplemented.
 * DAP sessions are tested against actual compiler DWARF on PIC18 and PIC16.
+* `pic-sim` monitoring: a Pins tab (level and direction of every pin, click an input to drive it), orange change
+  highlighting in the Memory and SFRs tabs (and a changed-only filter), a Peripherals tab (timer counts, EUSART/ADC
+  registers, pending interrupt flags decoded from the SFRs) and an interactive Waves tab (zoom, pan, hover readout)
+  replacing the fixed preview. `Periph::pin_overview` / `Pic16::pin_overview` are the pin source (`tests/pin_overview.rs`).
 
 ## Regression workflow
 

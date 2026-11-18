@@ -47,6 +47,18 @@ const READ_NOTE: &str = "SSD1306 read: the data sheet provides no data or status
 /// (port letter, bit)
 pub type Pin = (u8, u8);
 
+/// One pin as the Pins view shows it: the electrical state at the current cycle.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PinInfo {
+    pub pin: Pin,
+    /// The pin is driven by the part (TRIS output or a peripheral that owns it); an open-drain output driving high is an input.
+    pub output: bool,
+    /// Level on the pin (digital reading; false while the pin is analog).
+    pub high: bool,
+    /// ANSEL selects the analog function, so the digital input is off.
+    pub analog: bool,
+}
+
 /// "RB0", "B0" or "rb0".
 pub fn parse_pin(s: &str) -> Option<Pin> {
     let s = s.trim().to_ascii_uppercase();
@@ -802,6 +814,19 @@ impl Periph {
     /// Every pin of the part, for a pin chooser.
     pub fn pins(&self, m: &DataMem) -> Vec<Pin> {
         self.ports.iter().flat_map(|q| (0..8u8).filter(move |b| m.implemented[q.port] >> b & 1 != 0).map(move |b| (q.letter, b))).collect()
+    }
+
+    /// Direction, level and analog selection of every pin at cycle `now`, without side effects.
+    pub fn pin_overview(&self, m: &DataMem, now: u64) -> Vec<PinInfo> {
+        let mut out = Vec::new();
+        for (i, q) in self.ports.iter().enumerate() {
+            let (driven, level) = self.port_physical(i, m, now);
+            let analog = q.ansel.map_or(0, |a| m.mem[a]);
+            for b in (0..8u8).filter(|b| m.implemented[q.port] >> b & 1 != 0) {
+                out.push(PinInfo { pin: (q.letter, b), output: driven >> b & 1 != 0, high: (level & !analog) >> b & 1 != 0, analog: analog >> b & 1 != 0 });
+            }
+        }
+        out
     }
 
     /// Level of a port's pins, for the parts on the board.

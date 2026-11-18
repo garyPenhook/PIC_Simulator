@@ -198,9 +198,9 @@ Device files are generated from Microchip's device packs by `tools/devgen` and c
 | CPU      | Program                    | Memory  SFRs  Watch  |
 |  regs    |  Source | Disassembly      |  Board  Variables    |
 |  Stop-   |  [x] follow PC             |  UART  Debugger      |
-|  watch   |  [x] stay in my code       |  (the selected tab)  |
-|  Call    |  goto [      ] Go          |                      |
-|  stack   |  > 0042  ...               |                      |
+|  watch   |  [x] stay in my code       |  Pins  Peripherals   |
+|  Call    |  goto [      ] Go          |  Waves               |
+|  stack   |  > 0042  ...               |  (the selected tab)  |
 |  Notes   |                            |                      |
 +----------+----------------------------+----------------------+
 | BOARD STRIP: LEDs and OLED (shown only when wired)           |
@@ -325,11 +325,11 @@ When the simulator meets something it does not model or that is suspect, it adds
 
 ### Memory
 
-A hex dump of data memory, 16 bytes a row with an ASCII column. On a PIC16 an address that has no implemented bit shows `--`. Use the Debugger tab to write a data byte.
+A hex dump of data memory, 16 bytes a row with an ASCII column. On a PIC16 an address that has no implemented bit shows `--`. Use the Debugger tab to write a data byte. A byte that changed since the last Step or Run began is shown in **orange**, in the hex and in the ASCII column; the comparison is against the snapshot taken when you pressed Run or a step button (the same one the Variables tab uses), so after a Run to a breakpoint the orange bytes are those the run changed. Registers computed by a peripheral, such as PORTx, are compared as they read.
 
 ### SFRs
 
-A list of the special function registers with address, hex and binary value, in alphabetical order. The *filter* box matches part of a name (case-insensitive). Reading is without side effects: viewing a register does not clear a flag or pop a receive buffer. While paused, edit the hex value directly; writes use the normal CPU register path, including implemented-bit masks, read-only bits and peripheral side effects.
+A list of the special function registers with address, hex and binary value, in alphabetical order. The *filter* box matches part of a name (case-insensitive). Reading is without side effects: viewing a register does not clear a flag or pop a receive buffer. While paused, edit the hex value directly; writes use the normal CPU register path, including implemented-bit masks, read-only bits and peripheral side effects. A register that changed since the last Step or Run began is shown in orange (name and binary value), as in the Memory tab; tick **changed only** to list just those registers.
 
 ### Watch
 
@@ -345,9 +345,35 @@ Enter an SFR name, global variable (the same names and `name@file.c` syntax as W
 
 **External inputs:** enter an existing pin such as `RA0`, select **High**, and press **Drive pin** to drive high or low at the current cycle. Enter a decimal ADC channel and conversion code and press **Apply** to change the ADC input. Codes use the part's ADC resolution. These changes use the stimulus model, persist until overridden by a later stimulus/input change, and are cleared by Reset or Load. Pin direction and analog selection still apply.
 
-**Waveform capture:** select a data byte and press **Trace data byte**, or select a pin above and press **Trace pin**. Choose signals before recording; **Clear capture** allows changing the signal list again. **Record** captures an initial sample at the next step and subsequent values at instruction boundaries while stepping or running. **Stop capture** pauses recording; **Record** resumes on the same simulated timeline. The preview displays digital pins as high/low and data bytes as a 0–255 staircase. Long previews are reduced for drawing; export retains every stored sample.
+**Waveform capture:** select a data byte and press **Trace data byte**, or select a pin above and press **Trace pin**. Choose signals before recording; **Clear capture** allows changing the signal list again. **Record** captures an initial sample at the next step and subsequent values at instruction boundaries while stepping or running. **Stop capture** pauses recording; **Record** resumes on the same simulated timeline. The capture is drawn in the **Waves** tab; export retains every stored sample.
 
 **Export VCD…** saves the capture with a 1 ns timescale and timestamps relative to its first sample, using simulated time (including clock changes). Pin traces are the digital PORT readings, so ANSEL applies. Pulses entirely within an instruction may be missed. Capture stops at 100,000 stored samples and reports that it is full; unchanged intervals are compacted while preserving their duration. Reset clears the capture and keeps watchpoint/signal choices; Load starts with a new debugger configuration.
+
+### Pins
+
+Every pin of the part at the current cycle, one row per port and one cell per bit (bit 7 at the left). A cell shows the electrical state:
+
+| Cell | Meaning |
+|---|---|
+| `H` / `L` | the part drives the pin high / low (a TRIS output or a peripheral that owns the pin) |
+| `1` / `0` | an input reading high / low (a floating input reads low unless a stimulus, a pull-up or the board drives it) |
+| `A` | analog: ANSEL selects the analog function, so the digital input is off and the pin reads 0 |
+
+A cell with an **orange outline** has a different level from when the last Step or Run began. Hover a cell for the pin name and state. While the simulator is stopped, click an input cell to drive it to the opposite level; this is the same input as the Debugger tab's **Drive pin** (it persists until overridden, Reset or Load). An open-drain output that is releasing the pin shows as an input. The view reads the pins without side effects and, as everywhere in `pic-sim`, at instruction boundaries.
+
+### Peripherals
+
+The state of the timers, the EUSART, the ADC and the interrupt flags, decoded from the special function registers (there is no separate model state: it is what the registers hold, so it is exactly what the program can read). Reading is without side effects.
+
+* **Interrupts**: the global enables (`GIE`, `GIEH`/`GIEL`, `PEIE`, `IPEN`, where the part has them) and every interrupt flag (`xxxIF`) that is set, with its enable (`xxxIE`): *flag and enable set* in orange (it interrupts only if the global enables shown above allow it), *flag only* when the enable is clear. A flag with no enable bit of that name is listed as such.
+* **Timers**: for each `TMRn` the count in hex and decimal (a 16-bit timer is read as one value), its period register `PRn` where it has one, and the timer's control registers (`TnCON`, `TnCLK`, `TnGCON` ...) with the bits that are set.
+* **EUSART** and **ADC**: the control, status and baud/result registers with their set bits; the baud-rate generator and ADC result are joined into one value.
+
+A register that changed since the last Step or Run began is orange. For a bit field, `NAME=3` is its value in hex; a bit field that is zero is not listed.
+
+### Waves
+
+The waveform captured with the Debugger tab (choose the signals there; **Record**, **Stop capture**, **Clear capture** and **Export VCD…** are repeated here). Each signal has a lane under a time axis: a pin is a high/low trace, a data byte is a bus with its hex value. Scroll over the plot to zoom about the pointer, drag to pan, or use **Zoom in**, **Zoom out** and **Fit**; hover to read the time and every signal's value at that point. Every transition in the visible window is drawn (a capture is at most 100,000 samples). The Waves tab shows the same samples the VCD export writes, so nothing needs an external viewer for a first look.
 
 ### Board
 

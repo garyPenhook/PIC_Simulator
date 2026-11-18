@@ -47,7 +47,7 @@ pub(crate) mod mssp;
 mod quart;
 pub(crate) mod uart;
 mod spi;
-pub use board::{parse_pin, pin_name, Board, Bus, Led, Oled, Pin, PinView};
+pub use board::{parse_pin, pin_name, Board, Bus, Led, Oled, Pin, PinInfo, PinView};
 use ccp::{Ccp, Pwm};
 use clc::Clc;
 use crc::Crc;
