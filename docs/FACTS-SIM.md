@@ -1,6 +1,6 @@
 # Simulator facts (`crates/picsim`)
 
-Each rule the simulator relies on, with its source. Rules marked `[A#]` are assumptions to be measured against MDB.
+Each rule the simulator relies on, with its source. Rules marked `[A#]` include assumptions requiring measurement against MDB or hardware. Earlier milestone sections retain historical test results; later extensions supersede their old coverage notes. `MANUAL.md` gives the current coverage table.
 
 ## PIC18 core (S1)
 
@@ -17,8 +17,7 @@ Each rule the simulator relies on, with its source. Rules marked `[A#]` are assu
   (f - len)` (device file; matches the compiler's `Target`).
 * The pack's `access` letters (`n r w c s -`) are **not decoded yet**: their meaning is not recorded in a data sheet
   here. Only the `implemented` mask is applied (unimplemented bits read 0 and ignore writes).
-* Not modelled yet (milestone): reset values after MCLR/WDT, configuration words (S3 remainder), TBLWT / flash and
-  EEPROM writes (S5). SFRs without a model act as latches and are listed at the end of a run.
+* Reset/configuration, EEPROM and program-flash writes are implemented; see their dedicated sections below. SFRs without a model act as latches and are listed at the end of a run.
 
 ## Interrupts and timers (S3)
 
@@ -188,7 +187,7 @@ through `raise_flag`, so it is a request arriving while the program runs (`[A108
   ON remains set"): GO is cleared, ADRES and ADIF are left alone, a later GO converts again (not documented, not measured). The
   ADCC says only that the ADC runs in Sleep with ADCRC: a conversion in flight at SLEEP waits for the wake-up and continues (as on the
   Q10, `Periph::thaw`), with a note.
-* **Not modelled:** PIC16F18056/76 (DS40002325C is not in the document set; the note says so), ADCRC, computation, ADACT triggers, double
+* **Not modelled:** PIC16F18056/76 ADC (DS40002325C is now supplied but its ADC model is not implemented), ADCRC, computation, ADACT triggers, double
   sampling, ADCAP, guard rings, a partial result when GO is cleared mid-conversion (33.5.1 note 2 says ADRES gets "the results up to this
   point"; here ADRES keeps its value).
 * FVRCON on the PIC16 core: FVRRDY (bit 6, read only) follows FVREN (bit 7) at once, `[A15]` (PIC16F17126/46 37.2 p.569: set when the
@@ -845,8 +844,7 @@ Sources below are the locally supplied DS40002214G. Tests are `tests/q41_dma.rs`
   state on each parameter match. Polarity applies even while disabled; push-pull alternates periods.
   PR/P1/P2 load on EN and on period reload with LD; PWMEN/PWMLOAD mirror the control bits (30.5–30.6
   p.452). GIR stores parameter events and GIE gates the aggregate PWMxIF; PWMxPIF follows the period
-  postscaler (30.7 pp.452–453). DMA parameter requests are independent of GIE. Center/variable modes,
-  non-FOSC clocks and external reset/load sources are diagnosed as unmodelled. **Assumption:** no
+  postscaler (30.7 pp.452–453). DMA parameter requests are independent of GIE. Non-FOSC clocks and external reset/load sources are diagnosed as unmodelled. **Assumption:** no
   three-clock load exclusion or register propagation delay; outputs are scheduled at Fosc-tick
   resolution and are not validated against silicon.
 
@@ -857,8 +855,7 @@ Sources below are the locally supplied DS40002214G. Tests are `tests/q41_dma.rs`
   SETUP selects accumulator/shifter/polynomial in their shared address window. The diagram and pack
   put SETUP at bits 3:2; the prose incorrectly says 4:3, overlapping ACCM. **Assumption:** one bit per
   instruction cycle, paused with GO or Fosc stopped; timing is not measured. PMD/EN disable discards
-  pending data. The scanner is still unmodelled and its register accesses remain in the unmodelled
-  report. No scanner, arbitration or trigger fidelity is claimed.
+  pending data. The scanner and arbitration are covered by `[A156]`; exact Q-clock and NVM-busy ordering remain outside the model.
 
 
 ## Q41 priority arbitration and PIC16 standalone PWM
@@ -876,8 +873,7 @@ Sources below are the locally supplied DS40002214G. Tests are `tests/q41_dma.rs`
   reserve their multi-cycle buses conservatively; arbitrary file writes to PCL are not classified
   as branch bubbles. Idle frees all buses, Sleep stops the DMA clock. CPU instructions remain
   atomic: shared DMA actions commit at the instruction boundary, before peripheral sync and
-  interrupt dispatch. No Q-clock bus ordering, scanner contention or NVM-busy arbitration is
-  claimed. DMA-only register mirrors and DMA control-register cross-access remain unmodelled.
+  interrupt dispatch. Scanner priority contention is covered by `[A156]`; no Q-clock bus ordering or NVM-busy arbitration is claimed. DMA-only register mirrors and DMA control-register cross-access remain unmodelled.
   Tests: `q41_dma.rs` covers lock/one-way/reset, competing channels and ties, CPU progress,
   flash/data bubbles, ISR preemption and Sleep/Idle.
 
@@ -931,3 +927,72 @@ Sources below are the locally supplied DS40002214G. Tests are `tests/q41_dma.rs`
   I2C stimuli retain their existing abstract bus interface even without physical routing;
   board I2C devices still require their configured wiring. SPI SMP does not change sampling
   (SDI is sampled at the end of each bit). No hardware validation is claimed.
+
+
+## Validation extensions (2026-11-17)
+
+* `[A156]` Q41 scanner (`periph/crcq.rs`, `dma.rs`, `pic18.rs`): DS40002214G
+  13.7–13.12 pp.207–220 and 7.1–7.2 pp.25–27. SCANEN/SGO require CRCEN/CRCGO;
+  clearing CRCGO clears SGO. SCANLADR advances through inclusive SCANHADR;
+  a falling SGO sets SCANIF, separately from CRCIF when shifting finishes.
+  MREG selects flash or EEPROM offsets. SCANMD prevents transfers. PRLOCK must
+  be locked; lower SCANPR wins against MAIN/ISR/DMA, ties favor the CPU and DMA.
+  Low-priority flash scans use branch-flush cycles; EEPROM scans may share CPU
+  cycles. BURSTMD keeps requesting the bus while CRC is full, preventing lower
+  priority CPU progress; higher-priority CPU/DMA can still preempt it. TRIGEN
+  gates data fetch on the selected level. Supported trigger sources are
+  LFINTOSC (31 kHz nominal), Timer0 OUT and CLC1–4; others wait with a note.
+  **Timing assumptions:** one byte per granted instruction cycle, assembled
+  little-endian into DLEN+1 bits (1–32); a final short word is zero-filled. Reads
+  beyond implemented memory return FFh. CRC still shifts one bit per cycle.
+  Register accesses occur at instruction boundaries; BUSY has no sub-cycle
+  observability. No Q-clock ordering, NVM-busy arbitration or silicon validation
+  is claimed. Sleep stops the scanner/CRC clocks; Idle permits bus work.
+  Tests: all six Q41 parts, standard CRC-16 vector, flash/EEPROM, 32-bit input,
+  lock, CPU priority, DMA ties, burst reservation, trigger/abort/PMD.
+
+* `[A157]` Shared 16-bit PWM alignment (`periph/pwmq.rs`): DS40002214G
+  30.1.2.3–30.1.2.4 pp.446–447, 30.5 p.452, GIR pp.460–461. Center alignment
+  uses two PR+1 counter periods; output i is active for 2*Pi clocks centered on
+  the intervening reset. Parameter flags and DMA requests follow both output
+  transitions. LD takes effect on every second reset. Variable alignment sets
+  both outputs at P1 and clears them at P2, retaining state across period wrap;
+  simultaneous matches clear (modelling choice). Period interrupt postscale
+  still counts timer resets. Existing A150/A154 clock, load-latency and pin
+  sampling limits apply. Tests cover complete centered/wrapped waveforms,
+  parameter/period flags and both PIC16 16-bit PWM families.
+
+* `[A158]` K22 watchdog (`periph/wdt.rs`, `pic18.rs`): DS40001412H CONFIG2H
+  p.347, 24.3–24.4 pp.354–355. WDTEN 00 off, 01 awake-only, 10 SWDTEN, 11 always.
+  WDTPS selects a 1:2^n postscale, n=0–15. Nominal period is 4 ms times postscale
+  (idealized, no oscillator tolerance). SLEEP/CLRWDT/OSCCON.IRCF changes clear
+  the counter. Awake timeout resets while retaining RAM; Sleep timeout resumes
+  at the following instruction. TO/PD use RCON bits 3/2, separate from STATUS
+  arithmetic flags. Tests cover F/LF and 28/40-pin parts, reset, Sleep,
+  software enable, CLRWDT, postscale and IRCF clearing.
+
+* `[A159]` K22 external interrupts/IOC: DS40001412H 9.8–9.9 pp.122–123,
+  10.3.2 pp.132–133, IOCB p.153. INT0/1/2 sample fixed RB0/1/2 using INTEDG0/1/2;
+  flags and enables in INTCON/INTCON3 participate in Sleep wake-up independently
+  of GIE. IOCB<7:4> compares input pins against the last PORTB read/write latch.
+  A mismatch sets/reasserts RBIF; a port access acknowledges the baseline,
+  then software clears RBIF. Peeks and MOVFF do not acknowledge it. MCLR retains
+  the mismatch baseline. Instruction-boundary sampling does not reconstruct
+  Q2 read/edge collisions or enforce the datasheet's one-instruction gap before
+  RBIF clear. Tests cover rising/falling edges, Sleep, persistent mismatch,
+  peek and MOVFF behavior.
+
+* PIC16F18056/76 PCON0 mask: DS40002325C 10.12.2 p.76: bit 5 is
+  unimplemented. Both descriptions use DFh, fixing the compiler `lib_system`
+  regression (raw flags 29, cleared flags 31). The field list already omitted
+  bit 5; the generated implemented mask had incorrectly included it.
+
+* D-SIM-15: Q10 computed PCL writes cost one fewer cycle in MDB than the
+  datasheet requires. `tests/probe/pcl_cycles.S` executes MOVLW 0, ADDWF PCL,F
+  and NOP before `done`: basil-sim reports 4 cycles, MDB 6.35 reports 3, and
+  all eight sampled RAM bytes agree. DS40002043F 11.2.2 p.114 and the
+  instruction-summary timing note 3 p.630 require an extra cycle when the PC changes.
+  The simulator retains that flush cycle. The three `select_dense*` programs'
+  cycle differences are consistent with this defect; their declared results
+  pass under the simulator. Reproduce with `tools/probe.py`, a PIC18-Q DFP
+  override, and the probe's dummy define as recorded in the regression report.

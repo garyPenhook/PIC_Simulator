@@ -26,6 +26,8 @@ pub const TMR: u8 = 4;
 
 #[derive(Clone)]
 pub struct Wdt {
+    /// K22 nominal 4 ms time base and configuration-only postscaler.
+    pub k22_ps: Option<u8>,
     pub con0: usize,
     pub con1: usize,
     pub psl: usize,
@@ -50,6 +52,7 @@ impl Wdt {
     pub fn find(dev: &Device) -> Option<Wdt> {
         let a = |s: &str| dev.find_sfr(s).map(|x| x.addr as usize);
         Some(Wdt {
+            k22_ps: None,
             con0: a("WDTCON0")?,
             con1: a("WDTCON1")?,
             psl: a("WDTPSL")?,
@@ -71,7 +74,18 @@ impl Wdt {
     /// on the PIC16F152xx, CS (bit 7). There is no window and no WDTPSL/H, WDTTMR; their fields are unused (`usize::MAX`).
     pub fn find_simple(dev: &Device) -> Option<Wdt> {
         let con0 = dev.find_sfr("WDTCON")?.addr as usize;
-        Some(Wdt { con0, con1: usize::MAX, psl: usize::MAX, psh: usize::MAX, tmr: usize::MAX, wdte: 0, ps_fixed: false, win_fixed: false, cs_fixed: false, start: 0, armed: false, was_on: false, fosc_mhz: 64.0, clock: Default::default() })
+        Some(Wdt { k22_ps: None, con0, con1: usize::MAX, psl: usize::MAX, psh: usize::MAX, tmr: usize::MAX, wdte: 0, ps_fixed: false, win_fixed: false, cs_fixed: false, start: 0, armed: false, was_on: false, fosc_mhz: 64.0, clock: Default::default() })
+    }
+
+    pub fn find_k22(dev: &Device) -> Option<Wdt> {
+        if !dev.device.name.ends_with("K22") { return None; }
+        let mut w = Self::find_simple(dev)?;
+        w.k22_ps = Some(15);
+        Some(w)
+    }
+
+    pub fn con1_value(&self, mem: &[u8]) -> u8 {
+        if self.k22_ps.is_some() { 7 } else { mem[self.con1] }
     }
 
     pub fn set_fosc(&mut self, fosc: f64, now: u64) {
@@ -122,6 +136,11 @@ impl Wdt {
 
     /// Cycle of the time-out for the current clear.
     pub fn deadline(&self, con0: u8, con1: u8) -> u64 {
+        if let Some(ps) = self.k22_ps {
+            let period = self.fosc_mhz * 1000.0 * (1u64 << ps) as f64;
+            let now = self.clock.clock_segments.last().map_or(self.start, |(c, _, _)| (*c).max(self.start));
+            return now + (period - self.elapsed_cycles(now) - 1e-9).ceil().max(0.0) as u64;
+        }
         let period = (1u64 << (Self::n(con0) + 5)) as f64;
         let now = self.clock.clock_segments.last().map_or(self.start, |(c, _, _)| (*c).max(self.start));
         now + (period * self.cycles_per_clock(con1) - self.elapsed_cycles(now) - 1e-9).ceil().max(0.0) as u64

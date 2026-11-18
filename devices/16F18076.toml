@@ -2278,7 +2278,7 @@ width = 8
 por = "00-1110q"
 mclr = "qq-qqquu"
 access = "nn-nnnnn"
-implemented = 255
+implemented = 223
 
 [[sfr.fields]]
 name = "nBOR"

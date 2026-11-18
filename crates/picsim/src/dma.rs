@@ -20,6 +20,7 @@ pub(crate) struct Dma {
     pir: Vec<usize>,
     md: [Option<(usize, u8)>; 4],
     pub lock: usize,
+    scanpr: usize,
     priorities: [usize; 6], // MAIN, ISR, DMA1..4
     key: u8,
     locked_once: bool,
@@ -63,6 +64,7 @@ impl Dma {
             masks,
             pir: (0..11).map(|i| dev.find_sfr(&format!("PIR{i}")).unwrap().addr as usize).collect(),
             md,
+            scanpr: dev.find_sfr("SCANPR")?.addr as usize,
             lock, priorities, key: 0, locked_once: false,
         })
     }
@@ -78,6 +80,13 @@ impl Dma {
             self.key = 0;
             if m.mem[self.lock] & 1 == 0 { m.mem[a] = v & 7; }
         }
+    }
+    pub fn scanner_wins(&self, m: &DataMem, isr: bool, free: Option<(bool, bool)>, eeprom: bool, dma: Option<usize>) -> bool {
+        if m.mem[self.lock] & 1 == 0 { return false; }
+        let priority = m.mem[self.scanpr] & 7;
+        if free.is_none() && priority >= m.mem[self.priorities[usize::from(isr)]] & 7 { return false; }
+        if free.is_some_and(|(_, flash)| !eeprom && !flash) { return false; }
+        dma.is_none_or(|i| priority < m.mem[self.priorities[i + 2]] & 7)
     }
     pub fn enabled(&self) -> bool {
         self.bank.iter().any(|b| b[CON] & 0x80 != 0)

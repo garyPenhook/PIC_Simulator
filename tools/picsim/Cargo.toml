@@ -8,6 +8,11 @@ description = "Command line front end of the PIC simulator"
 name = "basil-sim"
 path = "src/main.rs"
 
+[[bin]]
+name = "basil-sim-dap"
+path = "src/dap.rs"
+
 [dependencies]
 picsim = { path = "../../crates/picsim" }
 devdesc = { path = "../../crates/devdesc" }
+serde_json = "1"

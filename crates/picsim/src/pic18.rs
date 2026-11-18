@@ -365,6 +365,9 @@ impl Pic18 {
         }
         let (wdte, cps, cws, ccs) = (self.cfg.get("WDTE"), self.cfg.get("WDTCPS"), self.cfg.get("WDTCWS"), self.cfg.get("WDTCCS"));
         let modelled = self.p.wdt_config(wdte.unwrap_or(0) as u8, cps.unwrap_or(0x1F) as u8, cws.unwrap_or(7) as u8, ccs.unwrap_or(7) as u8);
+        if let Some(enable) = self.cfg.get("WDTEN") {
+            self.p.wdt_config_k22(enable as u8, self.cfg.get("WDTPS").or_else(|| self.cfg.get("WDPS")).unwrap_or(15) as u8);
+        }
         self.p.scan_config(self.cfg.get("SCANE").is_none_or(|v| v != 0));
         self.fosc_cfg = self.cfg.get("FOSC").unwrap_or(0) as u8;
         self.pllcfg = self.cfg.get("PLLCFG").is_some_and(|v| v != 0);
@@ -558,7 +561,11 @@ impl Pic18 {
             self.p.invalidate();
         }
         if self.oscillator.contains(i) {
+            let old = self.m.mem[i];
             self.oscillator.write(&mut self.m.mem, i, v & self.m.implemented[i], &self.cfg);
+            if self.osc.is_some_and(|(con, _, _)| con == i) && (old ^ self.m.mem[i]) & 0x70 != 0 {
+                self.p.k22_wdt_clock_clear(self.cycles);
+            }
             self.osc_status();
             self.update_clock();
             return;
@@ -723,7 +730,14 @@ impl Pic18 {
     fn dma_cycle(&mut self) -> Option<u32> {
         let start = self.cycles;
         let mut dma = self.dma.take()?;
-        if !dma.enabled() {
+        if !dma.enabled() && !self.p.scanner_active(&self.m) {
+            if let Some(q) = &mut self.m.dma_requests { q.clear(); }
+            self.dma = Some(dma);
+            return None;
+        }
+        self.p.catch_up(&mut self.m);
+        let scanner = self.p.scanner_request(&mut self.m, self.cycles);
+        if !dma.enabled() && scanner.is_none() {
             if let Some(q) = &mut self.m.dma_requests { q.clear(); }
             self.dma = Some(dma);
             return None;
@@ -731,8 +745,10 @@ impl Pic18 {
         self.p.catch_up(&mut self.m);
         let free = (self.state == State::Sleeping).then_some((true, true));
         let action = dma.next(&mut self.m, !self.in_service.is_empty(), free);
-        let active = action.is_some();
-        if let Some(action) = action { self.dma_action(&mut dma, action); }
+        let scan = scanner.is_some_and(|ee| dma.scanner_wins(&self.m, !self.in_service.is_empty(), free, ee, action.map(|a| a.0)));
+        let active = scan || action.is_some();
+        if scan { self.p.scanner_cycle(&mut self.m, &self.prog, self.cycles); }
+        else if let Some(action) = action { self.dma_action(&mut dma, action); }
         self.dma = Some(dma);
         if active {
             let ic0 = self.m.mem[self.intcon];
@@ -742,8 +758,7 @@ impl Pic18 {
             if let Some(k) = self.mclr_fell().or_else(|| self.p.take_reset()) { self.reset_cond(k); }
             else {
                 if self.state == State::Sleeping && self.wake_irq() {
-                    let st = self.m.regs.status as usize;
-                    self.m.mem[st] = self.m.mem[st] & !0x20 | 0x40;
+                    self.power_flags(false, true);
                     self.state = State::Running;
                     self.p.exit_sleep(self.cycles);
                 }
@@ -779,7 +794,7 @@ impl Pic18 {
     fn dma_bubbles(&mut self, w: u16, elapsed: u64, isr: bool) {
         if self.p.fosc_stopped() || self.mclr_hold { return; }
         let Some(mut dma) = self.dma.take() else { return };
-        if dma.enabled() {
+        if dma.enabled() || self.p.scanner_request(&mut self.m, self.cycles).is_some() {
             // Literal/control instructions do not use the data bus. MOVFF/LFSR and table
             // operations reserve their multi-cycle buses; branch flush cycles free both.
             let data_free = matches!(w, 0x0000..=0x0007 | 0x0010..=0x0014 | 0x0100..=0x01FF | 0x0800..=0x0FFF | 0xD000..=0xE7FF | 0xEC00..=0xEDFF | 0xEF00..=0xFFFF);
@@ -787,9 +802,11 @@ impl Pic18 {
             let skip = matches!(w, 0x2C00..=0x2FFF | 0x3C00..=0x3FFF | 0x4800..=0x4FFF | 0x6000..=0x67FF | 0xA000..=0xBFFF);
             for slot in 0..elapsed.min(3) {
                 let flash_free = slot > 0 && (branch || skip);
-                if let Some(action) = dma.next(&mut self.m, isr, Some((data_free || flash_free, flash_free))) {
-                    self.dma_action(&mut dma, action);
-                }
+                let free = Some((data_free || flash_free, flash_free));
+                let action = dma.next(&mut self.m, isr, free);
+                let scan = self.p.scanner_request(&mut self.m, self.cycles).is_some_and(|ee| dma.scanner_wins(&self.m, isr, free, ee, action.map(|a| a.0)));
+                if scan { self.p.scanner_cycle(&mut self.m, &self.prog, self.cycles); }
+                else if let Some(action) = action { self.dma_action(&mut dma, action); }
             }
         }
         self.dma = Some(dma);
@@ -1013,8 +1030,10 @@ impl Pic18 {
                 let w2 = self.fetch(self.pc);
                 self.pc = (self.pc + 2) & self.pc_mask;
                 let (s, d) = (u32::from(w & 0xFFF), u32::from(w2 & 0xFFF));
+                self.p.suppress_ioc_latch = true;
                 let v = self.read(s);
                 self.write(d, v);
+                self.p.suppress_ioc_latch = false;
                 self.cycles += 1;
             }
             0xD => {
@@ -1107,7 +1126,7 @@ impl Pic18 {
     /// (DS40002043F 7.2.1-7.2.2 p.69).
     fn wake_irq(&self) -> bool {
         let peie = self.m.mem[self.intcon] & 0x40 != 0;
-        self.irq.iter().enumerate().any(|(n, g)| g[0] != 0 && (n == 0 || self.vic || peie) && self.m.mem[g[0]] & self.m.mem[g[1]] != 0)
+        self.core_irq.iter().any(|&((fa, fm), (ea, em), _)| self.m.mem[fa] & fm != 0 && self.m.mem[ea] & em != 0) || self.irq.iter().enumerate().any(|(n, g)| g[0] != 0 && (n == 0 || self.vic || peie) && self.m.mem[g[0]] & self.m.mem[g[1]] != 0)
     }
 
     /// SLEEP: a wake-up interrupt already pending makes it a NOP; otherwise PD = 0, TO = 1, the watchdog is cleared `[A93]`.
@@ -1115,17 +1134,21 @@ impl Pic18 {
         if self.wake_irq() {
             return;
         }
-        let st = self.m.regs.status as usize;
-        self.m.mem[st] = self.m.mem[st] & !0x20 | 0x40;
+        self.power_flags(false, true);
         self.state = State::Sleeping;
         let now = self.cycles;
         let idle = self.dev.find_sfr("CPUDOZE").is_some_and(|s| self.m.mem[s.addr as usize] & 0x80 != 0);
         self.p.enter_sleep(&mut self.m, now, idle);
     }
 
+    fn power_flags(&mut self, pd: bool, to: bool) {
+        let (a, p, t) = if let Some(a) = self.rcon_ipen { (a, 4, 8) } else { (self.m.regs.status as usize, 0x20, 0x40) };
+        self.m.mem[a] = self.m.mem[a] & !(p | t) | if pd { p } else { 0 } | if to { t } else { 0 };
+    }
+
     /// Nothing can end this Sleep: no interrupt is enabled and the watchdog does not count.
     pub fn sleep_dead(&self) -> bool {
-        self.state == State::Sleeping && (self.p.fosc_stopped() || !self.dma.as_ref().is_some_and(|d| d.enabled())) && !self.irq.iter().any(|g| g[0] != 0 && self.m.mem[g[1]] != 0) && self.p.wdt_sleep_deadline(&self.m).is_none()
+        self.state == State::Sleeping && (self.p.fosc_stopped() || !(self.dma.as_ref().is_some_and(|d| d.enabled()) || self.p.scanner_active(&self.m))) && !self.core_irq.iter().any(|&(_, (ea, em), _)| self.m.mem[ea] & em != 0) && !self.irq.iter().any(|g| g[0] != 0 && self.m.mem[g[1]] != 0) && self.p.wdt_sleep_deadline(&self.m).is_none()
     }
 
     /// One step while asleep: a cycle, or a jump to the watchdog time-out when no interrupt is enabled. Wake-up by the watchdog
@@ -1133,7 +1156,7 @@ impl Pic18 {
     fn sleep_step(&mut self) -> u32 {
         let start = self.cycles;
         let mut next = start + 1;
-        let irq_on = self.irq.iter().any(|g| g[0] != 0 && self.m.mem[g[1]] != 0);
+        let irq_on = self.core_irq.iter().any(|&(_, (ea, em), _)| self.m.mem[ea] & em != 0) || self.irq.iter().any(|g| g[0] != 0 && self.m.mem[g[1]] != 0);
         if !irq_on && let Some(d) = self.p.wdt_sleep_deadline(&self.m) {
             next = d.max(next);
         }
@@ -1160,10 +1183,9 @@ impl Pic18 {
             return (self.cycles - start) as u32;
         }
         self.p.sync(&mut self.m, next);
-        let st = self.m.regs.status as usize;
         let by_wdt = self.p.wdt_woke();
         if by_wdt || self.wake_irq() {
-            self.m.mem[st] = if by_wdt { self.m.mem[st] & !0x60 } else { self.m.mem[st] & !0x20 | 0x40 };
+            self.power_flags(false, !by_wdt);
             self.state = State::Running;
             self.p.exit_sleep(next);
         }
@@ -1409,8 +1431,7 @@ impl Pic18 {
                 0x04 => {
                     // CLRWDT: TO = PD = 1 (DS40002214G 7.7.7 p.40, DS40002043F 11.8.5 p.131); a window violation then resets with
                     // TO and PD as the CLRWDT left them (`[A91]`).
-                    let st = self.m.regs.status as usize;
-                    self.m.mem[st] |= self.status_ro;
+                    self.power_flags(true, true);
                     let now = self.cycles;
                     self.p.catch_up(&mut self.m);
                     self.p.clrwdt(&self.m, now);
@@ -1651,10 +1672,10 @@ impl Pic18 {
         for &(a, set, clr) in &self.mclr {
             self.m.mem[a] = (self.m.mem[a] & !clr | set) & self.m.implemented[a];
         }
-        let status = self.m.regs.status as usize;
         match kind {
             ResetKind::Wdt => {
-                self.m.mem[status] &= !0x40; // nTO
+                let a = self.rcon_ipen.unwrap_or(self.m.regs.status as usize);
+                self.m.mem[a] &= !if self.rcon_ipen.is_some() { 8 } else { 0x40 }; // nTO
                 self.clear_pcon(0x10); // RWDT
             }
             ResetKind::WdtWindow => self.clear_pcon(0x20), // WDTWV
@@ -1685,7 +1706,7 @@ impl Pic18 {
         let np = (*self.reset_p.as_ref().unwrap().1).clone();
         np.init_mem(&mut self.m);
         let old = std::mem::replace(&mut self.p, np);
-        self.p.carry_over(old);
+        self.p.carry_over(old, kind == ResetKind::Mclr);
         self.apply_decoded_config(); // the new peripherals need the watchdog configuration
         self.p.ioc_rebase(self.cycles);
     }

@@ -326,13 +326,13 @@ fn sixteen_bit_modes_polarity_prescaler_pmd_and_reset() {
 #[test]
 fn unsupported_wide_clock_mode_reset_load_are_diagnosed() {
     let mut m = machine("16F17146", "");
-    wide(&mut m, 1, 2);
+    wide(&mut m, 1, 6);
     w(&mut m, "PWM1CLK", 7);
     w(&mut m, "PWM1ERS", 1);
     w(&mut m, "PWM1LDS", 1);
     steps(&mut m, 2);
     let notes = m.cpu.notes.iter().cloned().collect::<Vec<_>>().join("\n");
-    assert!(notes.contains("mode 2"));
+    assert!(notes.contains("mode 6"));
     assert!(notes.contains("clock 7"));
     assert!(notes.contains("external reset"));
 }
@@ -509,4 +509,26 @@ fn every_pic16_device_description_runs_each_standalone_pwm_instance() {
         }
     }
     assert!(parts >= 33, "only exercised {parts} parts");
+}
+
+#[test]
+fn sixteen_bit_center_and_variable_alignment_on_both_families() {
+    for part in ["16F17146", "16F13245"] {
+        let mut m = machine(part, "");
+        route(&mut m, 11);
+        wide(&mut m, 1, 2);
+        let mut high = [0, 0];
+        for _ in 0..16 {
+            let pins = r(&mut m, "PORTA");
+            for (i, n) in high.iter_mut().enumerate() { *n += u32::from(pins & (1 << i) != 0); }
+            m.cpu.step();
+        }
+        assert_eq!(high, [4, 8], "{part}: centered widths across a doubled period");
+        w(&mut m, "PWM1CON", 0);
+        wide(&mut m, 1, 3);
+        let mut wave = Vec::new();
+        for _ in 0..16 { wave.push(r(&mut m, "PORTA") & 3); m.cpu.step(); }
+        assert_eq!(&wave[..8], &[0,0,3,3,0,0,0,0], "{part}");
+        assert_eq!(&wave[..8], &wave[8..]);
+    }
 }

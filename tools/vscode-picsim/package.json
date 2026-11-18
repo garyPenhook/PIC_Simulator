@@ -1,0 +1,47 @@
+{
+  "name": "basil-picsim-debug",
+  "displayName": "Basil PIC Simulator Debugger",
+  "description": "Debug BASIC and C firmware with basil-sim-dap",
+  "version": "0.1.0",
+  "publisher": "basil-local",
+  "engines": { "vscode": "^1.85.0" },
+  "categories": ["Debuggers"],
+  "activationEvents": ["onDebugResolve:basil-sim"],
+  "main": "./extension.js",
+  "contributes": {
+    "configuration": {
+      "title": "Basil PIC Simulator",
+      "properties": {
+        "basilSim.adapterPath": {
+          "type": "string",
+          "scope": "resource",
+          "default": "basil-sim-dap",
+          "description": "Path to the basil-sim-dap executable."
+        }
+      }
+    },
+    "debuggers": [{
+      "type": "basil-sim",
+      "label": "Basil PIC Simulator",
+      "languages": ["basic", "c"],
+      "configurationAttributes": {
+        "launch": {
+          "required": ["program", "device"],
+          "properties": {
+            "program": { "type": "string", "description": "Compiled HEX or ELF file." },
+            "device": { "type": "string", "description": "PIC part, for example 18F27Q10 or 16F17146." },
+            "devices": { "type": "string", "description": "Optional device description directory." },
+            "asm": { "type": "string", "description": "Optional assembly symbol listing." },
+            "stimulus": { "type": "string", "description": "Optional TOML stimulus file." },
+            "stopOnEntry": { "type": "boolean", "default": true },
+            "cwd": { "type": "string", "default": "${workspaceFolder}" }
+          }
+        }
+      },
+      "initialConfigurations": [{
+        "type": "basil-sim", "request": "launch", "name": "Debug PIC firmware",
+        "program": "${workspaceFolder}/dist/main.hex", "device": "18F27Q10", "stopOnEntry": true
+      }]
+    }]
+  }
+}

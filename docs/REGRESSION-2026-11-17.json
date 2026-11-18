@@ -1,0 +1,484 @@
+{
+  "date": "2026-11-17",
+  "simulator_base": "6867ce3 plus working changes",
+  "compiler_commit": "800ec26",
+  "compiler_version": "0.1.260",
+  "rustc": "1.99.1",
+  "mdb_version": "6.35",
+  "sim": [
+    {
+      "device": "18F27Q10",
+      "flags": "",
+      "engine": "sim",
+      "exit_code": 0,
+      "passed": 229,
+      "failures": [],
+      "skipped": [],
+      "excluded": [
+        {
+          "file": "select_dense_isr.bas",
+          "reason": "explicit MDB-only program"
+        }
+      ]
+    },
+    {
+      "device": "18F27Q10",
+      "flags": "-O0",
+      "engine": "sim",
+      "exit_code": 0,
+      "passed": 229,
+      "failures": [],
+      "skipped": [],
+      "excluded": [
+        {
+          "file": "select_dense_isr.bas",
+          "reason": "explicit MDB-only program"
+        }
+      ]
+    },
+    {
+      "device": "18F16Q41",
+      "flags": "",
+      "engine": "sim",
+      "exit_code": 0,
+      "passed": 13,
+      "failures": [],
+      "skipped": [],
+      "excluded": [
+        {
+          "file": "lib_dma.bas",
+          "reason": "expects MDB to leave DGO permanently set; native DMA completes"
+        },
+        {
+          "file": "lib_dma_abortmove.bas",
+          "reason": "requires legacy MDB DMA replay"
+        },
+        {
+          "file": "lib_dma_eeprom.bas",
+          "reason": "expects MDB's absent DMA engine (DGO/XIP never advance)"
+        },
+        {
+          "file": "lib_dma_flash.bas",
+          "reason": "expects MDB's absent DMA engine (DGO/XIP never advance)"
+        },
+        {
+          "file": "lib_dma_move.bas",
+          "reason": "requires legacy MDB DMA replay"
+        },
+        {
+          "file": "lib_dma_srcmove.bas",
+          "reason": "requires legacy MDB DMA replay"
+        },
+        {
+          "file": "lib_dma_trigmove.bas",
+          "reason": "requires legacy MDB DMA replay"
+        }
+      ]
+    },
+    {
+      "device": "18F16Q41",
+      "flags": "-O0",
+      "engine": "sim",
+      "exit_code": 0,
+      "passed": 13,
+      "failures": [],
+      "skipped": [],
+      "excluded": [
+        {
+          "file": "lib_dma.bas",
+          "reason": "expects MDB to leave DGO permanently set; native DMA completes"
+        },
+        {
+          "file": "lib_dma_abortmove.bas",
+          "reason": "requires legacy MDB DMA replay"
+        },
+        {
+          "file": "lib_dma_eeprom.bas",
+          "reason": "expects MDB's absent DMA engine (DGO/XIP never advance)"
+        },
+        {
+          "file": "lib_dma_flash.bas",
+          "reason": "expects MDB's absent DMA engine (DGO/XIP never advance)"
+        },
+        {
+          "file": "lib_dma_move.bas",
+          "reason": "requires legacy MDB DMA replay"
+        },
+        {
+          "file": "lib_dma_srcmove.bas",
+          "reason": "requires legacy MDB DMA replay"
+        },
+        {
+          "file": "lib_dma_trigmove.bas",
+          "reason": "requires legacy MDB DMA replay"
+        }
+      ]
+    },
+    {
+      "device": "18F25K22",
+      "flags": "",
+      "engine": "sim",
+      "exit_code": 0,
+      "passed": 17,
+      "failures": [],
+      "skipped": [
+        "skip lib_pinio  (only for 18F45K22)",
+        "skip lib_serial2  (only for 18F45K22)"
+      ],
+      "excluded": []
+    },
+    {
+      "device": "18F25K22",
+      "flags": "-O0",
+      "engine": "sim",
+      "exit_code": 0,
+      "passed": 17,
+      "failures": [],
+      "skipped": [
+        "skip lib_pinio  (only for 18F45K22)",
+        "skip lib_serial2  (only for 18F45K22)"
+      ],
+      "excluded": []
+    },
+    {
+      "device": "18F45K22",
+      "flags": "",
+      "engine": "sim",
+      "exit_code": 0,
+      "passed": 17,
+      "failures": [],
+      "skipped": [],
+      "excluded": [
+        {
+          "file": "lib_pwm_out.bas",
+          "reason": "fixture hardcodes 28-pin CCP4 RB0; 40-pin CCP4 is RD1"
+        },
+        {
+          "file": "lib_spi.bas",
+          "reason": "fixture hardcodes 28-pin MSSP2 pins; 40-pin MSSP2 is on PORTD"
+        }
+      ]
+    },
+    {
+      "device": "18F45K22",
+      "flags": "-O0",
+      "engine": "sim",
+      "exit_code": 0,
+      "passed": 17,
+      "failures": [],
+      "skipped": [],
+      "excluded": [
+        {
+          "file": "lib_pwm_out.bas",
+          "reason": "fixture hardcodes 28-pin CCP4 RB0; 40-pin CCP4 is RD1"
+        },
+        {
+          "file": "lib_spi.bas",
+          "reason": "fixture hardcodes 28-pin MSSP2 pins; 40-pin MSSP2 is on PORTD"
+        }
+      ]
+    },
+    {
+      "device": "16F17146",
+      "flags": "",
+      "engine": "sim",
+      "exit_code": 0,
+      "passed": 33,
+      "failures": [],
+      "skipped": [],
+      "excluded": []
+    },
+    {
+      "device": "16F17146",
+      "flags": "-O0",
+      "engine": "sim",
+      "exit_code": 0,
+      "passed": 33,
+      "failures": [],
+      "skipped": [],
+      "excluded": []
+    },
+    {
+      "device": "16F13145",
+      "flags": "",
+      "engine": "sim",
+      "exit_code": 0,
+      "passed": 4,
+      "failures": [],
+      "skipped": [],
+      "excluded": []
+    },
+    {
+      "device": "16F13145",
+      "flags": "-O0",
+      "engine": "sim",
+      "exit_code": 0,
+      "passed": 4,
+      "failures": [],
+      "skipped": [],
+      "excluded": []
+    },
+    {
+      "device": "16F13245",
+      "flags": "",
+      "engine": "sim",
+      "exit_code": 0,
+      "passed": 5,
+      "failures": [],
+      "skipped": [
+        "skip pins14  (only for 16F13224)",
+        "skip pins20  (only for 16F13244)",
+        "skip pins8  (only for 16F13214)"
+      ],
+      "excluded": []
+    },
+    {
+      "device": "16F13245",
+      "flags": "-O0",
+      "engine": "sim",
+      "exit_code": 0,
+      "passed": 5,
+      "failures": [],
+      "skipped": [
+        "skip pins14  (only for 16F13224)",
+        "skip pins20  (only for 16F13244)",
+        "skip pins8  (only for 16F13214)"
+      ],
+      "excluded": []
+    },
+    {
+      "device": "16F15244",
+      "flags": "",
+      "engine": "sim",
+      "exit_code": 0,
+      "passed": 9,
+      "failures": [],
+      "skipped": [],
+      "excluded": []
+    },
+    {
+      "device": "16F15244",
+      "flags": "-O0",
+      "engine": "sim",
+      "exit_code": 0,
+      "passed": 9,
+      "failures": [],
+      "skipped": [],
+      "excluded": []
+    },
+    {
+      "device": "16F18056",
+      "flags": "",
+      "engine": "sim",
+      "exit_code": 0,
+      "passed": 9,
+      "failures": [],
+      "skipped": [],
+      "excluded": []
+    },
+    {
+      "device": "16F18056",
+      "flags": "-O0",
+      "engine": "sim",
+      "exit_code": 0,
+      "passed": 9,
+      "failures": [],
+      "skipped": [],
+      "excluded": []
+    },
+    {
+      "device": "16F18346",
+      "flags": "",
+      "engine": "sim",
+      "exit_code": 0,
+      "passed": 11,
+      "failures": [],
+      "skipped": [],
+      "excluded": []
+    },
+    {
+      "device": "16F18346",
+      "flags": "-O0",
+      "engine": "sim",
+      "exit_code": 0,
+      "passed": 11,
+      "failures": [],
+      "skipped": [],
+      "excluded": []
+    }
+  ],
+  "mdb_optimized": [
+    {
+      "device": "18F27Q10",
+      "flags": "",
+      "engine": "both",
+      "exit_code": 1,
+      "passed": 201,
+      "failures": [
+        "FAIL bit_packed_isr: basil-sim halted=True cycles 101564, MDB cycles 101550",
+        "FAIL isr_dual: basil-sim halted=True cycles 120635, MDB cycles 120634",
+        "FAIL isr_single: basil-sim halted=True cycles 159781, MDB cycles 160074",
+        "FAIL lib_adc: basil-sim halted=True cycles 717, MDB cycles 633",
+        "FAIL lib_adin: basil-sim halted=True cycles 1345, MDB cycles 1177",
+        "FAIL lib_aht30: basil-sim halted=True cycles 84522, MDB cycles 3920648",
+        "FAIL lib_eeprom: basil-sim halted=True cycles 480370, MDB cycles 373",
+        "FAIL lib_i2c: basil-sim halted=True cycles 10242, MDB cycles 9600968",
+        "FAIL lib_intosc: basil-sim halted=True cycles 1000, MDB cycles 3600970",
+        "FAIL lib_intosc_div: basil-sim halted=True cycles 47, MDB cycles 1440053",
+        "FAIL lib_pwm_pins: basil-sim halted=True cycles 118152, MDB cycles 117624",
+        "FAIL lib_rtcc: basil-sim halted=True cycles 2575, MDB cycles 1920653",
+        "FAIL lib_serial: basil-sim halted=True cycles 8429, MDB cycles 15098",
+        "FAIL lib_spi: basil-sim halted=True cycles 965, MDB cycles 1980580",
+        "FAIL lib_spi_pins: basil-sim halted=True cycles 10560, MDB cycles 10432",
+        "FAIL lib_system: basil-sim halted=True cycles 1616, MDB cycles 1488",
+        "FAIL select_dense: basil-sim halted=True cycles 2574, MDB cycles 2543",
+        "FAIL select_dense_far: basil-sim halted=True cycles 2900, MDB cycles 2892",
+        "FAIL select_dense_many: basil-sim halted=True cycles 14520, MDB cycles 14371",
+        "FAIL serial_word_digits: basil-sim halted=True cycles 21305, MDB cycles 35761"
+      ],
+      "skipped": [],
+      "excluded": [
+        {
+          "file": "lib_clc.bas",
+          "reason": "not a two-engine comparison"
+        },
+        {
+          "file": "lib_flashwrite.bas",
+          "reason": "not a two-engine comparison"
+        },
+        {
+          "file": "lib_freqcount.bas",
+          "reason": "not a two-engine comparison"
+        },
+        {
+          "file": "lib_lcd_read.bas",
+          "reason": "not a two-engine comparison"
+        },
+        {
+          "file": "lib_pwm_out.bas",
+          "reason": "not a two-engine comparison"
+        },
+        {
+          "file": "lib_serial2_rx.bas",
+          "reason": "not a two-engine comparison"
+        },
+        {
+          "file": "lib_serial_rx.bas",
+          "reason": "not a two-engine comparison"
+        },
+        {
+          "file": "lib_softserial_rx.bas",
+          "reason": "not a two-engine comparison"
+        },
+        {
+          "file": "select_dense_isr.bas",
+          "reason": "not a two-engine comparison"
+        }
+      ]
+    }
+  ],
+  "workspace_tests_passed": 624,
+  "release_build": "passed",
+  "dap_integration": [
+    "18F27Q10 passed",
+    "16F17146 passed"
+  ],
+  "sfr_audit": "zero new differences on Q10/Q41/25K22/45K22",
+  "mdb_unoptimized": [
+    {
+      "device": "18F27Q10",
+      "flags": "-O0",
+      "engine": "both",
+      "exit_code": 1,
+      "passed": 206,
+      "failures": [
+        "FAIL bit_packed_isr: basil-sim halted=True cycles 102671, MDB cycles 102658",
+        "FAIL isr_dual: basil-sim halted=True cycles 143771, MDB cycles 143769",
+        "FAIL isr_single: basil-sim halted=True cycles 154287, MDB cycles 154776",
+        "FAIL lib_adc: basil-sim halted=True cycles 1903, MDB cycles 1815",
+        "FAIL lib_adin: basil-sim halted=True cycles 1448, MDB cycles 1272",
+        "FAIL lib_aht30: basil-sim halted=True cycles 85855, MDB cycles 4161951",
+        "FAIL lib_eeprom: basil-sim halted=True cycles 480442, MDB cycles 454",
+        "FAIL lib_i2c: basil-sim halted=True cycles 15381, MDB cycles 10206042",
+        "FAIL lib_intosc: basil-sim halted=True cycles 1224, MDB cycles 3601191",
+        "FAIL lib_intosc_div: basil-sim halted=True cycles 49, MDB cycles 1440055",
+        "FAIL lib_rtcc: basil-sim halted=True cycles 4005, MDB cycles 2042069",
+        "FAIL lib_serial: basil-sim halted=True cycles 9567, MDB cycles 16238",
+        "FAIL lib_spi: basil-sim halted=True cycles 12371, MDB cycles 1991990",
+        "FAIL lib_system: basil-sim halted=True cycles 2047, MDB cycles 1869",
+        "FAIL serial_word_digits: basil-sim halted=True cycles 23497, MDB cycles 37953"
+      ],
+      "skipped": [],
+      "excluded": [
+        {
+          "file": "lib_clc.bas",
+          "reason": "not a two-engine comparison"
+        },
+        {
+          "file": "lib_flashwrite.bas",
+          "reason": "not a two-engine comparison"
+        },
+        {
+          "file": "lib_freqcount.bas",
+          "reason": "not a two-engine comparison"
+        },
+        {
+          "file": "lib_lcd_read.bas",
+          "reason": "not a two-engine comparison"
+        },
+        {
+          "file": "lib_pwm_out.bas",
+          "reason": "not a two-engine comparison"
+        },
+        {
+          "file": "lib_serial2_rx.bas",
+          "reason": "not a two-engine comparison"
+        },
+        {
+          "file": "lib_serial_rx.bas",
+          "reason": "not a two-engine comparison"
+        },
+        {
+          "file": "lib_softserial_rx.bas",
+          "reason": "not a two-engine comparison"
+        },
+        {
+          "file": "select_dense_isr.bas",
+          "reason": "not a two-engine comparison"
+        }
+      ]
+    }
+  ],
+  "pcl_probe": {
+    "sim_cycles": 4,
+    "mdb_cycles": 3,
+    "ram_agrees": true
+  },
+  "vscode_host": {
+    "passed": [
+      "18F27Q10",
+      "16F17146"
+    ],
+    "coverage": [
+      "automatic activation",
+      "launch",
+      "source breakpoints",
+      "stack frames",
+      "variables",
+      "step into/out/over",
+      "restart",
+      "disconnect"
+    ],
+    "manual_ui_inspection": false
+  },
+  "isolated_install": {
+    "passed": true,
+    "binaries": 3,
+    "device_descriptions": 128,
+    "documents": 4,
+    "installed_dap_sessions": [
+      "18F27Q10",
+      "16F17146"
+    ]
+  }
+}

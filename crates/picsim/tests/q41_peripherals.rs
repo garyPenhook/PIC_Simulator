@@ -340,16 +340,16 @@ fn pwm_right_aligned_and_compare_modes_and_other_instances() {
     }
 }
 #[test]
-fn unsupported_pwm_and_crc_scanner_are_identified() {
+fn unsupported_pwm_clock_is_identified_and_scanner_is_modelled() {
     let mut m = machine(PARTS[5]);
     w(&mut m, "PWM1S1CFG", 2);
     w(&mut m, "PWM1CLK", 7);
     w(&mut m, "PWM1CON", 0x80);
     w(&mut m, "SCANCON0", 0xA0);
     steps(&mut m, 1);
-    assert!(m.cpu.notes.iter().any(|n| n.contains("PWM1 mode 2")));
+    assert!(!m.cpu.notes.iter().any(|n| n.contains("PWM1 mode 2")));
     assert!(m.cpu.notes.iter().any(|n| n.contains("PWM1 clock 7")));
-    assert!(m.cpu.m.unmodelled.contains("SCANCON0"));
+    assert!(!m.cpu.m.unmodelled.contains("SCANCON0"));
 }
 #[test]
 fn running_with_lazy_sync_matches_instruction_stepping() {
@@ -409,4 +409,170 @@ fn crc_pauses_during_sleep_and_resumes_on_ioc_wake() {
     assert_eq!(crc_result(&mut m), before);
     steps(&mut m, 1);
     assert_ne!(crc_result(&mut m), before);
+}
+
+fn scan_lock(m: &mut Machine, priority: u8) {
+    w(m, "SCANPR", priority);
+    w(m, "PRLOCK", 0x55); w(m, "PRLOCK", 0xAA); w(m, "PRLOCK", 1);
+}
+fn scanner_setup(m: &mut Machine, lo: u16, hi: u16) {
+    w(m, "CRCCON0", 0x88);
+    crc_word(m, "CRCOUT", 0x1021);
+    w(m, "CRCCON0", 0x90);
+    crc_word(m, "CRCOUT", 0);
+    w(m, "CRCCON1", 15); w(m, "CRCCON2", 7);
+    w(m, "CRCCON0", 0xD0);
+    w(m, "SCANLADRL", lo as u8); w(m, "SCANLADRH", (lo >> 8) as u8);
+    w(m, "SCANLADRU", 0); w(m, "SCANHADRU", 0);
+    w(m, "SCANHADRL", hi as u8); w(m, "SCANHADRH", (hi >> 8) as u8);
+}
+#[test]
+fn scanner_crc_known_vector_all_q41_parts() {
+    for part in PARTS {
+        let mut m = machine(part);
+        m.cpu.prog[0x100..0x109].copy_from_slice(b"123456789");
+        scanner_setup(&mut m, 0x100, 0x108);
+        scan_lock(&mut m, 0);
+        w(&mut m, "SCANCON0", 0xA0);
+        steps(&mut m, 100);
+        assert_eq!(crc_result(&mut m), 0x31C3, "{part}");
+        assert_eq!(r(&mut m, "SCANCON0") & 0x21, 0);
+        assert_eq!(r(&mut m, "SCANLADRL"), 9);
+        assert!(flag(&mut m, "SCANIF"));
+        assert!(flag(&mut m, "CRCIF"));
+        assert!(!m.cpu.m.unmodelled.contains("SCANCON0"));
+    }
+}
+#[test]
+fn scanner_requires_lock_honors_cpu_priority_and_burst_reserves_bus() {
+    let mut m = machine(PARTS[5]);
+    m.cpu.prog[0x100..0x109].copy_from_slice(b"123456789");
+    scanner_setup(&mut m, 0x100, 0x108);
+    w(&mut m, "SCANCON0", 0xA2);
+    steps(&mut m, 5);
+    assert_eq!(r(&mut m, "SCANLADRL"), 0, "unlocked arbiter grants nothing");
+    scan_lock(&mut m, 0);
+    let pc = m.cpu.pc;
+    steps(&mut m, 8);
+    assert_eq!(m.cpu.pc, pc, "burst holds CPU while CRC shifts");
+    steps(&mut m, 90);
+    assert_eq!(crc_result(&mut m), 0x31C3);
+    assert!(m.cpu.pc > pc);
+
+    let mut m = machine(PARTS[5]);
+    scanner_setup(&mut m, 0x100, 0x100);
+    w(&mut m, "MAINPR", 0); scan_lock(&mut m, 7);
+    // MOVWF uses the data bus, but every instruction still fetches flash.
+    for word in m.cpu.prog[..200].chunks_exact_mut(2) { word.copy_from_slice(&[0x20, 0x6E]); }
+    w(&mut m, "SCANCON0", 0xA0);
+    steps(&mut m, 12);
+    assert_eq!(r(&mut m, "SCANLADRL"), 0);
+    // BRA has a flush cycle in which even a low priority scanner can read flash.
+    m.cpu.prog[m.cpu.pc as usize..m.cpu.pc as usize + 2].copy_from_slice(&[0, 0xD0]);
+    steps(&mut m, 1);
+    assert_eq!(r(&mut m, "SCANLADRL"), 1);
+}
+#[test]
+fn scanner_trigger_abort_disable_and_pmd() {
+    let mut m = machine(PARTS[5]);
+    scanner_setup(&mut m, 0x100, 0x100);
+    scan_lock(&mut m, 0);
+    w(&mut m, "SCANTRIG", 15); w(&mut m, "SCANCON0", 0xE0);
+    steps(&mut m, 4);
+    assert_eq!(r(&mut m, "SCANLADRL"), 0);
+    assert!(m.cpu.notes.iter().any(|n| n.contains("scanner trigger 15")));
+    w(&mut m, "SCANCON0", 0x80);
+    assert!(flag(&mut m, "SCANIF"));
+    w(&mut m, "SCANCON0", 0xA0);
+    w(&mut m, "CRCCON0", 0x80);
+    steps(&mut m, 2);
+    assert_eq!(r(&mut m, "SCANCON0") & 0x20, 0);
+    let (a, mask) = m.dev.sfr.iter().find_map(|s| s.fields.iter().find(|f| f.name == "SCANMD").map(|f| (s.addr, 1 << f.pos))).unwrap();
+    w(&mut m, "CRCCON0", 0xD0); w(&mut m, "SCANCON0", 0xA0);
+    m.cpu.write(a, mask);
+    steps(&mut m, 5);
+    assert_eq!(r(&mut m, "SCANLADRL"), 0);
+}
+#[test]
+fn centered_pwm_width_period_flags_and_variable_wrap() {
+    for mode in [2, 3] {
+        let mut m = machine(PARTS[5]);
+        w(&mut m, "ANSELC", 0); w(&mut m, "TRISC", 0xFC);
+        w(&mut m, "RC0PPS", 10); w(&mut m, "RC1PPS", 11);
+        w(&mut m, "PWM1CLK", 2); w(&mut m, "PWM1CPRE", 3);
+        w(&mut m, "PWM1PRL", 5); w(&mut m, "PWM1S1P1L", 4); w(&mut m, "PWM1S1P2L", 2);
+        w(&mut m, "PWM1S1CFG", mode); w(&mut m, "PWM1CON", 0x80);
+        let mut waveform = Vec::new();
+        for _ in 0..24 { waveform.push(r(&mut m, "PORTC") & 3); steps(&mut m, 1); }
+        if mode == 2 {
+            assert_eq!(&waveform[..12], &[0,0,1,1,3,3,3,3,1,1,0,0]);
+            assert_eq!(&waveform[..12], &waveform[12..]);
+        } else {
+            assert_eq!(&waveform[..6], &[0,0,0,0,3,3]);
+            assert_eq!(&waveform[6..12], &[3,3,0,0,3,3]);
+        }
+        assert_eq!(r(&mut m, "PWM1GIR") & 3, 3);
+        assert!(flag(&mut m, "PWM1PIF"));
+    }
+}
+
+#[test]
+fn scanner_eeprom_wide_words_and_dma_priority_ties() {
+    let mut m = machine(PARTS[5]);
+    // Load exact EEPROM offsets, independent of the auxiliary HEX region's base.
+    let start = m.dev.memory.eeprom.start;
+    m.cpu.p.load_eeprom(|a| Some(b"123456789".get((a-start) as usize).copied().unwrap_or(0xFF)));
+    scanner_setup(&mut m, 0, 8); scan_lock(&mut m, 0);
+    w(&mut m, "SCANCON0", 0xA4);
+    steps(&mut m, 100);
+    assert_eq!(crc_result(&mut m), 0x31C3);
+
+    let mut m = machine(PARTS[5]);
+    scanner_setup(&mut m, 0x100, 0x103);
+    m.cpu.prog[0x100..0x104].copy_from_slice(&[0x78,0x56,0x34,0x12]);
+    w(&mut m, "CRCCON2", 31);
+    w(&mut m, "CRCCON0", 0xC0); // unaugmented: bottom 16 bits after 32 shifts
+    scan_lock(&mut m, 0); w(&mut m, "SCANCON0", 0xA0);
+    steps(&mut m, 40);
+    let expected = picsim_crc_reference(&[0x12,0x34,0x56,0x78]);
+    assert_eq!(crc_result(&mut m), expected);
+
+    let mut m = machine(PARTS[5]);
+    scanner_setup(&mut m, 0x100, 0x100);
+    m.cpu.write(0x600, 0xAA);
+    for (n,v) in [("DMAnSSAL",0), ("DMAnSSAH",6), ("DMAnDSAL",1), ("DMAnDSAH",6), ("DMAnSSZL",1), ("DMAnDSZL",1), ("DMAnCON1",0)] { w(&mut m,n,v); }
+    w(&mut m,"DMA1PR",0); scan_lock(&mut m,0);
+    w(&mut m,"DMAnCON0",0xA0); w(&mut m,"SCANCON0",0xA0);
+    steps(&mut m,2);
+    assert_eq!(m.cpu.read(0x601),0xAA,"DMA wins priority ties over scanner");
+    assert_eq!(r(&mut m,"SCANLADRL"),0);
+    steps(&mut m,1); assert_eq!(r(&mut m,"SCANLADRL"),1);
+}
+fn picsim_crc_reference(bytes: &[u8]) -> u32 {
+    let mut acc = 0u32;
+    for &b in bytes {
+        for bit in (0..8).rev() {
+            let top = acc & 0x8000 != 0;
+            acc = ((acc << 1) | u32::from((b >> bit) & 1)) & 0xFFFF;
+            if top { acc ^= 0x1021; }
+        }
+    }
+    acc
+}
+
+#[test]
+fn scanner_and_crc_pause_in_sleep_and_progress_in_idle() {
+    for idle in [false, true] {
+        let mut m = machine(PARTS[5]);
+        m.cpu.prog[..2].copy_from_slice(&[3,0]);
+        m.cpu.prog[0x100..0x109].copy_from_slice(b"123456789");
+        scanner_setup(&mut m,0x100,0x108);
+        if idle { w(&mut m,"CPUDOZE",0x80); }
+        // Enter Sleep/Idle before starting the peripheral from the debugger.
+        m.cpu.step();
+        scan_lock(&mut m,0); w(&mut m,"SCANCON0",0xA0);
+        for _ in 0..100 { m.cpu.step(); }
+        assert_eq!(r(&mut m,"SCANLADRL"),if idle {9} else {0});
+        assert_eq!(crc_result(&mut m),if idle {0x31C3} else {0});
+    }
 }

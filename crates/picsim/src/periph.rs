@@ -91,6 +91,8 @@ struct Ioc {
     /// (INTxPPS, INTxIF, INTCON register and mask of INTxEDG)
     ints: Vec<(usize, Flag, usize, u8)>,
     iocif: Option<Flag>,
+    /// K22 PORTB mismatch latch: port index, IOCB, RBIF, last read/written pins.
+    k22: Option<(usize, usize, Flag, u8)>,
     /// The stimulus has been looked at up to this cycle.
     scan: u64,
 }
@@ -105,7 +107,7 @@ pub(crate) struct Flag {
 impl Flag {
     fn find(dev: &Device, bit: &str) -> Option<Flag> {
         // PIRx first; then INTCON, which holds TMR0IF on the PIC18(L)F2x/4xK22 (DS40001412H Register 9-1 p.109).
-        for s in dev.sfr.iter().filter(|s| s.name.starts_with("PIR")).chain(dev.sfr.iter().filter(|s| s.name == "INTCON")) {
+        for s in dev.sfr.iter().filter(|s| s.name.starts_with("PIR")).chain(dev.sfr.iter().filter(|s| s.name.starts_with("INTCON"))) {
             if let Some(f) = s.fields.iter().chain(s.legacy.iter()).find(|f| f.name == bit) {
                 return Some(Flag { addr: s.addr as usize, mask: 1 << f.pos });
             }
@@ -629,6 +631,7 @@ pub struct Periph {
     ccptmrs: ccp::TmrSel,
     /// PIC18(L)F2x/4xK22: the part has ports D and E (the 40/44-pin parts), for the fixed CCP pins (`route_k22_ccp`).
     k22_ccp: Option<bool>,
+    pub(crate) suppress_ioc_latch: bool,
     /// RxyPPS registers: (register, index into `ports`, pin).
     ppsout: Vec<(usize, usize, u8)>,
     /// `ppsout` per port index: (RxyPPS address, bit). Built once at the end of `bind`, like `ppsout`.
@@ -784,7 +787,7 @@ impl Periph {
 
     /// Find the timers the part has and mark their registers as hooked in `m`.
     pub fn bind(dev: &Device, m: &mut DataMem) -> Periph {
-        let mut p = Periph { q41: addr(dev, "ADCPCON").is_some(), pwmqs: Vec::new(), pwm_en: addr(dev, "PWMEN"), pwm_load: addr(dev, "PWMLOAD"), clc_select: None, ports: Vec::new(), drive: Default::default(), t0: None, t1: Vec::new(), t2: Vec::new(), uarts: Vec::new(), uart_pins: Vec::new(), uart_scan: 0, pin_history: Vec::new(), quarts: Vec::new(), quart_pins: Vec::new(), spis: Vec::new(), mssps: Vec::new(), i2cqs: Vec::new(), adc: None, nvm: None, nvmq: None, stall: 0, fvr: None, tx: Log::new(), spi_tx: Log::new(), i2c_log: Log::new(), notes: BTreeSet::new(), ccps: Vec::new(), pwms: Vec::new(), cwg: None, cmps: Vec::new(), cmout: None, clcs: Vec::new(), clcin: Vec::new(), clcdata: None, in_clc: false, clc_scan: 0, crc: None, crcq: None, wdt: None, reset_req: None, sleeping: false, sleep_at: 0, fosc_off: false, wdt_wake: false, analog: Vec::new(), ccptmrs: ccp::TmrSel::Q10(None), k22_ccp: None, ppsout: Vec::new(), pps_by_port: Vec::new(), sig_src: 0, i2c_pps: Vec::new(), i2c_fixed: Vec::new(), board: Board::default(), pullup: Vec::new(), forced: Vec::new(), sig: 0, sig_log: Vec::new(), sched: Vec::new(), pin_log: Log::new(), event: None, ioc: Ioc::default(), sb: SyncBufs::default(), due: 0, owed: None };
+        let mut p = Periph { q41: addr(dev, "ADCPCON").is_some(), pwmqs: Vec::new(), pwm_en: addr(dev, "PWMEN"), pwm_load: addr(dev, "PWMLOAD"), clc_select: None, ports: Vec::new(), drive: Default::default(), t0: None, t1: Vec::new(), t2: Vec::new(), uarts: Vec::new(), uart_pins: Vec::new(), uart_scan: 0, pin_history: Vec::new(), quarts: Vec::new(), quart_pins: Vec::new(), spis: Vec::new(), mssps: Vec::new(), i2cqs: Vec::new(), adc: None, nvm: None, nvmq: None, stall: 0, fvr: None, tx: Log::new(), spi_tx: Log::new(), i2c_log: Log::new(), notes: BTreeSet::new(), ccps: Vec::new(), pwms: Vec::new(), cwg: None, cmps: Vec::new(), cmout: None, clcs: Vec::new(), clcin: Vec::new(), clcdata: None, in_clc: false, clc_scan: 0, crc: None, crcq: None, wdt: None, reset_req: None, sleeping: false, sleep_at: 0, fosc_off: false, wdt_wake: false, analog: Vec::new(), ccptmrs: ccp::TmrSel::Q10(None), k22_ccp: None, suppress_ioc_latch: false, ppsout: Vec::new(), pps_by_port: Vec::new(), sig_src: 0, i2c_pps: Vec::new(), i2c_fixed: Vec::new(), board: Board::default(), pullup: Vec::new(), forced: Vec::new(), sig: 0, sig_log: Vec::new(), sched: Vec::new(), pin_log: Log::new(), event: None, ioc: Ioc::default(), sb: SyncBufs::default(), due: 0, owed: None };
         let mut hook = |a: usize, k: u8| m.special[a] = Special::Hook(k);
         if let (Some(l), Some(h), Some(c0), Some(c1), Some(flag)) =
             (addr(dev, "TMR0L"), addr(dev, "TMR0H"), addr(dev, "T0CON0"), addr(dev, "T0CON1"), Flag::find(dev, "TMR0IF"))
@@ -953,9 +956,9 @@ impl Periph {
             }
         }
         // Q10 and Q41 share the windowed watchdog register layout.
-        if let Some(w) = Wdt::find(dev) {
+        if let Some(w) = Wdt::find(dev).or_else(|| Wdt::find_k22(dev)) {
             for (reg, sub) in [(w.con0, wdt::CON0), (w.con1, wdt::CON1), (w.psl, wdt::PSL), (w.psh, wdt::PSH), (w.tmr, wdt::TMR)] {
-                hook(reg, wdt_hook(sub));
+                if reg != usize::MAX { hook(reg, wdt_hook(sub)); }
             }
             p.wdt = Some(w);
         }
@@ -1049,6 +1052,7 @@ impl Periph {
         }
         if let Some(c) = crcq::CrcQ::find(dev) {
             for (i, &a) in c.regs.iter().enumerate() { m.special[a] = Special::CrcQ(i as u8); }
+            for (i, &a) in c.scan_regs.iter().enumerate() { m.special[a] = Special::CrcQ(11 + i as u8); }
             p.crcq = Some(c);
         }
         if p.q41 {
@@ -1075,10 +1079,15 @@ impl Periph {
         }
         p.ioc.iocif = Flag::find(dev, "IOCIF");
         for k in 0..3 {
-            let edg = dev.sfr.iter().find_map(|s| s.fields.iter().find(|f| f.name == format!("INT{k}EDG")).map(|f| (s.addr as usize, 1u8 << f.pos)));
-            if let (Some(pps), Some(flag), Some((ea, em))) = (addr(dev, &format!("INT{k}PPS")), Flag::find(dev, &format!("INT{k}IF")), edg) {
+            let edg = dev.sfr.iter().find_map(|s| s.fields.iter().chain(s.legacy.iter()).find(|f| f.name == format!("INT{k}EDG") || f.name == format!("INTEDG{k}")).map(|f| (s.addr as usize, 1u8 << f.pos)));
+            if let (Some(pps), Some(flag), Some((ea, em))) = (addr(dev, &format!("INT{k}PPS")).or_else(|| p.k22_ccp.map(|_| FIXED_PIN + 8 + k)), Flag::find(dev, &format!("INT{k}IF")), edg) {
                 p.ioc.ints.push((pps, flag, ea, em));
             }
+        }
+        if let (Some(pi), Some(en), Some(flag)) = (p.ports.iter().position(|p| p.letter == b'B'), addr(dev, "IOCB"), Flag::find(dev, "RBIF")) {
+            let baseline = 0;
+            p.ioc.k22 = Some((pi, en, flag, baseline));
+            m.special[en] = Special::Sync;
         }
         // Registers that change what a pin or a gate source reads are looked at up to the write (`Special::Sync`).
         let mut regs: Vec<usize> = Vec::new();
@@ -1122,6 +1131,9 @@ impl Periph {
         p.sig_src = sigs.fold(0, |a, c| a | 1u32.checked_shl(u32::from(c)).unwrap_or(0));
         if !p.pwmqs.is_empty() { p.sig_src |= 0xFC0; }
         p.pin_history = (0..p.ports.len()).map(|i| VecDeque::from([(0, p.pin_state(i, m, 0))])).collect();
+        if let Some((pi, en, flag, _)) = p.ioc.k22 {
+            p.ioc.k22 = Some((pi, en, flag, p.port_levels(pi, m, 0)));
+        }
         p
     }
 
@@ -1130,6 +1142,31 @@ impl Periph {
     }
     pub(crate) fn crcq_write(&mut self, k: u8, v: u8, now: u64, m: &mut DataMem) {
         if let Some(c) = &mut self.crcq { c.write(k, v, now, m); }
+        self.invalidate();
+    }
+
+    fn scanner_trigger(&self, m: &DataMem, now: u64) -> Option<bool> {
+        match self.crcq.as_ref()?.trigger_select(m) {
+            0 => Some(self.board.time_ns(now) as u64 % 32_258 < 16_129),
+            2 => self.t0.as_ref().map(|t| m.mem[t.c0] & 0x20 != 0),
+            8..=11 => self.clcs.get((self.crcq.as_ref()?.trigger_select(m) - 8) as usize).map(|c| c.out),
+            _ => None,
+        }
+    }
+    pub(crate) fn scanner_active(&self, m: &DataMem) -> bool {
+        self.crcq.as_ref().is_some_and(|c| c.scan_active(m))
+    }
+    pub(crate) fn scanner_request(&mut self, m: &mut DataMem, now: u64) -> Option<bool> {
+        let trigger = self.scanner_trigger(m, now);
+        self.crcq.as_mut()?.scan_request(m, trigger, &mut self.notes)
+    }
+    pub(crate) fn scanner_cycle(&mut self, m: &mut DataMem, prog: &[u8], now: u64) {
+        let trigger = self.scanner_trigger(m, now);
+        let fetch = self.crcq.as_ref().and_then(|c| c.scan_fetch(m, trigger));
+        if let Some((address, eeprom)) = fetch {
+            let value = if eeprom { self.dma_eeprom(address) } else { prog.get(address as usize).copied().unwrap_or(0xFF) };
+            if let Some(c) = &mut self.crcq { c.scan_byte(value, m); }
+        }
         self.invalidate();
     }
 
@@ -1377,7 +1414,7 @@ impl Periph {
             at(s.tick / 4);
         }
         if let Some(w) = &self.wdt {
-            let (c0, c1) = (m.mem[w.con0], m.mem[w.con1]);
+            let (c0, c1) = (m.mem[w.con0], w.con1_value(&m.mem));
             if w.on(c0) {
                 at(if w.was_on { w.deadline(c0, c1) } else { soon });
             }
@@ -1448,7 +1485,7 @@ impl Periph {
     /// Edges of the pins on the interrupt-on-change registers and the INTx pins, from `ioc.scan` to `now`: the flags are set
     /// (also in Sleep), IOCIF follows the IOCxF registers `[A101]`.
     fn ioc_scan(&mut self, m: &mut DataMem, now: u64) {
-        if self.ioc.ports.is_empty() && self.ioc.ints.is_empty() {
+        if self.ioc.ports.is_empty() && self.ioc.ints.is_empty() && self.ioc.k22.is_none() {
             return;
         }
         let from = self.ioc.scan;
@@ -1457,6 +1494,12 @@ impl Periph {
         times.sort_unstable();
         times.dedup();
         for t in times {
+            if let Some((pi, en, flag, baseline)) = self.ioc.k22 {
+                let value = self.port_levels_at(pi, m, t);
+                if (value ^ baseline) & m.mem[en] & m.mem[self.ports[pi].tris] != 0 {
+                    flag.set(m); self.raised(t);
+                }
+            }
             for k in 0..self.ioc.ports.len() {
                 let (pi, f, n, pp) = self.ioc.ports[k];
                 let (old, new) = (self.port_levels_at(pi, m, t - 1), self.port_levels_at(pi, m, t));
@@ -1474,6 +1517,11 @@ impl Periph {
                     flag.set(m);
                     self.raised(t);
                 }
+            }
+        }
+        if let Some((pi, en, flag, baseline)) = self.ioc.k22 {
+            if (self.port_levels(pi, m, now) ^ baseline) & m.mem[en] & m.mem[self.ports[pi].tris] != 0 {
+                flag.set_in(&mut m.mem);
             }
         }
         if let Some(fl) = self.ioc.iocif {
@@ -1603,8 +1651,27 @@ impl Periph {
         true
     }
 
+    pub(crate) fn k22_wdt_clock_clear(&mut self, now: u64) {
+        if let Some(w) = &mut self.wdt {
+            if w.k22_ps.is_some() { w.start = now; }
+        }
+    }
+
+    pub fn wdt_config_k22(&mut self, enable: u8, ps: u8) {
+        if let Some(w) = &mut self.wdt {
+            if w.k22_ps.is_some() {
+                w.k22_ps = Some(ps & 15);
+                // K22 01 = awake-only, 10 = software; shared WWDT uses the reverse.
+                w.wdte = [0, 2, 1, 3][usize::from(enable & 3)];
+            }
+        }
+    }
+
     /// After a reset that rebuilt the peripherals: what the run has observed so far (logs, notes) and the board stay.
-    pub fn carry_over(&mut self, old: Periph) {
+    pub fn carry_over(&mut self, old: Periph, keep_ioc: bool) {
+        if keep_ioc {
+            if let (Some(new), Some(previous)) = (&mut self.ioc.k22, old.ioc.k22) { new.3 = previous.3; }
+        }
         self.tx = old.tx;
         self.spi_tx = old.spi_tx;
         self.i2c_log = old.i2c_log;
@@ -1687,7 +1754,7 @@ impl Periph {
         self.wdt_fosc(now);
         let sleeping = self.sleeping;
         let Some(w) = &mut self.wdt else { return };
-        let (c0, c1) = (m.mem[w.con0], m.mem[w.con1]);
+        let (c0, c1) = (m.mem[w.con0], w.con1_value(&m.mem));
         let on = if sleeping { w.on_sleep(c0) } else { w.on(c0) };
         if !on || !w.was_on {
             (w.start, w.armed) = (now, false);
@@ -1840,7 +1907,7 @@ impl Periph {
     /// Cycle of the watchdog time-out while asleep, if it counts in Sleep.
     pub fn wdt_sleep_deadline(&self, m: &DataMem) -> Option<u64> {
         let w = self.wdt.as_ref()?;
-        let (c0, c1) = (m.mem[w.con0], m.mem[w.con1]);
+        let (c0, c1) = (m.mem[w.con0], w.con1_value(&m.mem));
         w.on_sleep(c0).then(|| w.deadline(c0, c1))
     }
 
@@ -1848,7 +1915,7 @@ impl Periph {
     pub fn clrwdt(&mut self, m: &DataMem, now: u64) {
         self.wdt_fosc(now);
         let Some(w) = &mut self.wdt else { return };
-        let (c0, c1) = (m.mem[w.con0], m.mem[w.con1]);
+        let (c0, c1) = (m.mem[w.con0], w.con1_value(&m.mem));
         if !w.on(c0) {
             return;
         }
@@ -1862,7 +1929,7 @@ impl Periph {
     /// Value of WDTPSL / WDTPSH / WDTTMR (`sub`) at cycle `now`.
     fn wdt_value(&self, sub: u8, m: &DataMem, now: u64) -> u8 {
         let w = self.wdt.as_ref().unwrap();
-        let (c0, c1) = (m.mem[w.con0], m.mem[w.con1]);
+        let (c0, c1) = (m.mem[w.con0], w.con1_value(&m.mem));
         let psc = (w.clocks(now, c1) & ((1u64 << Wdt::n(c0)) - 1)) as u32;
         match sub {
             wdt::PSL => psc as u8,
@@ -1881,8 +1948,8 @@ impl Periph {
             }
             wdt::CON1 => {
                 let keep = if w.cs_fixed { 0x70 } else { 0 } | if w.win_fixed { 0x07 } else { 0 };
-                m.mem[w.con1] = v & !keep | m.mem[w.con1] & keep;
-                if m.mem[w.con1] >> 4 & 7 > 1 {
+                m.mem[w.con1] = v & !keep | w.con1_value(&m.mem) & keep;
+                if w.con1_value(&m.mem) >> 4 & 7 > 1 {
                     self.notes.insert("WDTCS reserved value: the watchdog runs from LFINTOSC".to_string());
                 }
             }
@@ -2820,6 +2887,11 @@ impl Periph {
         match k {
             PORT0..PORT_END => {
                 let v = self.port_levels(usize::from(k - PORT0), m, now);
+                if !self.suppress_ioc_latch {
+                    if let Some((pi, _, _, baseline)) = &mut self.ioc.k22 {
+                        if *pi == usize::from(k - PORT0) { *baseline = v; }
+                    }
+                }
                 m.mem[self.ports[usize::from(k - PORT0)].port] = v;
                 v
             }
@@ -2960,6 +3032,12 @@ impl Periph {
                 let p = &self.ports[usize::from(k - PORT0)];
                 m.mem[p.lat] = v;
                 m.mem[p.port] = v;
+                if !self.suppress_ioc_latch {
+                    let pins = self.port_levels(usize::from(k - PORT0), m, now);
+                    if let Some((pi, _, _, baseline)) = &mut self.ioc.k22 {
+                        if *pi == usize::from(k - PORT0) { *baseline = pins; }
+                    }
+                }
             }
             FVR0 => {
                 let a = self.fvr.unwrap();

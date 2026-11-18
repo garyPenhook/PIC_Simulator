@@ -71,3 +71,11 @@ for l in "led heartbeat (RB0, active high): ON, on 23999990 of 40000000 cycles, 
     echo "$out" | grep -qF "$l" || { echo "FAIL blink_q10: missing '$l'"; echo "$out"; exit 1; }
 done
 echo "PASS blink_q10"
+
+cp tests/sim/dma_q41.bas "$w/"
+"$BASIL" --keep-vars "$w/dma_q41.bas" >/dev/null
+out=$(./target/release/basil-sim "$w/dma_q41.hex" --device 18F16Q41 --dump DNATIVE_STARTED,DNATIVE_DONE,DNATIVE_OK 2>/dev/null)
+for l in "DNATIVE_STARTED = 1 " "DNATIVE_DONE = 1 " "DNATIVE_OK = 1 "; do
+    echo "$out" | grep -q "^$l" || { echo "FAIL dma_q41: missing '$l'"; echo "$out"; exit 1; }
+done
+echo "PASS dma_q41"

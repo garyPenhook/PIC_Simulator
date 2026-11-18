@@ -1,5 +1,5 @@
 //! Q41 16-bit PWM, DS40002214G ch.30 pp.441-465. One two-output slice per module.
-//! FOSC clock, prescale/postscale, buffered PR/P1/P2, LD, left/right alignment and
+//! FOSC clock, prescale/postscale, buffered PR/P1/P2, LD, left/right/center/variable alignment and
 //! pulsed/toggled compare. Other clock/mode/reset/load sources are diagnosed, not guessed.
 use super::{Flag, addr};
 use crate::mem::DataMem;
@@ -23,6 +23,7 @@ pub struct PwmQ {
     seq: bool,
     out: [bool; 2],
     toggle: [bool; 2],
+    variable: bool,
 }
 const NAMES: [&str; 15] = [
     "ERS", "CLK", "LDS", "PRL", "PRH", "CPRE", "PIPOS", "GIR", "GIE", "CON", "S1CFG", "S1P1L", "S1P1H", "S1P2L", "S1P2H",
@@ -55,6 +56,7 @@ impl PwmQ {
             seq: false,
             out: [false; 2],
             toggle: [false; 2],
+            variable: false,
         })
     }
     pub fn output(&self, code: u8) -> Option<bool> {
@@ -99,6 +101,12 @@ impl PwmQ {
             let active = match cfg & 7 {
                 0 => self.count < p,
                 1 => u32::from(self.count) + u32::from(p) > u32::from(self.values[0]),
+                2 => {
+                    let center = u32::from(self.values[0]) + 1;
+                    let p = u32::from(p);
+                    p >= center || if self.seq { u32::from(self.count) < p } else { u32::from(self.count) >= center - p }
+                }
+                3 => self.variable,
                 4 => self.count == p,
                 5 => self.toggle[i],
                 _ => false,
@@ -130,6 +138,7 @@ impl PwmQ {
             self.count = 0;
             self.seq = false;
             self.toggle = [false; 2];
+            self.variable = false;
             self.emit(m, 4 * now, [false; 2], events);
             self.group(m);
             return;
@@ -137,12 +146,13 @@ impl PwmQ {
         if !self.on {
             self.load(m);
             self.on = true;
+            self.variable = self.values[1] == 0 && self.values[2] != 0;
             self.emit(m, 4 * now, self.levels(m), events);
         }
         let cfg = m[self.regs[10]];
-        if !matches!(cfg & 7, 0 | 1 | 4 | 5) {
+        if !matches!(cfg & 7, 0..=5) {
             notes.insert(format!(
-                "PWM{} mode {} is not modelled (left/right aligned and compare are)",
+                "PWM{} mode {} is not modelled (aligned and compare are)",
                 self.n,
                 cfg & 7
             ));
@@ -167,6 +177,7 @@ impl PwmQ {
                 continue;
             }
             self.pre = 0;
+            let previous = self.levels(m);
             if self.count == self.values[0] {
                 self.count = 0;
                 self.seq = !self.seq;
@@ -176,17 +187,23 @@ impl PwmQ {
                     m[self.period_flag.addr] |= self.period_flag.mask;
                     if let Some(q) = requests { q.push((self.period_flag.addr, self.period_flag.mask)); }
                 }
-                if m[self.regs[9]] & 4 != 0 {
+                if m[self.regs[9]] & 4 != 0 && (cfg & 7 != 2 || !self.seq) {
                     self.load(m);
                 }
             } else {
                 self.count = self.count.wrapping_add(1);
             }
+            if cfg & 7 == 3 {
+                if self.count == self.values[1] { self.variable = true; }
+                if self.count == self.values[2] { self.variable = false; }
+            }
+            let current = self.levels(m);
             for i in 0..2 {
                 let p = self.values[1 + i];
                 let hit = match cfg & 7 {
-                    0 | 4 | 5 => self.count == p,
+                    0 | 3 | 4 | 5 => self.count == p,
                     1 => p != 0 && u32::from(self.count) + u32::from(p) == u32::from(self.values[0]) + 1,
+                    2 => previous[i] != current[i],
                     _ => false,
                 };
                 if hit {
