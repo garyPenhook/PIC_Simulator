@@ -996,3 +996,37 @@ Sources below are the locally supplied DS40002214G. Tests are `tests/q41_dma.rs`
   cycle differences are consistent with this defect; their declared results
   pass under the simulator. Reproduce with `tools/probe.py`, a PIC18-Q DFP
   override, and the probe's dummy define as recorded in the regression report.
+
+## Q10 full-snapshot differential (2026-11-18)
+
+`scripts/gpr_snapshot.py` compares every general-purpose RAM byte listed in the device file (3615 on the 18F27Q10), not only
+declared results, after running each program to `__halt` in both engines. Results and classification: `MDB-DIFFERENTIAL-2026-11-18.md`.
+
+* D-SIM-15 (extended): the cycle differences of `lib_spi_pins` (+128) and `lib_pwm_pins` (+528) are also the computed-PCL
+  flush cycle. `lib_pwm_pins` executes `addwf PCL,f` exactly 528 times in the sim (`--trace`), its whole difference; a
+  single `SpiInit` with a run-time pin differs by 1 cycle (`tests/exec` copies in the report), with a constant pin by 0.
+* D-SIM-16: after `CLRF T0CON0`, MDB keeps a Timer0 prescaler count from the earlier run, so a 16-bit Timer0 restarted at
+  1:1 counts one more in its first cycles. The sim clears the prescaler on a write to TMR0L, T0CON0 or T0CON1 (DS40002043F
+  19.2.4 p.297), all of which `Timer0Start16` does. `tests/probe/t0_read_phase.S` (`PRE` = NOPs spent in an earlier 1:2 run
+  before the stop; `READ=2 NOPS=0`): the byte read at 20h is 2 in the sim for every PRE; MDB gives 2, 3, 2, 3, 3 for PRE = 0, 1, 2, 3, 5
+  (an odd PRE leaves an odd prescaler count). Same family as D-SIM-1; it makes `exec/lib_timer` `LT_A` 2 against 3
+  (4 against 5 at `-O0`) with identical cycle counts, the only snapshot difference at equal cycles. (`tools/probe.py`
+  compares the cycle count at `done` too, which does not stop on this PIC18 probe; read the 20h byte only.)
+* D-SIM-17: MDB's EUSART transmitter takes about 1.8 times the data sheet's character time. The data sheet gives one Start
+  bit, eight data bits and one Stop bit, each 1/baud (DS40002043F 29.1.1.1 p.504), 10 bit times; `SerialInit` then
+  `SerialWriteByte` n times and `SerialFlush` at 64 MHz give, sim against MDB: 115200 baud 1 byte 1419 / 2529, 2 bytes 2810 / 5033,
+  3 bytes 4202 / 7535; 9600 baud 1 byte 16699 / 30034, 2 bytes 33372 / 60042. The sim's step per byte is 10 bit times;
+  MDB's is about 18. This is the whole cycle difference of `lib_serial` and `serial_word_digits`. The cause in MDB is not known.
+* D-SIM-18 (open): on the Q10 one ADC conversion (`ADCON2` = A0h | ADCS 31, FOSC/64, polled `GO`) takes 289 cycles in the sim
+  and 247 in MDB, 42 less (a repeated `AdcRead(13)`; the first call, which also selects the channel, differs by 84).
+  This is the opposite sign to D-SIM-12 (K22). `lib_adc` and `lib_adin` differ by exactly this. Not yet checked against the
+  Q10 data sheet's conversion-time table, so it is not known which engine is right.
+* D-SIM-19: with `RSTOSC = HFINTOSC_64MHZ` MDB's `SysClockHz` returns 0 (the `lib_system` test comment says MDB leaves the oscillator
+  registers at 0 after reset; not re-measured here), the sim returns 64 000 000 because it loads them from the configuration
+  (commit ec40006). The data sheet's reset-value text for these registers was not re-read for this entry.
+  `lib_system` differs in `SysClockHz`'s result bytes (GPR 16h-18h at `-O0`) and by 128 cycles for this reason. Its declared
+  results do not include the value, the test's own comment on this ("the simulator does not load the oscillator registers") is out of date.
+* MDB does not complete the library's MSSP, oscillator-ready and RTCC/I2C waits, so its programs end by timeout: `lib_spi` has
+  `SpiStatus` 1 (timeout) in MDB and 0 in the sim, and the cycle counts of `lib_spi`, `lib_i2c`, `lib_aht30`, `lib_rtcc`, `lib_intosc`
+  and `lib_intosc_div` are millions in MDB against hundreds or thousands in the sim (D-SIM-14 covers the oscillator-ready bits).
+
