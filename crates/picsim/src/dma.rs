@@ -1,8 +1,7 @@
 //! Q41 DMA (DS40002214G ch.16, pp.246-282).
 //! Four independent banks, two bus phases per byte, message reload, software start/stop,
-//! peripheral start/abort requests and completion/overrun flags. Arbitration currently grants
-//! DMA ahead of the CPU, lowest channel first; programmable priorities and DMA-only mirrors
-//! are not modelled. DMA is paused in Sleep. Zero sizes wrap as 12-bit counters.
+//! peripheral start/abort requests and completion/overrun flags. The system arbiter honors
+//! CPU/channel priorities and PRLOCK; DMA-only mirrors are not modelled. DMA is paused in Sleep. Zero sizes wrap as 12-bit counters.
 use crate::mem::{DataMem, Special};
 use devdesc::Device;
 
@@ -20,6 +19,10 @@ pub(crate) struct Dma {
     masks: [u8; 23],
     pir: Vec<usize>,
     md: [Option<(usize, u8)>; 4],
+    pub lock: usize,
+    priorities: [usize; 6], // MAIN, ISR, DMA1..4
+    key: u8,
+    locked_once: bool,
 }
 fn get(b: &[u8; 23], a: usize, len: usize) -> u32 {
     (0..len).fold(0, |v, i| v | u32::from(b[a + i]) << (8 * i))
@@ -40,6 +43,12 @@ impl Dma {
         }
         m.special[selector] = Special::Dma(SELECT);
         m.dma_requests = Some(Vec::new());
+        let lock = dev.find_sfr("PRLOCK")?.addr as usize;
+        let priorities = ["MAINPR", "ISRPR", "DMA1PR", "DMA2PR", "DMA3PR", "DMA4PR"]
+            .map(|n| dev.find_sfr(n).unwrap().addr as usize);
+        for a in [lock].into_iter().chain(priorities).chain(dev.find_sfr("SCANPR").map(|s| s.addr as usize)) {
+            m.special[a] = Special::Arbiter;
+        }
         let md = std::array::from_fn(|i| {
             dev.sfr.iter().find_map(|s| {
                 s.fields
@@ -54,7 +63,21 @@ impl Dma {
             masks,
             pir: (0..11).map(|i| dev.find_sfr(&format!("PIR{i}")).unwrap().addr as usize).collect(),
             md,
+            lock, priorities, key: 0, locked_once: false,
         })
+    }
+    pub fn priority_write(&mut self, a: usize, v: u8, one_way: bool, m: &mut DataMem) {
+        if a == self.lock {
+            let armed = self.key == 2;
+            self.key = match (self.key, v) { (_, 0x55) => 1, (1, 0xAA) => 2, _ => 0 };
+            if armed && v <= 1 && !(one_way && self.locked_once && v == 0) {
+                m.mem[a] = v;
+                self.locked_once |= v == 1;
+            }
+        } else {
+            self.key = 0;
+            if m.mem[self.lock] & 1 == 0 { m.mem[a] = v & 7; }
+        }
     }
     pub fn enabled(&self) -> bool {
         self.bank.iter().any(|b| b[CON] & 0x80 != 0)
@@ -108,7 +131,7 @@ impl Dma {
         }
     }
     /// Returns (channel, write phase, source memory region, address, buffer).
-    pub fn next(&mut self, m: &mut DataMem) -> Option<(usize, bool, u8, u32, u8)> {
+    pub fn next(&mut self, m: &mut DataMem, isr: bool, free: Option<(bool, bool)>) -> Option<(usize, bool, u8, u32, u8)> {
         let requests = m.dma_requests.as_mut().map(std::mem::take).unwrap_or_default();
         let request = |source: u8| {
             if (0x58..=0x5D).contains(&source) {
@@ -160,13 +183,22 @@ impl Dma {
                 }
             }
         }
-        for i in 0..4 {
+        if m.mem[self.lock] & 1 == 0 { return None; }
+        let cpu_priority = m.mem[self.priorities[usize::from(isr)]] & 7;
+        let mut order = [0, 1, 2, 3];
+        order.sort_by_key(|&i| (m.mem[self.priorities[i + 2]] & 7, i));
+        for i in order {
             if self.md[i].is_some_and(|(a, mask)| m.mem[a] & mask != 0) {
                 continue;
             }
             let b = &self.bank[i];
             if b[CON] & 0xA0 == 0xA0 {
                 let write = b[CON] & 1 != 0;
+                let region = (b[MODE] >> 3) & 3;
+                let higher = m.mem[self.priorities[i + 2]] & 7 < cpu_priority;
+                // Equal priorities favor ISR, MAIN, then channel number (Table 7-1).
+                let available = free.is_some_and(|(data, flash)| if write || region == 0 { data } else if region == 1 { flash } else { true });
+                if free.is_none() && !higher || free.is_some() && !available { continue; }
                 return Some((i, write, (b[MODE] >> 3) & 3, if write { get(b, 3, 2) } else { get(b, 11, 3) }, b[0]));
             }
         }

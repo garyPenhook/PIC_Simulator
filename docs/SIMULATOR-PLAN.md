@@ -150,6 +150,11 @@ yet), PIC16 single vector with automatic context save. Vector addresses from `[v
 
 ## Status
 
+* 2026-11-17: Q41 DMA now honors MAIN/ISR/channel priorities, PRLOCK/PR1WAY and supported CPU
+  bus bubbles (A152). PIC16 standalone 10-bit PWM and the 171xx/132xx 16-bit PWM1/2 are modelled
+  (A153/A154), including PPS, buffering and Sleep. The older milestone notes below describe the
+  original implementation sequence; `MANUAL.md` and `FACTS-SIM.md` give current coverage/limits.
+
 * S0 done (devdesc 0.2, regenerated devices).
 * S1 done for the core: `crates/picsim` (hex loader, bus, `Pic18`, disassembler), `basil-sim` CLI, `pic-sim`,
   `exec-test.py --engine sim|mdb|both` (DMA programs are skipped under `sim` until S5). Results and the rules

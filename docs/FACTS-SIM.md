@@ -342,7 +342,7 @@ lacks keeps the register's unprogrammed default (0xFF). `basil-sim --config` pri
   selection register is ignored (Register 18-3), a write to PPSLOCK without the sequence is ignored. The data sheets do not say what breaks a sequence; the
   model counts consecutive writes to PPSLOCK only (55h, AAh, the bit write; 55h again restarts; anything else starts over) and does not look at other instructions
   between them. PPS1WAY = 1 (the unprogrammed value): PPSLOCKED cannot be cleared once set, until a Reset (18.5.1 p.204, DS40001839E 13.5). PPSLOCKED is cleared by every
-  Reset (18.7 p.204; DS40001839E Register 13-3 gives 0/0). Selections stay across a non-POR Reset (the MCLR column of the description). An unsupported RxyPPS source is noted and the pin shows its latch. CCP/PWM, CLB and asynchronous EUSART sources drive pins (`[A128]`, `[A137]`, `[A147]`); CWG, comparator and CLC sources remain unsupported. Code 0 is LATxy in DS40002343F Table 18-2 and the reset value on every part, though DS40001839E Register 13-2 calls it reserved.
+  Reset (18.7 p.204; DS40001839E Register 13-3 gives 0/0). Selections stay across a non-POR Reset (the MCLR column of the description). An unsupported RxyPPS source is noted and the pin shows its latch. CCP/PWM, CLB and asynchronous EUSART sources drive pins (`[A128]`, `[A137]`, `[A147]`, `[A153]`); CWG, comparator and CLC sources remain unsupported. Code 0 is LATxy in DS40002343F Table 18-2 and the reset value on every part, though DS40001839E Register 13-2 calls it reserved.
 * D-SIM-8: MDB does not model the PPS lock (`tests/probe/pps_lock.S`, 16F17146, `--engine` compare): a write to a PPS selection register works while
   PPSLOCKED = 1; PPS1WAY is ignored (the unlock after a lock succeeds with the bit set); PPSLOCKED is set by 55h, any value, AAh, BSF and by 55h, MOVWF to another
   register, AAh, BSF, and by AAh, 55h, AAh, BSF; and 55h, AAh, MOVWF 1, BCF, BSF leaves it clear. Only a write of 1 without any sequence is ignored, as in the model.
@@ -816,9 +816,8 @@ Sources below are the locally supplied DS40002214G. Tests are `tests/q41_dma.rs`
   Flag::set records hardware request pulses independently of whether the PIR bit was already set;
   IOC summary/status refreshes do not create extra pulses. RX/TX requests sample UART/SPI/I2C status.
   Table 16-6 pp.279–280 supplies vector numbers, including PWM parameter requests 58h–5Dh.
-  **Assumptions/limits:** DMA always wins over the CPU, DMA1 before DMA2 before DMA3 before DMA4;
-  one bus phase costs one instruction cycle and CPU instructions do not retire during it. Programmable
-  priority, CPU bus bubbles and DMA-only mirrors (Fig.16-2 pp.249–250) are unmodelled. A stop takes
+  Arbitration follows `[A152]`. One bus phase costs one instruction cycle, shared with the CPU where
+  the required bus is free. DMA-only mirrors (Fig.16-2 pp.249–250) remain unmodelled. A stop takes
   effect at the next simulated phase rather than reconstructing the hardware extra-cycle pipeline.
   Zero message size wraps a 12-bit counter. Unimplemented flash/EEPROM reads return FFh. DMA pauses
   with Fosc in Sleep, runs in Idle, and resets with the part. Transfers into SFRs use CPU read/write
@@ -857,3 +856,47 @@ Sources below are the locally supplied DS40002214G. Tests are `tests/q41_dma.rs`
   instruction cycle, paused with GO or Fosc stopped; timing is not measured. PMD/EN disable discards
   pending data. The scanner is still unmodelled and its register accesses remain in the unmodelled
   report. No scanner, arbitration or trigger fidelity is claimed.
+
+
+## Q41 priority arbitration and PIC16 standalone PWM
+
+* `[A152]` System arbiter (`dma.rs`, `pic18.rs`; DS40002214G 7.1–7.2 pp.25–27,
+  7.7.1–7.7.5 pp.35–39, CONFIG2 PR1WAY p.45; ch.16): priorities 0–7, lower wins.
+  Ties favor ISR, MAIN, DMA1, DMA2, DMA3, DMA4, scanner (Table 7-1). MAINPR/ISRPR
+  select the CPU priority according to interrupt context. PRLOCK starts unlocked and DMA
+  cannot access memory until locked. Writes 55h, AAh, then 0/1 change PRLOCKED; priority
+  writes while locked are ignored. PR1WAY prevents unlocking after the first lock until reset.
+  **Scheduling assumptions:** high-priority DMA occupies a whole instruction cycle per
+  read/write phase; interrupts are checked after that phase. Low-priority DMA shares unused
+  data-bus cycles of literal/control instructions; taken branch/skip flush cycles free flash
+  and data buses. EEPROM reads can share CPU cycles. MOVFF/MOVFFL/LFSR/TBLRD/TBLWT
+  reserve their multi-cycle buses conservatively; arbitrary file writes to PCL are not classified
+  as branch bubbles. Idle frees all buses, Sleep stops the DMA clock. CPU instructions remain
+  atomic: shared DMA actions commit at the instruction boundary, before peripheral sync and
+  interrupt dispatch. No Q-clock bus ordering, scanner contention or NVM-busy arbitration is
+  claimed. DMA-only register mirrors and DMA control-register cross-access remain unmodelled.
+  Tests: `q41_dma.rs` covers lock/one-way/reset, competing channels and ties, CPU progress,
+  flash/data bubbles, ISR preemption and Sleep/Idle.
+
+* `[A153]` PIC16 standalone 10-bit PWM (`periph/pwm16.rs`, `pic16.rs`): DS40002519D
+  ch.26–27 pp.285–295; DS40002195E ch.23 pp.209–216; DS40001839E ch.23 and ch.30;
+  DS40002325C PWM chapter. EN/POL/OUT are bits 7/4/5, OUT is read only. Duty DCH:DCL[7:6]
+  latches at timer rollover (independent of interrupt postscale), period is 4*(PR+1)*Tosc*prescale,
+  pulse width duty*Tosc*prescale. Unlike the CCP model's MDB-specific `[A128]`, no extra count
+  is added to the pulse. PWMTMRS fields PnTSEL choose Timer2/4/6 (01/10/11); absent selector
+  means Timer2; 00 selects none. PPS codes: 131xx PWM1/2 = 2Ch/2Dh (Table 18-2 p.187);
+  152xx PWM3/4 = 03h/04h; 180x6 PWM3/4/5 = 0Bh/0Ch/0Dh; 183xx PWM5/6 = 02h/03h.
+  **Assumptions/limits:** pins and OUT sample instruction boundaries; fractional-cycle falling
+  edges round up. POL affects OUT and the pin; EN/PMD off forces low. Timer stop and Sleep
+  freeze the remaining pulse duration; timer modes other than free-running Fosc/4 hold the
+  waveform with a note. Timer source 00 leaves a held output. No hardware validation claimed.
+
+* `[A154]` PIC16F17126/46 (DS40002343F ch.29 pp.342–366) and PIC16F132xx
+  (DS40002686B PWM chapter) use the shared 16-bit PWM engine (`periph/pwmq.rs`),
+  with rules/limitations `[A150]`. PPS codes 0Bh–0Eh are PWM1P1/P2 then PWM2P1/P2.
+  Period and enabled GIR parameter flags raise native PIC16 interrupts; aggregate PWMxIF
+  follows GIR & GIE. PMD disables/resets internal counters; Sleep parks the FOSC clock and
+  holds output. PIC16 only samples the final output at instruction boundaries, unlike the
+  PIC18 Fosc-tick pin log; sub-cycle pulses are not visible to pin-connected peripherals.
+  Tests `pic16_pwm.rs` cover both output designs, multiple families/modules, buffering,
+  polarity, prescale/postscale, timer choice, flags, interrupt dispatch, PMD, Sleep and reset.

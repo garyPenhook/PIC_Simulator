@@ -42,6 +42,8 @@ pub enum Special {
     CrcQ(u8),
     /// Banked Q41 DMA register (index into the DMA register window).
     Dma(u8),
+    /// Q41 system-arbiter priority and lock registers.
+    Arbiter,
     /// Q41 banked CLC window.
     Clc(u8),
     /// Q41 16-bit PWM instance and register.

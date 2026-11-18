@@ -10,6 +10,7 @@ use std::collections::BTreeSet;
 pub struct PwmQ {
     pub n: u8,
     pub regs: [usize; 15],
+    pub output_base: u8,
     period_flag: Flag,
     group_flag: Flag,
     md: Option<(usize, u8)>,
@@ -41,6 +42,7 @@ impl PwmQ {
         Some(Self {
             n,
             regs,
+            output_base: if dev.device.name.starts_with("PIC16") { 11 } else { 6 },
             period_flag: Flag::find(dev, &format!("PWM{n}PIF"))?,
             group_flag: Flag::find(dev, &format!("PWM{n}IF"))?,
             md,
@@ -55,28 +57,43 @@ impl PwmQ {
             toggle: [false; 2],
         })
     }
-    fn word(&self, m: &DataMem, i: usize) -> u16 {
-        u16::from(m.mem[self.regs[i]]) | u16::from(m.mem[self.regs[i + 1]]) << 8
+    pub fn output(&self, code: u8) -> Option<bool> {
+        (0..2).find(|&i| code == self.output_base + (self.n - 1) * 2 + i as u8).map(|i| self.out[i])
     }
-    fn load(&mut self, m: &mut DataMem) {
+    pub fn flags(&self) -> [Flag; 2] { [self.period_flag, self.group_flag] }
+    pub fn enabled(&self, m: &DataMem) -> bool { self.enabled_regs(&m.mem) }
+    pub fn write(&mut self, sub: u8, v: u8, now: u64, m: &mut DataMem, events: &mut Vec<(u64, u8, bool)>) {
+        let v = v & m.implemented[self.regs[sub as usize]];
+        self.write_regs(sub, v, now, &mut m.mem, events);
+    }
+    pub fn sync(&mut self, m: &mut DataMem, now: u64, asleep: bool, events: &mut Vec<(u64, u8, bool)>, notes: &mut BTreeSet<String>) {
+        self.sync_regs(&mut m.mem, now, asleep, events, notes, &mut m.dma_requests);
+    }
+    pub fn write16(&mut self, sub: u8, v: u8, now: u64, mem: &mut [u8]) {
+        self.write_regs(sub, v, now, mem, &mut Vec::new());
+    }
+    fn word(&self, m: &[u8], i: usize) -> u16 {
+        u16::from(m[self.regs[i]]) | u16::from(m[self.regs[i + 1]]) << 8
+    }
+    fn load(&mut self, m: &mut [u8]) {
         self.values = [self.word(m, 3), self.word(m, 11), self.word(m, 13)];
-        m.mem[self.regs[9]] &= !4;
+        m[self.regs[9]] &= !4;
     }
-    pub fn enabled(&self, m: &DataMem) -> bool {
-        m.mem[self.regs[9]] & 0x80 != 0 && !self.md.is_some_and(|(a, mask)| m.mem[a] & mask != 0)
+    pub fn enabled_regs(&self, m: &[u8]) -> bool {
+        m[self.regs[9]] & 0x80 != 0 && !self.md.is_some_and(|(a, mask)| m[a] & mask != 0)
     }
-    fn emit(&mut self, m: &DataMem, tick: u64, raw: [bool; 2], events: &mut Vec<(u64, u8, bool)>) {
-        let cfg = m.mem[self.regs[10]];
+    fn emit(&mut self, m: &[u8], tick: u64, raw: [bool; 2], events: &mut Vec<(u64, u8, bool)>) {
+        let cfg = m[self.regs[10]];
         for (i, &v) in raw.iter().enumerate() {
             let v = v != (cfg & (0x40 << i) != 0);
             if self.out[i] != v {
                 self.out[i] = v;
-                events.push((tick, 6 + (self.n - 1) * 2 + i as u8, v));
+                events.push((tick, self.output_base + (self.n - 1) * 2 + i as u8, v));
             }
         }
     }
-    fn levels(&self, m: &DataMem) -> [bool; 2] {
-        let cfg = m.mem[self.regs[10]];
+    fn levels(&self, m: &[u8]) -> [bool; 2] {
+        let cfg = m[self.regs[10]];
         std::array::from_fn(|i| {
             let p = self.values[1 + i];
             let active = match cfg & 7 {
@@ -89,23 +106,23 @@ impl PwmQ {
             active && (cfg & 8 == 0 || i == usize::from(self.seq))
         })
     }
-    fn group(&self, m: &mut DataMem) {
-        if m.mem[self.regs[7]] & m.mem[self.regs[8]] & 3 != 0 {
-            self.group_flag.set_in(&mut m.mem);
+    fn group(&self, m: &mut [u8]) {
+        if m[self.regs[7]] & m[self.regs[8]] & 3 != 0 {
+            m[self.group_flag.addr] |= self.group_flag.mask;
         } else {
-            self.group_flag.clear(m);
+            m[self.group_flag.addr] &= !self.group_flag.mask;
         }
     }
-    pub fn write(&mut self, sub: u8, v: u8, now: u64, m: &mut DataMem, events: &mut Vec<(u64, u8, bool)>) {
+    fn write_regs(&mut self, sub: u8, v: u8, now: u64, m: &mut [u8], events: &mut Vec<(u64, u8, bool)>) {
         let a = self.regs[sub as usize];
-        m.mem[a] = v & m.implemented[a];
-        self.sync(m, now, false, events, &mut BTreeSet::new());
+        m[a] = v;
+        self.sync_regs(m, now, false, events, &mut BTreeSet::new(), &mut None);
         self.group(m);
     }
-    pub fn sync(&mut self, m: &mut DataMem, now: u64, asleep: bool, events: &mut Vec<(u64, u8, bool)>, notes: &mut BTreeSet<String>) {
+    pub fn sync_regs(&mut self, m: &mut [u8], now: u64, asleep: bool, events: &mut Vec<(u64, u8, bool)>, notes: &mut BTreeSet<String>, requests: &mut Option<Vec<(usize, u8)>>) {
         let start = self.last;
         self.last = now;
-        let enabled = self.enabled(m);
+        let enabled = self.enabled_regs(m);
         if !enabled {
             self.on = false;
             self.pre = 0;
@@ -122,7 +139,7 @@ impl PwmQ {
             self.on = true;
             self.emit(m, 4 * now, self.levels(m), events);
         }
-        let cfg = m.mem[self.regs[10]];
+        let cfg = m[self.regs[10]];
         if !matches!(cfg & 7, 0 | 1 | 4 | 5) {
             notes.insert(format!(
                 "PWM{} mode {} is not modelled (left/right aligned and compare are)",
@@ -130,14 +147,14 @@ impl PwmQ {
                 cfg & 7
             ));
         }
-        if m.mem[self.regs[0]] != 0 || m.mem[self.regs[2]] != 0 {
+        if m[self.regs[0]] != 0 || m[self.regs[2]] != 0 {
             notes.insert(format!("PWM{} external reset and automatic load sources are not modelled", self.n));
         }
-        if m.mem[self.regs[1]] & 15 != 2 {
+        if m[self.regs[1]] & 15 != 2 {
             notes.insert(format!(
                 "PWM{} clock {} is not modelled (FOSC = 2 is)",
                 self.n,
-                m.mem[self.regs[1]] & 15
+                m[self.regs[1]] & 15
             ));
             return;
         }
@@ -146,7 +163,7 @@ impl PwmQ {
         }
         for tick in (4 * start + 1)..=4 * now {
             self.pre += 1;
-            if self.pre <= u16::from(m.mem[self.regs[5]]) {
+            if self.pre <= u16::from(m[self.regs[5]]) {
                 continue;
             }
             self.pre = 0;
@@ -154,11 +171,12 @@ impl PwmQ {
                 self.count = 0;
                 self.seq = !self.seq;
                 self.post += 1;
-                if self.post > u16::from(m.mem[self.regs[6]]) {
+                if self.post > u16::from(m[self.regs[6]]) {
                     self.post = 0;
-                    self.period_flag.set(m);
+                    m[self.period_flag.addr] |= self.period_flag.mask;
+                    if let Some(q) = requests { q.push((self.period_flag.addr, self.period_flag.mask)); }
                 }
-                if m.mem[self.regs[9]] & 4 != 0 {
+                if m[self.regs[9]] & 4 != 0 {
                     self.load(m);
                 }
             } else {
@@ -172,14 +190,15 @@ impl PwmQ {
                     _ => false,
                 };
                 if hit {
-                    m.mem[self.regs[7]] |= 1 << i;
-                    if m.mem[self.regs[8]] & (1 << i) != 0 {
-                        self.group_flag.set(m);
+                    m[self.regs[7]] |= 1 << i;
+                    if m[self.regs[8]] & (1 << i) != 0 {
+                        m[self.group_flag.addr] |= self.group_flag.mask;
+                        if let Some(q) = requests { q.push((self.group_flag.addr, self.group_flag.mask)); }
                     }
                     if cfg & 7 == 5 {
                         self.toggle[i] = !self.toggle[i];
                     }
-                    if let Some(q) = &mut m.dma_requests {
+                    if let Some(q) = requests {
                         q.push((usize::MAX, 0x58 + (self.n - 1) * 2 + i as u8));
                     }
                 }

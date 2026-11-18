@@ -13,6 +13,7 @@ use crate::log::Log;
 use crate::config::Config;
 use crate::periph::adc::Adc;
 use crate::periph::ccp16::{self, Ccp16};
+use crate::periph::{pwm16::Pwm16, pwmq::PwmQ};
 use crate::periph::clb::{self, Clb};
 use crate::periph::nvm16::Nvm16;
 use crate::periph::uart::{self, Uart};
@@ -322,6 +323,10 @@ pub struct Pic16 {
     wdt_reg: Vec<bool>,
     /// CCP1-CCP4 (`periph/ccp16.rs`, `[A128]`), CCPTMRS(0), and per address the CCPxCON register's module.
     ccps: Vec<Ccp16>,
+    pwms: Vec<Pwm16>,
+    pwm_sleep_last: u64,
+    pwmqs: Vec<PwmQ>,
+    pwm_reg: Vec<Option<(u8, u8)>>, // instance, subregister (10-bit first, then 16-bit)
     ccptmrs: Option<usize>,
     ccp_con: Vec<Option<u8>>,
     /// CCPRxL/H and CCPxCAP: a write first brings the timers to the writing cycle, as a timer register write does.
@@ -499,6 +504,7 @@ impl Pic16 {
             wdt_simple: false,
             wdt_reg: vec![false; MEM],
             ccps: Vec::new(),
+            pwms: Vec::new(), pwm_sleep_last: 0, pwmqs: Vec::new(), pwm_reg: vec![None; MEM],
             ccptmrs: None,
             ccp_con: vec![None; MEM],
             ccp_data: vec![false; MEM],
@@ -847,6 +853,27 @@ impl Pic16 {
         if let Some(a) = p.ccptmrs.filter(|_| !p.ccps.is_empty()) {
             p.core[a] = true;
         }
+        for n in 1..=6 {
+            if let Some(pwm) = Pwm16::find(dev, n) {
+                let i = p.pwms.len() as u8;
+                for (sub, a) in [pwm.con, pwm.dcl, pwm.dch].into_iter().enumerate() {
+                    p.core[a] = true;
+                    p.pwm_reg[a] = Some((i, sub as u8));
+                }
+                if let Some((a, _)) = pwm.selector { p.core[a] = true; p.ccp_data[a] = true; }
+                p.pwms.push(pwm);
+            }
+        }
+        for n in 1..=2 {
+            if let Some(pwm) = PwmQ::find(dev, n) {
+                let i = (p.pwms.len() + p.pwmqs.len()) as u8;
+                for (sub, &a) in pwm.regs.iter().enumerate() {
+                    p.core[a] = true;
+                    p.pwm_reg[a] = Some((i, sub as u8));
+                }
+                p.pwmqs.push(pwm);
+            }
+        }
         // The CLB: PIC16F131xx (CLBPPSCON1-4) or PIC16F132xx (CLBSWOUTH/L, CLBDEBUG0, TRISxyPPS).
         if let (Some(con), Some(sl), Some(sm), Some(sh), Some(su), Some(clk)) =
             (addr("CLBCON"), addr("CLBSWINL"), addr("CLBSWINM"), addr("CLBSWINH"), addr("CLBSWINU"), addr("CLBCLK"))
@@ -1058,6 +1085,7 @@ impl Pic16 {
                 if self.clb_reg[a] {
                     self.sync_clb();
                 }
+                if self.pwm_reg[a].is_some() { self.sync_timers(); }
                 if let Some((i, true)) = self.port_reg[a] {
                     let v = self.port_levels(usize::from(i));
                     self.mem[a] = v;
@@ -1150,6 +1178,19 @@ impl Pic16 {
                     self.write_pps(a, v);
                 } else if self.tmr_reg[a] {
                     self.write_tmr(a, v & self.implemented[a]);
+                } else if let Some((i, sub)) = self.pwm_reg[a] {
+                    self.sync_timers();
+                    let v = v & self.implemented[a];
+                    if usize::from(i) < self.pwms.len() {
+                        self.mem[a] = if sub == 0 { v & !0x20 | self.mem[a] & 0x20 } else { v };
+                        self.pwms[usize::from(i)].update(&mut self.mem);
+                    } else {
+                        let k = usize::from(i) - self.pwms.len();
+                        let flags = self.pwmqs[k].flags();
+                        let before = flags.map(|f| self.mem[f.addr] & f.mask != 0);
+                        self.pwmqs[k].write16(sub, v, self.cycles, &mut self.mem);
+                        self.pwm_flags_after(flags, before);
+                    }
                 } else if let Some(ci) = self.ccp_con[a] {
                     self.write_ccp_con(usize::from(ci), a, v);
                 } else if self.a_fvr == Some(a) {
@@ -1243,6 +1284,8 @@ impl Pic16 {
                 }
             }
             let level = self.ccps.iter().find(|c| code != 0 && c.code == code).map(|c| c.out)
+                .or_else(|| self.pwms.iter().find(|p| p.code == code).map(|p| p.output(&self.mem)))
+                .or_else(|| self.pwmqs.iter().find_map(|p| p.output(code)))
                 .or_else(|| self.clb_pin_level(code))
                 .or_else(|| self.uart_pins.iter().enumerate().find(|(_, p)| p.1 != 0 && p.1 == code)
                     .and_then(|(k, _)| self.uarts[k].tx_level(&self.mem, t).map(|_| true)));
@@ -1562,7 +1605,7 @@ impl Pic16 {
         }
         let v = v & self.implemented[a];
         self.mem[a] = v;
-        if v != 0 && self.pps_out.iter().any(|o| o.0 == a) && !self.ccps.iter().any(|c| c.code == v) && self.clb_pin_level(v).is_none() && !self.uart_pins.iter().any(|p| p.1 != 0 && p.1 == v) {
+        if v != 0 && self.pps_out.iter().any(|o| o.0 == a) && !self.ccps.iter().any(|c| c.code == v) && !self.pwms.iter().any(|p| p.code == v) && !self.pwmqs.iter().any(|p| p.output(v).is_some()) && self.clb_pin_level(v).is_none() && !self.uart_pins.iter().any(|p| p.1 != 0 && p.1 == v) {
             self.notes.insert("this RxyPPS output source is not modelled on PIC16 parts; the pin shows its latch".into());
         }
     }
@@ -1657,6 +1700,7 @@ impl Pic16 {
         self.sync_adc();
         self.sync_nvm();
         self.sync_clb();
+        self.sync_pwmqs();
         self.sync_t0();
         for i in 0..self.t1.len() {
             self.sync_t1(i);
@@ -1665,6 +1709,22 @@ impl Pic16 {
             self.sync_t2(i);
         }
         self.publish_pins();
+    }
+
+    fn pwm_flags_after(&mut self, flags: [crate::periph::Flag; 2], before: [bool; 2]) {
+        let rose = std::array::from_fn::<_, 2, _>(|i| !before[i] && self.mem[flags[i].addr] & flags[i].mask != 0);
+        for (f, new) in flags.into_iter().zip(rose) { if new { self.mem[f.addr] &= !f.mask; } }
+        for (f, new) in flags.into_iter().zip(rose) { if new { self.raise_flag((f.addr, f.mask)); } }
+    }
+
+    fn sync_pwmqs(&mut self) {
+        for i in 0..self.pwmqs.len() {
+            let flags = self.pwmqs[i].flags();
+            let before = flags.map(|f| self.mem[f.addr] & f.mask != 0);
+            self.pwmqs[i].sync_regs(&mut self.mem, self.cycles, self.sleeping, &mut Vec::new(), &mut self.notes, &mut None);
+            self.pwm_flags_after(flags, before);
+        }
+        for pwm in &mut self.pwms { pwm.update(&mut self.mem); }
     }
 
     /// Bring the timers whose flags land before a PIRn access in the same cycle to the current cycle: Timer1/3/5 and
@@ -1676,6 +1736,7 @@ impl Pic16 {
         self.sync_adc();
         self.sync_nvm();
         self.sync_clb();
+        self.sync_pwmqs();
         for i in 0..self.t1.len() {
             self.sync_t1(i);
         }
@@ -1965,6 +2026,13 @@ impl Pic16 {
         for t in &mut self.t2 {
             t.last = t.last.max(now);
         }
+        self.sync_pwmqs();
+        for pwm in &mut self.pwms {
+            // park_timers can run repeatedly; Timer2's previous boundary was advanced above,
+            // so the separate scan marker tracks only this sleep interval's new cycles.
+            if let Some(q) = pwm.clear_at.as_mut() { *q += now.saturating_sub(self.pwm_sleep_last.max(self.sleep_at)); }
+        }
+        self.pwm_sleep_last = now;
         // no capture edges are looked for in Sleep, and a PWM pulse that was running goes on when the part wakes: the pin keeps
         // its level and Timer2 does not count (27.4.7 p.334)
         for c in &mut self.ccps {
@@ -2290,12 +2358,14 @@ impl Pic16 {
         // a CCP in PWM mode that uses this timer
         let tn = self.t2[i].n;
         let pwm_user = self.ccps.iter().any(|c| c.en(&self.mem) && c.mode(&self.mem) >= 12 && ccp16::timer_of(self.ccptmrs, &self.mem, c.n, true) == tn);
+        let standalone = self.pwms.iter().any(|p| p.enabled(&self.mem) && p.timer(&self.mem) == tn);
         let t = &mut self.t2[i];
         let dt = now.saturating_sub(t.last);
         t.last = t.last.max(now); // one cycle ahead just after TMR2ON is set (`[A110]`)
         let con = self.mem[t.con];
         let mut raised = false;
         let mut pwm: Option<(Vec<u64>, u8, u32)> = None;
+        let mut standalone_periods = None;
         // (on, clock source, prescaler shift, OUTPS): T2CON of the newer parts, or the PIC16F183xx's (Fosc/4 only)
         let (on, cs, sh, outps) = match t.clk {
             Some(c) => (con & 0x80 != 0, self.mem[c] & 15, u32::from((con >> 4) & 7), con & 15),
@@ -2315,6 +2385,16 @@ impl Pic16 {
                     pwm = Some((ccp16::period_sets(t.cnt, t.pre, self.mem[t.pr], sh, u64::from(t.clk.is_none()), t.last - dt, t.last), self.mem[t.pr], sh));
                 } else if pwm_user {
                     self.notes.insert(format!("Timer{} is not a free-running Fosc/4 timer: the CCP PWM that uses it does not run", t.n));
+                }
+                if standalone && cs == 1 && mode == 0 {
+                    // True timer rollovers, independent of the interrupt postscaler.
+                    let period = (u64::from(self.mem[t.pr]) + 1) << sh;
+                    let count = (u64::from(t.cnt) << sh) + t.pre;
+                    let first = if t.cnt <= self.mem[t.pr] { period - count } else { ((256 - u64::from(t.cnt) + u64::from(self.mem[t.pr]) + 1) << sh) - t.pre };
+                    let ends = (first..=dt).step_by(period as usize).map(|d| now - dt + d).collect::<Vec<_>>();
+                    standalone_periods = Some((ends, self.mem[t.pr], sh));
+                } else if standalone {
+                    self.notes.insert(format!("Timer{tn} standalone PWM needs free-running Fosc/4; its output holds"));
                 }
                 let total = t.pre + if cs == 2 { 4 * dt } else { dt };
                 t.pre = total & ((1u64 << sh) - 1);
@@ -2354,6 +2434,15 @@ impl Pic16 {
         let f = t.flag;
         if raised {
             self.raise_flag(f);
+        }
+        if let Some((ends, pr, sh)) = standalone_periods {
+            for p in &mut self.pwms {
+                if p.enabled(&self.mem) && p.timer(&self.mem) == tn { p.apply(&mut self.mem, &ends, pr, sh, now); }
+            }
+        } else if dt > 0 {
+            for p in &mut self.pwms {
+                if p.timer(&self.mem) == tn && let Some(q) = p.clear_at.as_mut() { *q += dt; }
+            }
         }
         if let Some((ends, pr, sh)) = pwm {
             self.pwm_apply(i, &ends, pr, sh, now);
@@ -2913,6 +3002,8 @@ impl Pic16 {
             || self.clb.as_ref().is_some_and(|h| self.mem[h.con] & 0x80 != 0)
             || self.uarts.iter().any(Uart::busy)
             || self.mssps.iter().any(Mssp::busy)
+            || self.pwms.iter().any(|p| p.enabled(&self.mem))
+            || self.pwmqs.iter().any(|p| p.enabled_regs(&self.mem))
             || self.adc.as_ref().is_some_and(Adc::busy)
         {
             return soon;

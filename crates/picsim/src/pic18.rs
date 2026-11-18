@@ -495,7 +495,7 @@ impl Pic18 {
                 if self.dma.is_none() { self.notes.insert("DMA access to its own or another DMA's control registers is not modelled".into()); }
                 self.dma.as_ref().map_or(0, |d| d.read(k))
             }
-            Special::Core => self.m.mem[i],
+            Special::Core | Special::Arbiter => self.m.mem[i],
             Special::None | Special::Crc(_) | Special::Sync => {
                 if self.m.is_sfr[i] || self.m.special[i] != Special::None {
                     self.p.catch_up(&mut self.m);
@@ -549,7 +549,7 @@ impl Pic18 {
         }
         let model_reg = self.oscillator.contains(i) || match self.m.special[i] {
             Special::None => self.m.is_sfr[i],
-            Special::Hook(_) | Special::Crc(_) | Special::Dma(_) | Special::Clc(_) | Special::PwmQ(..) | Special::CrcQ(_) | Special::Sync => true,
+            Special::Arbiter | Special::Hook(_) | Special::Crc(_) | Special::Dma(_) | Special::Clc(_) | Special::PwmQ(..) | Special::CrcQ(_) | Special::Sync => true,
             Special::Core | Special::Pcl | Special::Tos(_) | Special::Indirect(..) => false,
         };
         if model_reg {
@@ -579,6 +579,9 @@ impl Pic18 {
             Special::PwmQ(i, k) => self.p.pwmq_write(i, k, v, &mut self.m, self.cycles),
             Special::CrcQ(k) => self.p.crcq_write(k, v, self.cycles, &mut self.m),
             Special::Clc(k) => self.p.clc_write(k, v, &mut self.m, self.cycles),
+            Special::Arbiter => {
+                if let Some(d) = &mut self.dma { d.priority_write(i, v, self.cfg.get("PR1WAY") != Some(0), &mut self.m); }
+            }
             Special::Dma(k) => {
                 if let Some(d) = &mut self.dma { d.write(k, v, &mut self.m); }
                 else { self.notes.insert("DMA access to its own or another DMA's control registers is not modelled".into()); }
@@ -715,7 +718,7 @@ impl Pic18 {
         n
     }
 
-    /// One DMA bus phase. The initial model grants DMA ahead of the CPU; each read/write costs one cycle.
+    /// One DMA bus phase granted ahead of the CPU; each read/write costs one cycle.
     fn dma_cycle(&mut self) -> Option<u32> {
         let start = self.cycles;
         let mut dma = self.dma.take()?;
@@ -725,32 +728,70 @@ impl Pic18 {
             return None;
         }
         self.p.catch_up(&mut self.m);
-        let action = dma.next(&mut self.m);
+        let free = (self.state == State::Sleeping).then_some((true, true));
+        let action = dma.next(&mut self.m, !self.in_service.is_empty(), free);
         let active = action.is_some();
-        if let Some((channel, write, region, address, value)) = action {
-            if address >= 0x4000 && (write || region == 0) {
-                self.notes.insert("DMA-only register mirrors (4000h and above) are not modelled".into());
-            }
-            if write {
-                self.write(address, value);
-                dma.written(channel, &mut self.m);
-            } else {
-                let value = match region {
-                    0 => self.read(address),
-                    1 => self.prog.get(address as usize).copied().unwrap_or(0xFF),
-                    _ => self.p.dma_eeprom(address),
-                };
-                dma.read_complete(channel, value);
-            }
-        }
+        if let Some(action) = action { self.dma_action(&mut dma, action); }
         self.dma = Some(dma);
         if active {
+            let ic0 = self.m.mem[self.intcon];
             self.cycles += 1;
             self.p.sync(&mut self.m, self.cycles);
             self.p.board_poll(&self.m, self.cycles);
             if let Some(k) = self.mclr_fell().or_else(|| self.p.take_reset()) { self.reset_cond(k); }
+            else {
+                if self.state == State::Sleeping && self.wake_irq() {
+                    let st = self.m.regs.status as usize;
+                    self.m.mem[st] = self.m.mem[st] & !0x20 | 0x40;
+                    self.state = State::Running;
+                    self.p.exit_sleep(self.cycles);
+                }
+                if self.state == State::Running {
+                    self.irq_check(ic0);
+                    if let Some(k) = self.stk_fault.take() { self.reset_cond(k); }
+                }
+            }
         }
         active.then_some((self.cycles - start) as u32)
+    }
+
+    fn dma_action(&mut self, dma: &mut crate::dma::Dma, action: (usize, bool, u8, u32, u8)) {
+        let (channel, write, region, address, value) = action;
+        if address >= 0x4000 && (write || region == 0) {
+            self.notes.insert("DMA-only register mirrors (4000h and above) are not modelled".into());
+        }
+        if write {
+            self.write(address, value);
+            dma.written(channel, &mut self.m);
+        } else {
+            let value = match region {
+                0 => self.read(address),
+                1 => self.prog.get(address as usize).copied().unwrap_or(0xFF),
+                _ => self.p.dma_eeprom(address),
+            };
+            dma.read_complete(channel, value);
+        }
+    }
+
+    /// Reuse otherwise idle buses without extending the instruction. CPU memory operations
+    /// are atomic in this core; DMA side effects are committed at its instruction boundary.
+    fn dma_bubbles(&mut self, w: u16, elapsed: u64, isr: bool) {
+        if self.p.fosc_stopped() || self.mclr_hold { return; }
+        let Some(mut dma) = self.dma.take() else { return };
+        if dma.enabled() {
+            // Literal/control instructions do not use the data bus. MOVFF/LFSR and table
+            // operations reserve their multi-cycle buses; branch flush cycles free both.
+            let data_free = matches!(w, 0x0000..=0x0007 | 0x0010..=0x0014 | 0x0100..=0x01FF | 0x0800..=0x0FFF | 0xD000..=0xE7FF | 0xEC00..=0xEDFF | 0xEF00..=0xFFFF);
+            let branch = matches!(w, 0x0010..=0x0014 | 0x0C00..=0x0CFF | 0xD000..=0xE7FF | 0xEC00..=0xEDFF | 0xEF00..=0xEFFF);
+            let skip = matches!(w, 0x2C00..=0x2FFF | 0x3C00..=0x3FFF | 0x4800..=0x4FFF | 0x6000..=0x67FF | 0xA000..=0xBFFF);
+            for slot in 0..elapsed.min(3) {
+                let flash_free = slot > 0 && (branch || skip);
+                if let Some(action) = dma.next(&mut self.m, isr, Some((data_free || flash_free, flash_free))) {
+                    self.dma_action(&mut dma, action);
+                }
+            }
+        }
+        self.dma = Some(dma);
     }
 
     /// At a routine's first instruction (`entry_watch`): notes FSR1 for the current return-stack level (`entry_sp`). After
@@ -772,6 +813,7 @@ impl Pic18 {
             return self.sleep_step();
         }
         let ic0 = self.m.mem[self.intcon];
+        let was_isr = !self.in_service.is_empty();
         self.p.clear_event();
         let w = self.fetch(self.pc);
         let at = self.pc;
@@ -986,6 +1028,7 @@ impl Pic18 {
             0xE => self.groupe(w),
             _ => {} // 0xFxxx executed alone is a NOP
         }
+        self.dma_bubbles(w, self.cycles - start, was_isr);
         let now = self.cycles;
         if self.lazy {
             self.p.tick(&mut self.m, now);
@@ -1081,7 +1124,7 @@ impl Pic18 {
 
     /// Nothing can end this Sleep: no interrupt is enabled and the watchdog does not count.
     pub fn sleep_dead(&self) -> bool {
-        self.state == State::Sleeping && !self.irq.iter().any(|g| g[0] != 0 && self.m.mem[g[1]] != 0) && self.p.wdt_sleep_deadline(&self.m).is_none()
+        self.state == State::Sleeping && (self.p.fosc_stopped() || !self.dma.as_ref().is_some_and(|d| d.enabled())) && !self.irq.iter().any(|g| g[0] != 0 && self.m.mem[g[1]] != 0) && self.p.wdt_sleep_deadline(&self.m).is_none()
     }
 
     /// One step while asleep: a cycle, or a jump to the watchdog time-out when no interrupt is enabled. Wake-up by the watchdog

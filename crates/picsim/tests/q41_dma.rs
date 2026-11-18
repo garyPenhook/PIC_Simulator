@@ -7,7 +7,30 @@ fn machine(part: &str) -> Machine {
     let d = Device::load(&Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("../../devices/{part}.toml"))).unwrap();
     let mut m = Machine::new(d).unwrap();
     m.cpu.prog[..256].fill(0); // NOPs
+    // Existing transfer tests run with DMA above MAIN/ISR and a valid priority lock.
+    for n in ["DMA1PR", "DMA2PR", "DMA3PR", "DMA4PR"] { w(&mut m, n, 6); }
+    lock(&mut m, true);
     m
+}
+fn lock(m: &mut Machine, locked: bool) {
+    w(m, "PRLOCK", 0x55); w(m, "PRLOCK", 0xAA); w(m, "PRLOCK", u8::from(locked));
+}
+fn raw_machine() -> Machine {
+    let mut m = machine(PARTS[5]);
+    for r in &m.dev.config {
+        if let Some(f) = r.fields.iter().find(|f| f.name == "WDTE") {
+            m.cpu.aux.insert(r.addr, (r.default & !(((1 << f.width) - 1) << f.pos)) as u8);
+        }
+    }
+    m.cpu.reset_cond(ResetKind::Instruction);
+    m
+}
+fn repeatable_lock(m: &mut Machine) {
+    let r = m.dev.config.iter().find(|r| r.fields.iter().any(|f| f.name == "PR1WAY")).unwrap();
+    let f = r.fields.iter().find(|f| f.name == "PR1WAY").unwrap();
+    let mut image = std::collections::BTreeMap::new();
+    image.insert(r.addr, (r.default & !(1 << f.pos)) as u8);
+    m.cpu.cfg = picsim::config::Config::decode(&m.dev.config, &image);
 }
 fn w(m: &mut Machine, n: &str, v: u8) {
     m.cpu.write(m.dev.find_sfr(n).unwrap().addr, v);
@@ -21,6 +44,7 @@ fn pair(m: &mut Machine, name: &str, value: u16) {
 }
 fn setup(m: &mut Machine, channel: u8, source: u16, dest: u16, ss: u16, ds: u16, mode: u8) {
     w(m, "DMASELECT", channel);
+    w(m, "DMAnCON0", 0);
     pair(m, "SSA", source);
     pair(m, "DSA", dest);
     pair(m, "SSZ", ss);
@@ -211,7 +235,7 @@ fn completion_dispatches_q41_vectored_interrupt() {
     w(&mut m, "PIE2", 0x10);
     w(&mut m, "INTCON0", 0x80);
     w(&mut m, "DMAnCON0", 0xA0);
-    steps(&mut m, 3);
+    steps(&mut m, 2);
     assert_eq!(m.cpu.pc, 0x100);
     assert_eq!(m.cpu.in_service, vec![true]);
 }
@@ -233,4 +257,159 @@ fn independent_channels_can_chain_on_completion() {
     w(&mut m, "DMASELECT", 1);
     assert_eq!(r(&mut m, "DMAnCON0"), 0x80);
     assert_eq!(r(&mut m, "PIR6") & 0x30, 0x30);
+}
+
+#[test]
+fn priority_lock_sequence_one_way_and_reset() {
+    let mut m = raw_machine();
+    assert_eq!(r(&mut m, "PRLOCK"), 0);
+    assert_eq!(r(&mut m, "MAINPR"), 7);
+    w(&mut m, "PRLOCK", 1);
+    assert_eq!(r(&mut m, "PRLOCK"), 0, "plain write cannot lock");
+    w(&mut m, "PRLOCK", 0xAA); w(&mut m, "PRLOCK", 1);
+    assert_eq!(r(&mut m, "PRLOCK"), 0, "sequence needs 55 before AA");
+    w(&mut m, "DMA1PR", 2);
+    lock(&mut m, true);
+    w(&mut m, "DMA1PR", 0);
+    w(&mut m, "MAINPR", 0);
+    w(&mut m, "ISRPR", 0);
+    w(&mut m, "SCANPR", 0);
+    assert_eq!(r(&mut m, "DMA1PR"), 2);
+    for n in ["MAINPR", "ISRPR", "SCANPR"] { assert_eq!(r(&mut m, n), 7); }
+    lock(&mut m, false);
+    assert_eq!(r(&mut m, "PRLOCK"), 1, "PR1WAY defaults on");
+    m.cpu.reset_cond(ResetKind::Instruction);
+    assert_eq!(r(&mut m, "PRLOCK"), 0);
+    assert_eq!(r(&mut m, "DMA1PR"), 7);
+    repeatable_lock(&mut m);
+    lock(&mut m, true); lock(&mut m, false);
+    assert_eq!(r(&mut m, "PRLOCK"), 0);
+    w(&mut m, "DMA1PR", 0xFE);
+    assert_eq!(r(&mut m, "DMA1PR"), 6);
+}
+#[test]
+fn unlocked_dma_waits_and_equal_cpu_priority_uses_bubbles() {
+    let mut m = raw_machine();
+    m.cpu.write(0x100, 0xA5);
+    setup(&mut m, 0, 0x100, 0x120, 1, 1, 0x21);
+    w(&mut m, "DMAnCON0", 0xA0);
+    steps(&mut m, 4);
+    assert_eq!(m.cpu.read(0x120), 0);
+    assert_eq!(r(&mut m, "DMAnCON0") & 1, 0);
+    lock(&mut m, true);
+    let pc = m.cpu.pc;
+    steps(&mut m, 2);
+    assert_eq!(m.cpu.read(0x120), 0xA5);
+    assert_eq!(m.cpu.pc, pc + 4, "equal priority favors CPU, NOP frees data bus");
+    assert_eq!(m.cpu.cycles, 6);
+}
+#[test]
+fn lower_dma_waits_for_data_bus_and_program_flash_branch_bubbles() {
+    let mut m = raw_machine();
+    w(&mut m, "MAINPR", 0);
+    lock(&mut m, true);
+    m.cpu.write(0x100, 0x5A);
+    setup(&mut m, 0, 0x100, 0x120, 1, 1, 0x21);
+    w(&mut m, "DMAnCON0", 0xA0);
+    m.cpu.prog[..4].copy_from_slice(&[0x30, 0x6E, 0x31, 0x6E]); // MOVWF uses data bus
+    steps(&mut m, 2);
+    assert_eq!(r(&mut m, "DMAnCON0") & 1, 0);
+    steps(&mut m, 2); // NOP read and write phases
+    assert_eq!(m.cpu.read(0x120), 0x5A);
+    setup(&mut m, 0, 0x100, 0x121, 1, 1, 0x29); // program flash source, stop dest
+    w(&mut m, "DMAnCON0", 0xA0);
+    m.cpu.prog[0x100] = 0xC3;
+    steps(&mut m, 2); // NOP always fetches PFM
+    assert_eq!(r(&mut m, "DMAnCON0") & 1, 0);
+    let pc = m.cpu.pc as usize;
+    m.cpu.prog[pc..pc+2].copy_from_slice(&[0, 0xD0]); // BRA +0, flush cycle frees PFM
+    m.cpu.step();
+    assert_eq!(r(&mut m, "DMAnCON0") & 1, 1);
+    m.cpu.step(); // NOP writes destination
+    assert_eq!(m.cpu.read(0x121), 0xC3);
+}
+#[test]
+fn competing_channels_use_priority_then_channel_number() {
+    for (a, b, winner) in [(5, 1, 1), (1, 5, 0), (1, 1, 0)] {
+        let mut m = raw_machine();
+        w(&mut m, "DMA1PR", a); w(&mut m, "DMA2PR", b);
+        lock(&mut m, true);
+        m.cpu.write(0x100, 0xA1); m.cpu.write(0x101, 0xB2);
+        for c in 0..2 { setup(&mut m, c, 0x100 + u16::from(c), 0x120 + u16::from(c), 1, 1, 0x21); w(&mut m, "DMAnCON0", 0xA0); }
+        steps(&mut m, 2);
+        assert_eq!(m.cpu.pc, 0, "higher-priority DMA stalls MAIN");
+        assert_eq!(m.cpu.read(0x120 + winner), if winner == 0 { 0xA1 } else { 0xB2 });
+        assert_eq!(m.cpu.read(0x121 - winner), 0);
+        steps(&mut m, 2);
+        assert_eq!(m.cpu.read(0x120), 0xA1); assert_eq!(m.cpu.read(0x121), 0xB2);
+    }
+}
+#[test]
+fn interrupt_preempts_dma_and_isr_priority_allows_cpu_to_run() {
+    let mut m = raw_machine();
+    w(&mut m, "ISRPR", 0); w(&mut m, "DMA1PR", 1);
+    lock(&mut m, true);
+    setup(&mut m, 0, 0x100, 0x120, 16, 16, 0x63);
+    w(&mut m, "DMAnCON0", 0xA0);
+    // Interrupt source 0x14 uses DMA1SCNT's vector, raised by software here.
+    m.cpu.prog[8 + 2 * 0x14] = 0x40; m.cpu.prog[9 + 2 * 0x14] = 0;
+    m.cpu.prog[0x100..0x102].copy_from_slice(&[0x30, 0x6E]); // MOVWF blocks data bus
+    w(&mut m, "PIE2", 0x10); w(&mut m, "PIR2", 0x10); w(&mut m, "INTCON0", 0x80);
+    m.cpu.step();
+    assert_eq!(m.cpu.pc, 0x100);
+    assert_eq!(m.cpu.in_service, vec![true]);
+    let before = r(&mut m, "DMAnDCNTL");
+    m.cpu.step();
+    assert_eq!(m.cpu.pc, 0x102);
+    assert_eq!(r(&mut m, "DMAnDCNTL"), before);
+    m.cpu.step(); // ISR NOP offers data bubble, completes pending DMA write
+    assert_eq!(r(&mut m, "DMAnDCNTL"), before - 1);
+}
+#[test]
+fn idle_gives_low_priority_dma_all_buses_but_sleep_stops_it() {
+    for idle in [false, true] {
+        let mut m = raw_machine();
+        w(&mut m, "MAINPR", 0); lock(&mut m, true);
+        if idle { w(&mut m, "CPUDOZE", 0x80); }
+        m.cpu.prog[..2].copy_from_slice(&[3, 0]); // SLEEP enters Sleep or Idle
+        m.cpu.step();
+        setup(&mut m, 0, 0x100, 0x120, 1, 1, 0x29); // program flash source
+        m.cpu.prog[0x100] = 0x95;
+        w(&mut m, "DMAnCON0", 0xA0);
+        steps(&mut m, 2);
+        assert_eq!(m.cpu.pc, 2);
+        assert_eq!(m.cpu.read(0x120), if idle { 0x95 } else { 0 });
+    }
+}
+#[test]
+fn low_priority_dma_uses_taken_skip_flush_without_extra_cycles() {
+    let mut m = raw_machine();
+    lock(&mut m, true);
+    setup(&mut m, 0, 0x100, 0x120, 1, 1, 0x21);
+    m.cpu.write(0x100, 0xC7);
+    w(&mut m, "DMAnCON0", 0xA0);
+    m.cpu.prog[..6].copy_from_slice(&[0x30, 0x66, 0, 0, 0, 0]); // TSTFSZ 30h; skipped NOP
+    assert_eq!(m.cpu.step(), 2);
+    assert_eq!(m.cpu.pc, 4);
+    assert_eq!(r(&mut m, "DMAnCON0") & 1, 1);
+    assert_eq!(m.cpu.step(), 1);
+    assert_eq!(m.cpu.read(0x120), 0xC7);
+}
+#[test]
+fn lazy_run_preserves_dma_arbitration_and_cpu_timing() {
+    fn configured() -> Machine {
+        let mut m = raw_machine();
+        // Equal CPU/DMA priorities exercise shared cycles, not CPU stalls.
+        lock(&mut m, true);
+        for i in 0..16 { m.cpu.write(0x100+i, i as u8 + 0x60); }
+        setup(&mut m, 0, 0x100, 0x120, 16, 16, 0x63);
+        w(&mut m, "DMAnCON0", 0xA0);
+        m
+    }
+    let mut stepped=configured(); let mut running=configured();
+    steps(&mut stepped,31); running.run(None,31);
+    assert_eq!(stepped.cpu.cycles, running.cpu.cycles);
+    assert_eq!(stepped.cpu.pc,running.cpu.pc);
+    for i in 0..16 { assert_eq!(stepped.cpu.read(0x120+i),running.cpu.read(0x120+i)); }
+    for name in ["DMAnCON0","DMAnBUF","DMAnSCNTL","DMAnDCNTL","PIR2"] { assert_eq!(r(&mut stepped,name),r(&mut running,name),"{name}"); }
 }
