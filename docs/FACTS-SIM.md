@@ -450,7 +450,7 @@ sends are printed by `basil-sim` as `spiN: ...`. Chip select (SS_out, SSET), SS_
 
 ## MSSP of the PIC18-Q10 (S5, `periph/mssp.rs`, DS40002043F ch.28)
 
-SPI host and I2C host, and the 7-bit I2C client mode (SSPM = 0110, 1110) against an external `[[i2c_host]]` (`[A160]`-`[A164]`). SPI slave modes, 10-bit
+SPI host and I2C host, and the 7-bit I2C client mode (SSPM = 0110, 1110) against an external `[[i2c_host]]` (`[A160]`-`[A165]`). SPI slave modes, 10-bit
 client modes, the firmware controlled I2C host (SSPM = 1011) and multi-master bus collisions are not modelled (a
 note is printed; BCLxIF is never set). Pin waveforms, PPS/TRIS routing and SPI pin reception are covered by `[A155]`.
 The existing byte-level host engine still runs once SSPEN is set. The outside world comes
@@ -502,6 +502,7 @@ NACKed and a read from nobody gives FFh.
     is NACKed; with AHEN / DHEN software owns the ACK.
   * `[A163]` a host read of a client not addressed for reading returns FFh and touches no register.
   * `[A164]` the pins show the bus: SCL / SDA waveforms of the host and the client's acknowledge (and read data) reach the PPS-selected pins as open-drain levels (the board needs a pull-up, `[[pin]] level = 1`); a clock held by CKP is SCL left low. Levels the firmware drives are not fed back to the module. Test `client_pins_*` in `tests/mssp.rs`.
+  * `[A165]` an outside device holding SCL low (a `[[pin]]` driving the SCL pin low) stops the host's clock; its remaining waveform is delayed by the hold, to instruction granularity (a pulse shorter than the instruction it falls in is not seen). Tests `client_host_waits_while_an_outside_device_holds_scl_low` and `client_host_is_not_delayed_by_a_hold_that_has_ended` in `tests/mssp.rs`.
   * Not modelled: 10-bit addressing (UA), general call (GCEN), SBCDE slave bus collision, Sleep wake-up on an address match (the host is paused in Sleep), pins driven by an external device other than the host script,
     SDAHT, pin waveforms on PIC16 parts (their `[[i2c_host]]` runs at byte level only, test `i2c_host_drives_the_client_mode_of_a_pic16_mssp` in `tests/pic16_board.rs`).
   stretching by a client are not modelled.

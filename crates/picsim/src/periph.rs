@@ -2873,6 +2873,10 @@ impl Periph {
                 }
             }
         }
+        for i in 0..self.mssps.len() {
+            let low = self.mssps[i].has_host() && self.mssps[i].i2c_pins(&m.mem) && self.scl_held_low(m, self.mssps[i].num, now);
+            self.mssps[i].scl_hold(now, low);
+        }
         for q in &mut self.mssps {
             q.sync(&mut m.mem, now, ev, &mut self.spi_tx, &mut self.i2c_log, &mut self.notes);
         }
@@ -3332,6 +3336,16 @@ impl Periph {
     fn port_levels_at(&self, i: usize, m: &DataMem, now: u64) -> u8 {
         let state = self.pin_history.get(i).and_then(|h| h.iter().rev().find(|e| e.0 <= now)).map(|e| e.1.clone()).unwrap_or_else(|| self.pin_state(i, m, now));
         self.resolve_pin_state(i, now, &state, 4 * now.saturating_sub(1)).1 & !state.analog
+    }
+
+    /// An outside device (a `[[pin]]` drive) holds SCL of MSSP `num` low at cycle `now`: the pin the module's clock input selects.
+    fn scl_held_low(&self, m: &DataMem, num: u8, now: u64) -> bool {
+        let pin = if let Some(pp) = self.i2c_pps.iter().find(|pp| pp.num == num) { m.mem[pp.scl_in] }
+            else if let Some(f) = self.i2c_fixed.iter().find(|f| f.0 == num) { (f.1.0.wrapping_sub(b'A') << 3) | f.1.1 }
+            else { return false };
+        let Some(i) = self.ports.iter().position(|p| p.letter == b'A' + (pin >> 3 & 7)) else { return false };
+        let bit = 1u8 << (pin & 7);
+        self.drive.mask(i, now) & bit != 0 && self.drive.level(i, now) & bit == 0
     }
 
     fn pps_pin_tick(&self, m: &DataMem, reg: usize, tick: u64) -> bool {

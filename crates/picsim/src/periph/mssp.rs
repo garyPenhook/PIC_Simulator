@@ -69,6 +69,9 @@
 //!   data bit of whoever sends, the ninth clock with SDA low when the receiver acknowledges, Start / Stop as SDA edges while SCL is high.
 //!   Both are open-drain (the board needs a pull-up, `[[pin]] level = 1`); with no host script they stay released. A clock stretched by
 //!   CKP is SCL left low, so the next edge simply comes later. With SSPEN set the module owns both pins (TRISx must be input, LATx is ignored) and reads nothing back; the PIC16 core runs the host at byte level without pin waveforms.
+//! * `[A165]` An outside device holding SCL low (a `[[pin]]` driving the SCL pin low) stops the host's clock: the rest of its planned
+//!   waveform moves later by the time SCL stays held (seen at instruction boundaries, so to about an instruction). Held data (SDA)
+//!   is not read back and there is no arbitration; a pulse shorter than the instruction it falls in is not seen. PIC18 / K22 only (PIC16 has no pin waveforms).
 //! * `[A163]` A read the host makes of a client that is not addressed for reading returns FFh and touches no register.
 
 use crate::log::Log;
@@ -234,6 +237,8 @@ pub struct Mssp {
     harmed: bool,
     /// Client mode: addressed by the host, true = the host reads.
     cl_sel: Option<bool>,
+    /// Client mode: SCL is held low from outside; the cycle up to which the host's schedule has been stalled.
+    held: Option<u64>,
 }
 
 impl Mssp {
@@ -301,7 +306,7 @@ impl Mssp {
             sel: None,
             read_idx: None,
             msk: addr(dev, &format!("SSP{n}MSK")),
-            host: None, ph: Ph::Next, hdue: None, hblock: false, harmed: false, cl_sel: None,
+            host: None, ph: Ph::Next, hdue: None, hblock: false, harmed: false, cl_sel: None, held: None,
         };
         let regs = [s.buf, s.stat, s.con1, s.con2, s.add, s.con3];
         Some((s, regs))
@@ -323,6 +328,7 @@ impl Mssp {
 
     /// The module no longer listens: the host operation in flight is gone, the rest of the script waits.
     fn host_stop(&mut self) {
+        self.held = None;
         self.ph = Ph::Next; self.hdue = None; self.hblock = false; self.harmed = false; self.cl_sel = None;
     }
 
@@ -344,6 +350,26 @@ impl Mssp {
         }
     }
 
+    pub fn has_host(&self) -> bool { self.host.is_some() }
+    /// Client mode: `low` says an outside device holds SCL low at cycle `now` (`[A165]`). The host's clock stops while it does:
+    /// everything it has planned after the last look moves later by the time that passed. Call before `sync`.
+    pub fn scl_hold(&mut self, now: u64, low: bool) {
+        if self.host.is_none() { self.held = None; return; }
+        match self.held {
+            // a step that fell due before the hold was seen waits with the rest: it moves with the schedule, not behind it
+            None if low => { self.held = Some(now); if let Some(t) = &mut self.hdue { *t = (*t).max(now); } }
+            Some(p) => {
+                let d = now.saturating_sub(p);
+                if d != 0 {
+                    for e in &mut self.wire { if e.0 > 4 * p { e.0 += 4 * d; } }
+                    if let Some(t) = &mut self.hdue { *t += d; }
+                }
+                self.held = low.then_some(now);
+            }
+            None => {}
+        }
+    }
+
     /// Cycles of `k` TBRG from `t`.
     fn tbrg(&self, m: &[u8], t: u64, k: u64) -> u64 {
         t + (k * (u64::from(m[self.add]) + 1)).div_ceil(2)
@@ -359,7 +385,7 @@ impl Mssp {
             if self.host.is_none() {
                 notes.insert(format!("MSSP{} I2C client mode is modelled only with an [[i2c_host]] stimulus (byte level on PIC16, with pin waveforms on PIC18 / K22); nothing drives the bus", self.num));
             }
-            while let Some(t) = self.hdue && t <= now {
+            while self.held.is_none() && let Some(t) = self.hdue && t <= now {
                 self.hdue = None;
                 self.host_step(m, t, ev, i2c_log);
             }

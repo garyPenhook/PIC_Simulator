@@ -501,8 +501,10 @@ fn i2c_host_stimulus_errors() {
 // ---- I2C client mode: the bus on the pins (`[A164]`) ----
 
 /// SCL = RC0, SDA = RC1, both pulled up; returns the machine and the cycle SSPEN was set. Reads give bit 0 = SCL, bit 1 = SDA.
-fn client_pins(ops: &str, add: u8) -> (Machine, u64) {
-    let mut m = machine(&format!("[[pin]]\nport = \"C\"\nbit = 0\nlevel = 1\n[[pin]]\nport = \"C\"\nbit = 1\nlevel = 1\n[[i2c_host]]\nperiod = 20\nops = {ops}\n"));
+fn client_pins(ops: &str, add: u8) -> (Machine, u64) { client_pins_with(ops, add, "") }
+
+fn client_pins_with(ops: &str, add: u8, extra: &str) -> (Machine, u64) {
+    let mut m = machine(&format!("[[pin]]\nport = \"C\"\nbit = 0\nlevel = 1\n[[pin]]\nport = \"C\"\nbit = 1\nlevel = 1\n{extra}[[i2c_host]]\nperiod = 20\nops = {ops}\n"));
     w(&mut m, "ANSELC", 0);
     w(&mut m, "RC0PPS", 0x0F);
     w(&mut m, "RC1PPS", 0x10);
@@ -555,4 +557,26 @@ fn client_pins_show_a_stretched_clock_and_read_data() {
     let mut seen_scl_high_sda_high = false;
     for k in 0..40 { if bus(&mut m, t + k) == 0b11 { seen_scl_high_sda_high = true; } }
     assert!(seen_scl_high_sda_high, "bit 7 of the byte the client sends appears on SDA");
+}
+
+#[test]
+fn client_host_waits_while_an_outside_device_holds_scl_low() {
+    // Without the hold the ninth clock is high at e + 185 (`client_pins_show_start_bits_ack_and_stop`). SCL is held low
+    // from cycle 50 to 250: the host's clock stops for those 200 cycles.
+    let hold = "[[pin]]\nport = \"C\"\nbit = 0\nlevel = 0\nat = 50\n[[pin]]\nport = \"C\"\nbit = 0\nlevel = 1\nat = 250\n";
+    let (mut m, e) = client_pins_with(r#"["S", "w 0xA0"]"#, 0xA0, hold);
+    assert!(e < 5, "the script is timed from about cycle 0");
+    assert_eq!(bus(&mut m, e + 185) & 1, 0, "SCL is still low at the unstalled ninth clock");
+    assert_eq!(bus(&mut m, e + 240) & 1, 0, "held low");
+    assert_eq!(rd(&mut m, "SSP1STAT") & 1, 0, "no byte has arrived while the clock is held");
+    assert_eq!(bus(&mut m, e + 385), 0b01, "ninth clock 200 cycles later: the client acknowledges");
+    run_to(&mut m, e + 400);
+    assert_eq!(rd(&mut m, "SSP1BUF"), 0xA0);
+}
+
+#[test]
+fn client_host_is_not_delayed_by_a_hold_that_has_ended() {
+    let hold = "[[pin]]\nport = \"C\"\nbit = 0\nlevel = 0\nat = 50\n[[pin]]\nport = \"C\"\nbit = 0\nlevel = 1\nat = 51\n";
+    let (mut m, e) = client_pins_with(r#"["S", "w 0xA0"]"#, 0xA0, hold);
+    assert_eq!(bus(&mut m, e + 186), 0b01, "a one-cycle hold costs about a cycle");
 }
