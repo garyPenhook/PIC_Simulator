@@ -352,13 +352,14 @@ impl Pic18 {
     /// `[A146]` Table 2-1 is followed for the PLL: FOSC 0000-0111 by PLLCFG only, 1000-1111 by PLLEN only; 2.8.1 p.37 says PLLEN also
     /// works for "any of the external oscillator modes", which the table does not show for 0000-0111.
     fn osc_status(&mut self) {
-        let Some((con, con2, tune)) = self.osc else { return };
-        let c = self.m.mem[con];
+        let Some((con, con2, _)) = self.osc else { return };
+        let [c, _, tune_v] = self.oscillator.k22_view(&self.m.mem); // the running clock: the old one until a switch completes
         let scs = c & 3;
         let intio = self.fosc_cfg & 0x0E == 8;
         let internal = scs >= 2 || (scs == 0 && intio);
-        let pllen = self.m.mem[tune] & 0x40 != 0;
+        let pllen = tune_v & 0x40 != 0;
         let pll = scs == 0 && if self.fosc_cfg >= 8 { pllen } else { self.pllcfg };
+        let c = self.m.mem[con];
         self.m.mem[con] = c & !0x0C | if scs == 0 { 8 } else { 0 } | if internal { 4 } else { 0 };
         self.m.mem[con2] = self.m.mem[con2] & !0x80 | if pll { 0x80 } else { 0 };
     }
@@ -412,6 +413,7 @@ impl Pic18 {
             self.p.invalidate();
         }
         if ev.done {
+            self.osc_status();
             self.update_clock();
         }
     }

@@ -206,8 +206,16 @@ fn adc_conversion_takes_acqt_plus_eleven_tad() {
 fn oscillator_status_follows_scs_and_the_pll() {
     let mut m = machine("18F25K22");
     let (con, con2, tune) = (a(&m, "OSCCON"), a(&m, "OSCCON2"), a(&m, "OSCTUNE"));
-    m.cpu.write(con, 0x62); // IRCF 110, SCS = 10: the internal block
+    m.cpu.write(con, 0x62); // IRCF 110, SCS = 10: the internal block, after TIOBST (`[A157]`; the old clock runs meanwhile)
+    assert_eq!(m.cpu.read(con) & 0x0C, 0x08, "still the primary clock");
+    let t0 = m.cpu.cycles;
+    let expect = (250.0 * m.cpu.p.board.effective_fosc_mhz() / 4.0).ceil() as u64;
+    while m.cpu.read(con) & 0x04 == 0 {
+        m.cpu.step();
+        assert!(m.cpu.cycles < t0 + 100_000);
+    }
     assert_eq!(m.cpu.read(con) & 0x0C, 0x04, "HFIOFS 1, OSTS 0");
+    assert!((expect..expect + 3).contains(&(m.cpu.cycles - t0)), "TIOBST 250 us at the running clock: {} vs {expect}", m.cpu.cycles - t0);
     m.cpu.write(tune, 0x40); // PLLEN, but SCS = 1x: no PLL
     assert_eq!(m.cpu.read(con2) & 0x80, 0);
     m.cpu.write(con, 0x70); // SCS = 00 with the unprogrammed FOSC = 0101 (ECHPIO6) and PLLCFG = 0

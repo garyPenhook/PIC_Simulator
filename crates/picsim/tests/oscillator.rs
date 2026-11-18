@@ -93,6 +93,10 @@ fn k22_internal_clock_and_pll() {
     assert_eq!(m.cpu.p.board.effective_fosc_mhz(), 1.0);
     for (ircf, mhz) in [0.03125, 0.25, 0.5, 1., 2., 4., 8., 16.].into_iter().enumerate() {
         w18(&mut m, "OSCCON", (ircf as u8) << 4);
+        // IRCF 0 is the LFINTOSC; leaving it enables the HFINTOSC, which needs TIOBST (`[A157]`)
+        for _ in 0..1000 {
+            m.cpu.step();
+        }
         assert_eq!(m.cpu.p.board.effective_fosc_mhz(), mhz);
     }
     w18(&mut m, "OSCTUNE", 0x40);
@@ -292,4 +296,149 @@ fn pic18_switch_completes_in_idle() {
         m.cpu.step();
     }
     assert_eq!(r18(&m, "OSCCON2") >> 4, 6, "Sleep: no switch");
+}
+
+fn r16(m: &Machine16, reg: &str) -> u8 {
+    m.cpu.peek(m.dev.find_sfr(reg).unwrap().addr)
+}
+
+fn cswif16(d: &Device) -> (String, u8) {
+    d.sfr.iter().find_map(|r| r.fields.iter().find(|f| f.name == "CSWIF").map(|f| (r.name.clone(), 1u8 << f.pos))).unwrap()
+}
+
+/// `[A157]` on the PIC16: the OST (1024 TOSC, the crystal at the 32 MHz family maximum) and the 200 us PLL lock delay the switch.
+#[test]
+fn pic16_switch_waits_for_the_pll_and_the_oscillator_start_up_timer() {
+    // (part, NOSC for EXTOSC, NOSC for EXTOSC with the 4x PLL)
+    for (part, ext, ext_pll) in [("16F17146", 0x70u8, 0x20u8), ("16F13145", 0x70, 0x20), ("16F13245", 0x70, 0x20), ("16F18326", 0x70, 0x10)] {
+        for (nosc, pll) in [(ext, 0.0), (ext_pll, 200.0)] {
+            let mut m = Machine16::new(dev(part)).unwrap();
+            m.cpu.load(&config(&m.dev, &[("RSTOSC", 6), ("CSWEN", 1), ("FEXTOSC", 2)]));
+            m.cpu.prog.fill(0);
+            let (pir, bit) = cswif16(&m.dev);
+            let start = m.cpu.cycles;
+            w16(&mut m, "OSCCON1", nosc);
+            assert_eq!(r16(&m, "OSCCON3") & 0x18, 0, "{part}: switch in progress");
+            assert_eq!(r16(&m, "OSCCON2") >> 4, 6, "{part}: COSC unchanged");
+            assert_eq!(m.cpu.board.effective_fosc_mhz(), 1.0, "{part}: old clock keeps running");
+            let expect = ((1024.0_f64 / 32.0 + pll) / 4.0).ceil() as u64;
+            while r16(&m, "OSCCON3") & 0x10 == 0 {
+                m.cpu.step();
+                assert!(m.cpu.cycles - start < 200, "{part}: never ready");
+            }
+            let took = m.cpu.cycles - start;
+            assert!(took >= expect && took <= expect + 2, "{part}: {took} cycles, wanted {expect}");
+            assert_eq!(r16(&m, "OSCCON2") >> 4, nosc >> 4, "{part}");
+            assert_ne!(r16(&m, &pir) & bit, 0, "{part}: CSWIF");
+        }
+    }
+    // the 2x PLL of the PIC16F183xx (NOSC 000): 200 us, no OST
+    let mut m = Machine16::new(dev("16F18326")).unwrap();
+    m.cpu.load(&config(&m.dev, &[("RSTOSC", 6), ("CSWEN", 1)]));
+    m.cpu.prog.fill(0);
+    w16(&mut m, "OSCFRQ", 6); // 16 MHz HFINTOSC input
+    w16(&mut m, "OSCCON1", 0x00);
+    assert_eq!(r16(&m, "OSCCON3") & 0x10, 0);
+    let start = m.cpu.cycles;
+    while r16(&m, "OSCCON3") & 0x10 == 0 {
+        m.cpu.step();
+        assert!(m.cpu.cycles - start < 5000);
+    }
+    assert!((m.cpu.cycles - start) >= 50, "{}", m.cpu.cycles - start); // 200 us at the 1 MHz in use: 50 cycles
+    assert_eq!(m.cpu.board.effective_fosc_mhz(), 32.0);
+}
+
+#[test]
+fn pic16_switch_hold_abandon_and_internal_sources() {
+    let mut m = Machine16::new(dev("16F17146")).unwrap();
+    m.cpu.load(&config(&m.dev, &[("RSTOSC", 6), ("CSWEN", 1), ("FEXTOSC", 2)]));
+    m.cpu.prog.fill(0);
+    let (pir, bit) = cswif16(&m.dev);
+    // HFINTOSC divider change and LFINTOSC: ready at once
+    w16(&mut m, "OSCCON1", 0x61);
+    assert_eq!(r16(&m, "OSCCON3") & 0x18, 0x10);
+    assert_eq!(m.cpu.board.effective_fosc_mhz(), 2.0, "4 MHz / 2");
+    w16(&mut m, "OSCCON1", 0x50);
+    assert_eq!(m.cpu.board.effective_fosc_mhz(), 0.031);
+    w16(&mut m, "OSCCON1", 0x60);
+    // CSWHOLD
+    w16(&mut m, "OSCCON3", 0x80);
+    w16(&mut m, "OSCCON1", 0x70);
+    for _ in 0..100 {
+        m.cpu.step();
+    }
+    assert_eq!(r16(&m, "OSCCON3") & 0x18, 0x08, "held: NOSCR set, ORDY clear");
+    assert_ne!(r16(&m, &pir) & bit, 0);
+    assert_eq!(r16(&m, "OSCCON2") >> 4, 6);
+    w16(&mut m, "OSCCON3", 0x00);
+    assert_eq!(r16(&m, "OSCCON3") & 0x18, 0x10);
+    assert_eq!(r16(&m, "OSCCON2") >> 4, 7);
+    // abandon: a request, then COSC copied back into NOSC
+    w16(&mut m, "OSCCON1", 0x60);
+    w16(&mut m, "OSCCON1", 0x70);
+    w16(&mut m, "OSCCON1", 0x60);
+    for _ in 0..100 {
+        m.cpu.step();
+    }
+    assert_eq!(r16(&m, "OSCCON2") >> 4, 6);
+}
+
+#[test]
+fn pic16_switch_does_not_complete_in_sleep() {
+    let mut m = Machine16::new(dev("16F17146")).unwrap();
+    m.cpu.load(&config(&m.dev, &[("RSTOSC", 6), ("CSWEN", 1), ("FEXTOSC", 2), ("WDTE", 0)]));
+    m.cpu.prog.fill(0);
+    m.cpu.prog[0] = 0x63; // SLEEP (14-bit word 0x0063 low byte first)
+    m.cpu.prog[1] = 0x00;
+    w16(&mut m, "OSCCON1", 0x70);
+    m.cpu.step();
+    for _ in 0..50 {
+        m.cpu.step();
+    }
+    assert_eq!(r16(&m, "OSCCON2") >> 4, 6, "Sleep: no switch (DS40002343F 11.2.5 p.93)");
+}
+
+/// `[A157]` K22: the old clock runs until the new one is ready (DS40001412H 2.11.3 p.40, Figure 2-9 p.41, Table 27-11 p.440).
+#[test]
+fn k22_switch_waits_for_ost_pll_and_hfintosc() {
+    let mut m = Machine::new(dev("18F26K22")).unwrap();
+    m.cpu.load(&config(&m.dev, &[("FOSC", 2), ("PLLCFG", 1)])); // HS with the PLL: 64 MHz family maximum assumed
+    m.cpu.prog.fill(0);
+    assert_eq!(r18(&m, "OSCCON") & 0x0C, 0x08, "OSTS: primary clock");
+    assert_eq!(r18(&m, "OSCCON2") & 0x80, 0x80, "PLLRDY");
+    let start = m.cpu.cycles;
+    w18(&mut m, "OSCCON", 0x72); // 16 MHz HFINTOSC: TIOBST 250 us, running at 64 MHz meanwhile = 4000 cycles
+    assert_eq!(r18(&m, "OSCCON") & 0x0C, 0x08, "old clock still running");
+    assert_eq!(m.cpu.p.board.effective_fosc_mhz(), 64.0);
+    while r18(&m, "OSCCON") & 0x04 == 0 {
+        m.cpu.step();
+        assert!(m.cpu.cycles - start < 10_000);
+    }
+    assert!((4000..4004).contains(&(m.cpu.cycles - start)), "{}", m.cpu.cycles - start);
+    assert_eq!(r18(&m, "OSCCON") & 0x0C, 0x04, "HFIOFS");
+    assert_eq!(r18(&m, "OSCCON2") & 0x80, 0, "no PLL");
+    assert_eq!(m.cpu.p.board.effective_fosc_mhz(), 16.0);
+    // an IRCF change within the running INTOSC is immediate
+    w18(&mut m, "OSCCON", 0x52);
+    assert_eq!(m.cpu.p.board.effective_fosc_mhz(), 4.0);
+    // back to the HS crystal with the PLL: OST 1024 TOSC (at 64 MHz: 16 us) + TPLL 2 ms, at 4 MHz meanwhile
+    let start = m.cpu.cycles;
+    w18(&mut m, "OSCCON", 0x50);
+    assert_eq!(m.cpu.p.board.effective_fosc_mhz(), 4.0);
+    assert_eq!(r18(&m, "OSCCON2") & 0x80, 0);
+    while r18(&m, "OSCCON") & 0x08 == 0 {
+        m.cpu.step();
+        assert!(m.cpu.cycles - start < 10_000);
+    }
+    let expect = (1024.0_f64 / 64.0 + 2000.0).ceil() as u64; // x 4 MHz / 4
+    assert!((expect..expect + 4).contains(&(m.cpu.cycles - start)), "{} vs {expect}", m.cpu.cycles - start);
+    assert_eq!(r18(&m, "OSCCON2") & 0x80, 0x80, "PLLRDY");
+    // a request undone before it completes is abandoned
+    w18(&mut m, "OSCCON", 0x72);
+    w18(&mut m, "OSCCON", 0x00);
+    for _ in 0..5000 {
+        m.cpu.step();
+    }
+    assert_eq!(r18(&m, "OSCCON") & 0x0C, 0x08);
+    assert_eq!(m.cpu.p.board.effective_fosc_mhz(), 64.0);
 }

@@ -14,6 +14,22 @@ pub(crate) struct Oscillator {
     /// PIC18 NOSC/NDIV clock switch in progress (Q10/Q41): `[A157]`.
     delayed: bool,
     pending: Option<Pending>,
+    /// PIC18(L)F2x/4xK22 SCS/IRCF/PLL change in progress: the cycle the new clock is ready and the OSCCON, OSCCON2 and OSCTUNE
+    /// values of the clock that keeps running until then (`[A157]`).
+    k22_pending: Option<(u64, [u8; 3])>,
+}
+
+/// The clock a K22 selects, for the start-up time of a switch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum K22Src {
+    /// LP, XT or HS on OSC1/OSC2: the OST counts 1024 oscillations.
+    Crystal,
+    /// EC or RC: no OST.
+    Ext,
+    Sosc,
+    Lf,
+    /// HFINTOSC or MFINTOSC.
+    Int,
 }
 
 /// A requested clock switch: the cycle at which the NOSC-selected oscillator (and its PLL) is ready, and whether NOSCR/CSWIF
@@ -45,6 +61,7 @@ pub struct Timing {
 
 impl Oscillator {
     pub fn new(d: &Device) -> Self {
+        let k22 = d.find_sfr("OSCCON").is_some_and(|s| s.fields.iter().any(|f| f.name == "IRCF"));
         Self {
             regs: ["OSCCON", "OSCCON1", "OSCCON2", "OSCCON3", "OSCFRQ", "OSCEN", "OSCSTAT", "OSCSTAT1", "OSCTUNE"]
                 .into_iter()
@@ -52,13 +69,14 @@ impl Oscillator {
                 .collect(),
             pic16: d.device.family == "pic16e",
             legacy: d.find_sfr("OSCFRQ").is_some_and(|s| s.fields.iter().any(|f| f.name == "HFFRQ")) && d.device.family == "pic16e",
-            k22: d.find_sfr("OSCCON").is_some_and(|s| s.fields.iter().any(|f| f.name == "IRCF")),
+            k22,
             q41: d.find_sfr("SHADCON").is_some(),
             sosc: d.find_sfr("OSCEN").is_some_and(|s| s.fields.iter().any(|f| f.name == "SOSCEN")),
             // RSTOSC=001 is reserved on the 171xx; 131xx/132xx add HFINTOSC at 16 MHz.
             hf16_reset: d.device.name.contains("F131") || d.device.name.contains("F132"),
-            delayed: d.device.family != "pic16e" && d.find_sfr("OSCCON1").is_some() && d.find_sfr("OSCCON3").is_some() && d.find_sfr("OSCCON").is_none_or(|s| !s.fields.iter().any(|f| f.name == "IRCF")),
+            delayed: !k22 && d.find_sfr("OSCCON1").is_some() && d.find_sfr("OSCCON3").is_some(),
             pending: None,
+            k22_pending: None,
         }
     }
     /// A NOSC/NDIV write starts a timed switch (`[A157]`).
@@ -160,14 +178,10 @@ impl Oscillator {
         self.set(m, "OSCSTAT1", ready & 0xDD);
     }
 
-    /// Write model-owned registers. Parts without a timed switch (`delayed`) switch instantaneously, optionally held by CSWHOLD.
-    pub fn write(&mut self, m: &mut [u8], a: usize, v: u8, cfg: &Config) {
-        self.write_at(m, a, v, cfg, None);
-    }
-
-    /// `write` with the time of the write, which a PIC18 Q10/Q41 switch needs (`[A157]`).
+    /// Write model-owned registers. With a `Timing` a switch takes the oscillator start-up time (`[A157]`); without one it is instantaneous, optionally held by CSWHOLD.
     pub fn write_at(&mut self, m: &mut [u8], a: usize, v: u8, cfg: &Config, t: Option<Timing>) -> SwitchEvent {
         let mut ev = SwitchEvent::default();
+        let before = if self.k22 { self.k22_view(m) } else { [0; 3] };
         if ["OSCCON2", "OSCSTAT", "OSCSTAT1"].iter().any(|n| self.addr(n) == Some(a)) && !self.k22 {
             return ev;
         }
@@ -194,6 +208,9 @@ impl Oscillator {
         let con3 = self.addr("OSCCON3") == Some(a);
         let v = if con3 && self.delayed { v & !0x18 | m[a] & 0x18 } else { v }; // ORDY and NOSCR are read only
         m[a] = v;
+        if self.k22 && let Some(t) = t && ["OSCCON", "OSCCON2", "OSCTUNE"].iter().any(|n| self.addr(n) == Some(a)) {
+            self.k22_request(m, cfg, before, t);
+        }
         if !self.k22 && self.addr("OSCCON1").is_some() {
             match t.filter(|_| self.delayed) {
                 None => {
@@ -234,24 +251,69 @@ impl Oscillator {
     }
 
     /// Start-up time of the oscillator a NOSC value selects, in microseconds. Sources: the OST counts 1024 oscillations for
-    /// LP, XT and HS and is not used with the EC modes (DS40002043F 5.2.1.3 p.44, 5.4.4 p.51, RST05 p.704); the 4x PLL locks in
-    /// 200 us typical (PLL03 p.701; DS40002214G PLL03 p.900) once its input is ready. The data sheets give no time for
-    /// HFINTOSC, LFINTOSC or the secondary oscillator: those are ready at once.
+    /// LP, XT and HS and is not used with the EC modes (DS40002043F 5.2.1.3 p.44, 5.4.4 p.51, RST05 p.704; DS40001839E 7.2.1.3
+    /// p.82, 7.4.4 p.88; DS40002343F 11.1.1.3 p.87); the PLL locks in 200 us typical (PLL03: DS40002043F p.701, DS40002214G
+    /// p.900, DS40002343F p.631, DS40002686B p.606, DS40001839E Table 35-9 p.425) once its input is ready. The data sheets give
+    /// no time for HFINTOSC, LFINTOSC or the secondary oscillator: those are ready at once. NOSC codes: the 4x PLL on EXTOSC is
+    /// 010 (001 on the PIC16F183xx) and EXTOSC is 111; the PIC16F183xx also has HFINTOSC with the 2x PLL (000).
     fn startup_us(&self, src: u8, cfg: &Config, ext_mhz: f64) -> f64 {
         let crystal = cfg.get("FEXTOSC").is_some_and(|f| f <= 2);
-        match src {
-            7 | 2 => {
-                let ost = if crystal { 1024.0 / ext_mhz } else { 0.0 };
-                ost + if src == 2 { 200.0 } else { 0.0 }
-            }
-            _ => 0.0,
+        let (ext, pll) = if self.legacy { (matches!(src, 1 | 7), matches!(src, 0 | 1)) } else { (matches!(src, 2 | 7), src == 2) };
+        (if ext && crystal { 1024.0 / ext_mhz } else { 0.0 }) + if pll { 200.0 } else { 0.0 }
+    }
+
+    /// The K22 oscillator registers `[OSCCON, OSCCON2, OSCTUNE]` as the running clock sees them: the values from before a
+    /// pending switch until the new clock is ready (`[A157]`).
+    pub fn k22_view(&self, m: &[u8]) -> [u8; 3] {
+        self.k22_pending.map_or_else(|| ["OSCCON", "OSCCON2", "OSCTUNE"].map(|n| self.get(m, n)), |(_, old)| old)
+    }
+
+    fn k22_src(&self, v: [u8; 3], cfg: &Config) -> (K22Src, bool) {
+        let [c, c2, tune] = v;
+        let fosc = cfg.get("FOSC").unwrap_or(0);
+        let internal = if c >> 4 & 7 == 0 && tune & 0x80 == 0 && c2 & 0x10 == 0 { K22Src::Lf } else { K22Src::Int };
+        match c & 3 {
+            1 => (K22Src::Sosc, false),
+            2 | 3 => (internal, false),
+            _ if fosc & 14 == 8 => (internal, tune & 0x40 != 0),
+            _ if fosc >= 8 => (K22Src::Ext, tune & 0x40 != 0),
+            _ => (if fosc <= 3 { K22Src::Crystal } else { K22Src::Ext }, cfg.get("PLLCFG").is_some_and(|p| p != 0)),
         }
+    }
+
+    /// OSCCON, OSCCON2 or OSCTUNE written (`[A157]`; DS40001412H 2.11.3 p.40, Figure 2-9 p.41, Table 2-2 p.32, 2.10 p.38, Table
+    /// 27-11 p.440): the old clock runs until the new one is ready. Ready after TOST = 1024 oscillations for LP/XT/HS, TPLL =
+    /// 2 ms more for the PLL on an external oscillator, TIOBST = 0.25 ms (typical) for the HFINTOSC/MFINTOSC when it was not
+    /// running; a change within the running INTOSC (IRCF) is immediate (3.2.3 p.45).
+    fn k22_request(&mut self, m: &[u8], cfg: &Config, before: [u8; 3], t: Timing) {
+        let after = ["OSCCON", "OSCCON2", "OSCTUNE"].map(|n| self.get(m, n));
+        let (from, to) = (self.k22_src(before, cfg), self.k22_src(after, cfg));
+        let mut us = 0.0;
+        if from != to {
+            if to.0 == K22Src::Crystal {
+                us += 1024.0 / t.ext_mhz;
+            }
+            if to.0 == K22Src::Int && from.0 != K22Src::Int {
+                us += 250.0;
+            }
+            if to.1 && !from.1 && matches!(to.0, K22Src::Crystal | K22Src::Ext) {
+                us += 2000.0;
+            }
+        }
+        self.k22_pending = (us > 0.0).then(|| (t.now + (us * t.cur_mhz / 4.0).ceil() as u64, before));
     }
 
     /// Advance a pending switch to cycle `now`: when the new oscillator is ready NOSCR rises (and CSWIF is set); the switch
     /// completes then, unless CSWHOLD holds it (DS40002043F 5.3.1 p.48, Figures 5-6, 5-7 p.49).
     pub fn poll(&mut self, m: &mut [u8], now: u64) -> SwitchEvent {
         let mut ev = SwitchEvent::default();
+        if let Some((ready, _)) = self.k22_pending {
+            if now >= ready {
+                self.k22_pending = None;
+                ev.done = true;
+            }
+            return ev;
+        }
         let Some(mut p) = self.pending else { return ev };
         if now < p.ready_at {
             return ev;
@@ -277,12 +339,13 @@ impl Oscillator {
     /// A reset abandons a switch.
     pub fn cancel(&mut self) {
         self.pending = None;
+        self.k22_pending = None;
     }
 
     /// None: an external source or a reserved selection has no derivable frequency.
     pub fn mhz(&self, m: &[u8], cfg: &Config) -> Option<f64> {
         if self.k22 {
-            let c = self.get(m, "OSCCON");
+            let [c, _, tune] = self.k22_view(m);
             let scs = c & 3;
             if scs == 1 {
                 return Some(0.032768);
@@ -292,7 +355,7 @@ impl Oscillator {
             }
             let ircf = (c >> 4 & 7) as usize;
             let f = [0.03125, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0][ircf];
-            return Some(f * if scs == 0 && self.get(m, "OSCTUNE") & 0x40 != 0 { 4.0 } else { 1.0 });
+            return Some(f * if scs == 0 && tune & 0x40 != 0 { 4.0 } else { 1.0 });
         }
         let c = if self.addr("OSCCON2").is_some() {
             self.get(m, "OSCCON2")

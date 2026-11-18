@@ -193,6 +193,8 @@ pub struct Pic16 {
     pub cfg: Config,
     cfg_regs: Vec<devdesc::ConfigRegister>,
     oscillator: crate::oscillator::Oscillator,
+    /// PIRx register and mask of CSWIF (`[A157]`).
+    cswif: Option<(usize, u8)>,
     /// Messages about things the model does not do, deduplicated.
     pub notes: BTreeSet<String>,
     words: u32,
@@ -430,6 +432,7 @@ impl Pic16 {
             cfg: Config::decode_words(&dev.config, &BTreeMap::new()),
             cfg_regs: dev.config.clone(),
             oscillator: crate::oscillator::Oscillator::new(dev),
+            cswif: dev.sfr.iter().find_map(|r| r.fields.iter().find(|f| f.name == "CSWIF").map(|f| (r.addr as usize, 1u8 << f.pos))),
             notes: BTreeSet::new(),
             words: dev.memory.program.size,
             bsr5: false,
@@ -957,8 +960,38 @@ impl Pic16 {
     }
 
     fn reset_clock(&mut self) {
+        self.oscillator.cancel(); // a reset or a new program abandons a clock switch
         self.oscillator.reset(&mut self.mem, &self.cfg);
         self.update_clock();
+    }
+
+    /// Time and frequencies a clock switch needs (`[A157]`); an external oscillator's frequency is the override, else the family maximum.
+    fn osc_timing(&self) -> crate::oscillator::Timing {
+        let b = &self.board;
+        crate::oscillator::Timing { now: self.cycles, cur_mhz: b.effective_fosc_mhz(), ext_mhz: if b.fosc_mhz > 0.0 { b.fosc_mhz } else { FOSC_DEFAULT_MHZ } }
+    }
+
+    /// CSWIF rises with NOSCR (DS40002343F 11.2.3 p.93; DS40001839E 7.3.1 p.85).
+    fn osc_event(&mut self, ev: crate::oscillator::SwitchEvent) {
+        if ev.ready && let Some(f) = self.cswif {
+            self.raise_flag(f);
+            self.due = 0;
+        }
+    }
+
+    /// Advance a pending clock switch; Fosc is stopped in Sleep, so the switch waits (DS40002343F 11.2.5 p.93).
+    fn osc_poll(&mut self) {
+        if self.sleeping {
+            return;
+        }
+        let now = self.cycles;
+        let ev = self.oscillator.poll(&mut self.mem, now);
+        if ev.ready || ev.done {
+            self.catch_up();
+            self.osc_event(ev);
+            self.due = 0;
+            self.update_clock();
+        }
     }
 
     fn update_clock(&mut self) {
@@ -1146,7 +1179,9 @@ impl Pic16 {
                     self.due = 0;
                 }
                 if self.oscillator.contains(a) {
-                    self.oscillator.write(&mut self.mem, a, v & self.implemented[a], &self.cfg);
+                    let t = self.osc_timing();
+                    let ev = self.oscillator.write_at(&mut self.mem, a, v & self.implemented[a], &self.cfg, Some(t));
+                    self.osc_event(ev);
                     self.update_clock();
                     return;
                 }
@@ -3109,6 +3144,7 @@ impl Pic16 {
     }
 
     pub fn step(&mut self) -> u32 {
+        self.osc_poll();
         self.board.clock_changed(self.cycles);
         self.wdt_fosc();
         let n = self.step_core();
