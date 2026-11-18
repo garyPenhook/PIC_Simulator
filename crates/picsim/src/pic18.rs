@@ -630,6 +630,7 @@ impl Pic18 {
                 }
             }
         }
+        if model_reg { self.p.publish_pins(&self.m, self.cycles); }
     }
 
     // ----- hardware stack ------------------------------------------------------------------------------------

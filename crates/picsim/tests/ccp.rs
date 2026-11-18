@@ -8,6 +8,7 @@ fn machine(stim: &str) -> Machine {
     let dev = Device::load(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../../devices/18F27Q10.toml")).unwrap();
     let mut m = Machine::new(dev).unwrap();
     m.load_stimulus(stim).unwrap();
+    w(&mut m, "ANSELC", 0);
     m
 }
 
@@ -187,7 +188,7 @@ fn capture_falling_edge_and_every_fourth_rising() {
 #[test]
 fn unmodelled_pps_sources_keep_showing_the_latch() {
     let mut m = machine("");
-    w(&mut m, "RC6PPS", 0x09); // EUSART1 TX is not an output source of the pin layer
+    w(&mut m, "RC6PPS", 0x09); // disabled EUSART1 leaves the GPIO latch in control
     w(&mut m, "TRISC", 0x00);
     w(&mut m, "LATC", 0x40);
     assert_eq!(r(&mut m, "PORTC") & 0x40, 0x40);

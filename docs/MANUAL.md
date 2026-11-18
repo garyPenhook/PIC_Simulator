@@ -262,6 +262,15 @@ Use *1x* or a fraction to watch an LED blink or a display scroll at a speed you 
 
 While running, the status line shows the achieved rate, for example `running at 100.0% of real time (16.00 Mcycles/s)`. It also reminds you that a wait on a UART or timer flag shows as one source line for a long time — that is the program waiting, not the simulator.
 
+PIC18 GPIO and peripheral outputs also feed the selected timer clocks/gates, capture inputs,
+and interrupt-on-change inputs. Internal pin changes propagate on the following instruction
+clock; PORT and board displays show the current output. UART TX produces serial bits and RX
+can sample the same pin for loopback. PPS, ANSEL, polarity and open-drain settings affect the
+resolved signal. Q41 UART outputs retain TRIS control; Q10/K22 EUSART outputs enable their
+own driver. MSSP hosts expose SPI and open-drain I2C waveforms, including K22 fixed pins.
+SPI receives from its selected input pin when no `[[spi]]` byte client is supplied. I2C clients
+remain byte-level devices; external pin-driven I2C clients and clock stretching are not modelled.
+
 ## UART terminal
 
 The **UART** tab shows transmitted bytes from the selected modelled UART/EUSART on PIC16 and PIC18 parts. Text displays UTF-8 with other control characters escaped; **Hex** shows the exact byte values. The pane shows at most the latest 16 KiB of output and reports when older output was omitted. **Clear output** hides the selected port's existing output without changing the simulated UART. Loading a program or pressing Reset clears this view's history.

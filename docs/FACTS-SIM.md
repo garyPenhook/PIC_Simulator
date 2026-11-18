@@ -78,8 +78,8 @@ DS40002043F ch.29 p.503-505.
   one in flight.
 * RCREG is read by the instruction against the state after the previous instruction (peripherals sync once per
   instruction), so a character that completes inside the reading instruction shows up one instruction later.
-* Auto-baud (ABDEN), break detection and the RX pin itself (RXxPPS, TRIS, ANSEL) are not modelled: the stimulus file
-  drives the receiver input directly.
+* Auto-baud (ABDEN) and break detection are not modelled. Byte stimuli drive the receiver directly;
+  asynchronous pin reception and transmission are covered by `[A155]`.
 
 ## UART of the PIC18-Q41 (S4, `periph/quart.rs`)
 
@@ -432,7 +432,8 @@ sends are printed by `basil-sim` as `spiN: ...`. Chip select (SS_out, SSET), SS_
 ## MSSP of the PIC18-Q10 (S5, `periph/mssp.rs`, DS40002043F ch.28)
 
 SPI host and I2C host. Slave modes, the firmware controlled I2C host (SSPM = 1011) and multi-master bus collisions are not modelled (a
-note is printed; BCLxIF is never set). PPS, TRIS and the pins are not modelled: the module runs once SSPEN is set. The outside world comes
+note is printed; BCLxIF is never set). Pin waveforms, PPS/TRIS routing and SPI pin reception are covered by `[A155]`.
+The existing byte-level host engine still runs once SSPEN is set. The outside world comes
 from the stimulus file: `[[spi]]` (same as the Q41 SPI: `port` = MSSP number, `data`, `fill`) answers each exchanged byte, and `[[i2c]]`
 (`port`, `address` 7-bit, `data`, `fill` default FFh; several entries make several clients) are clients on the bus. `basil-sim` prints
 `spiN: ...` (bytes sent) and `i2cN: S 50W 10 Sr 50R CA FE! P`: 7-bit address with R/W, `!` after a byte nobody acknowledged (address or
@@ -637,7 +638,7 @@ Assumptions (the data sheet is silent):
 * `[A98]` The scanner fetches one program byte per access (SCANLADR + 1 each time; the data sheet does not give the width) and hands it to the CRC when the CRC can take it. Burst: each fetch costs one cycle and the CPU waits for the shifter; the stall ends when the last byte is handed over (the shifter finishes after). Concurrent and Triggered: after every instruction the scanner fills the CRC and each fetch steals one cycle. Peek: one fetch per dead cycle (cycles of an instruction beyond the first). INTM = 1 in Burst is not modelled (note). Trigger sources modelled: CLC1-CLC8 only (TSEL 16-23); the others never start the scan (note). The first trigger level seen when the scan starts is the previous level, not an edge. SCANBUSY mirrors "running and the CRC can take a word".
 * `[A99]` Stack faults (DS40002043F 11.1.2.2-11.1.2.3 p.111, Table 9-3 p.90; DS40002214G 9.1.3.2 p.61). STKOVF (PCON0 bit 7) is set by a push onto a full stack (the 32nd on the Q10, the 128th on the Q41), STKUNF (bit 6) by a pop from an empty one, which returns 0; both bits are set whether or not STVREN is. With STVREN = 1 (default, also when the part has no such bit) the part resets at the end of that step (the instruction or the interrupt entry that did it): PC to the reset vector, STKPTR 0, the flag stays, other PCON0 bits unchanged. With STVREN = 0 a full stack keeps STKPTR and the new address overwrites the top entry, and an empty stack only returns 0. STKPTR bits 7:6 are not used (the older PIC18 STKFUL/STKUNF in STKPTR do not exist on these parts).
 * `[A100]` MCLR pin (DS40002043F 9.4 p.87-88, 9.10 p.88, Table 9-3 p.89, CONFIG2 p.32). The stimulus `[[mclr]]` (`level`, `at`; high until driven) drives the pin. A falling edge is a reset only while the pin is the reset input: LVP = 1, or MCLRE = 1 (otherwise the pin is an ordinary input and nothing happens). Reset: as `[A91]`, RMCLR (PCON0 bit 3) cleared, STATUS untouched (so a reset in Sleep keeps TO = 1, PD = 0 as SLEEP left them, which is the table's -10u), the part wakes. While the pin stays low the part is held (time passes, nothing runs, peripherals stay in their reset state); it runs again at the rising edge. The 10 Fosc delay after the release (p.88-89), the minimum pulse width (TMCLR) and the oscillator start-up are not modelled. A pulse that starts and ends inside one step still resets. The pin level in PORTE.RE3 is not modelled.
-* `[A101]` Interrupt-on-change and INT0-INT2 (DS40002043F 17.4-17.8 p.271, 15.8 p.195, 15.10 p.195, INTCON p.198). Edges are looked for on the pin levels the stimulus produces (`[[pin]]`, `[[port]]`) after every instruction and also in Sleep: a pin whose IOCxP bit is set and rises, or whose IOCxN bit is set and falls, sets its IOCxF bit whatever IOCIE says; IOCIF in PIR0 is rewritten from the IOCxF registers after every step (so it is read-only and follows a software clear). INTx: the pin of INTxPPS, the edge of INTxEDG, sets INTxIF whatever INTxIE says. In Sleep the pending flag with its enable wakes the part through the generic rule `[A93]` (INTxIE, IOCIE; PEIE not needed in PIE0). The Sleep run stops at every stimulus change so the wake-up is at the edge. Not modelled: edges caused by software (an output pin whose latch changes) or by peripherals driving the pin; the rule that an edge seen while IOCxF is being cleared sets the flag again. Q41 uses IOCIF = PIR0.7 and INT0/1/2IF = PIR1/6/10.0, with edge selection in INTCON0. These flags feed both fixed (`MVECEN = 0`) and vectored (`MVECEN = 1`) interrupt entry, including priority and hardware context restoration. Tests: `tests/ioc.rs` (Q10), `tests/q41_ioc.rs` (all six Q41 parts; PPS remapping, both edges, per-port IOC flags and summary clearing, enable-gated Sleep wake-up with GIE clear, both interrupt modes and priorities, RETFIE FAST).
+* `[A101]` Interrupt-on-change and INT0-INT2 (DS40002043F 17.4-17.8 p.271, 15.8 p.195, 15.10 p.195, INTCON p.198). Edges are looked for on resolved pin levels (external stimulus and internal GPIO/peripheral outputs, `[A155]`) after every instruction and also in Sleep: a pin whose IOCxP bit is set and rises, or whose IOCxN bit is set and falls, sets its IOCxF bit whatever IOCIE says; IOCIF in PIR0 is rewritten from the IOCxF registers after every step (so it is read-only and follows a software clear). INTx: the pin of INTxPPS, the edge of INTxEDG, sets INTxIF whatever INTxIE says. In Sleep the pending flag with its enable wakes the part through the generic rule `[A93]` (INTxIE, IOCIE; PEIE not needed in PIE0). The Sleep run stops at every stimulus change so the wake-up is at the edge. Not modelled: the rule that an edge seen while IOCxF is being cleared sets the flag again. Q41 uses IOCIF = PIR0.7 and INT0/1/2IF = PIR1/6/10.0, with edge selection in INTCON0. These flags feed both fixed (`MVECEN = 0`) and vectored (`MVECEN = 1`) interrupt entry, including priority and hardware context restoration. Tests: `tests/ioc.rs` (Q10), `tests/q41_ioc.rs` (all six Q41 parts; PPS remapping, both edges, per-port IOC flags and summary clearing, enable-gated Sleep wake-up with GIE clear, both interrupt modes and priorities, RETFIE FAST).
 * Not modelled: ICD interaction (Table 14-3), WWDT is not paused by a scan (as the data sheet says).
 * `[A103]` Implemented masks of SFRs in the device descriptions, corrected against the data sheets (tests: `tests/q41_irq_masks.rs`). They had dropped real bits, so software writes were lost. Q41 (DS40002214G): `PIR2`/`PIE2`/`IPR2` 0xF1 (p.148), `PIR0`/`PIE0`/`IPR0` 0xFF (bit 5 CLC1IF/IE/IP, p.144/133/163), `PMD0` 0xFB (p.293), `PMD1`/`PMD2`/`PMD4` 0xFF (p.294-297), `WDTPSL`/`WDTPSH` 0xFF, `MD1CARH` 0x0F, `DAC1DATL`/`DAC2DATL` 0xFF, `CLCDATA` 0x0F. Q10 (DS40002043F): `PMD0`/`PMD3` 0xFF, `PMD2` 0x67, `PMD4`/`PMD5` 0xF1 (p.77-83), `PIE3`/`IPR3` 0xFF (p.210, 218; the old masks left TX2/RC2/SSP2/BCL2 unusable). 16F131xx/152xx/171x6 (DS40002519D, DS40002195E, DS40002343F): `WDTPSL`/`WDTPSH` 0xFF, `PORTC` 0x3F on the 14-pin parts and 0xFF on the 20-pin parts (pin allocation tables). `OUT` of CCPxCON and PWMxCON (DS40002043F 23.12.1 p.366) reads the live output level (after POL); MDB does not model it, so tests that read those registers mask bit 5. Not audited: the other registers whose mask is narrower than their declared fields (many are legitimate: selector fields declared 8 bits wide), and reset values (the Q41 `IPR0` reset is listed as 00000000, the data sheet says 10111111).
 
@@ -902,3 +903,31 @@ Sources below are the locally supplied DS40002214G. Tests are `tests/q41_dma.rs`
   PIC18 Fosc-tick pin log; sub-cycle pulses are not visible to pin-connected peripherals.
   Tests `pic16_pwm.rs` cover both output designs, multiple families/modules, buffering,
   polarity, prescale/postscale, timer choice, flags, interrupt dispatch, PMD, Sleep and reset.
+
+* `[A155]` PIC18 pin connectivity (`periph.rs`, `periph/uart.rs`, `periph/quart.rs`,
+  `periph/mssp.rs`; tests `pic18_connectivity.rs`). GPIO configuration and output state are
+  retained across instruction boundaries. Resolved GPIO and peripheral output changes reach
+  timer clock/gate inputs, CCP capture and IOC/INT inputs on the following instruction clock.
+  External stimulus edges retain their specified cycle. Peripheral output edges between clocks
+  round up before propagation; pulses entirely between instruction clocks are not captured.
+  PORT and board readback show the current physical output immediately, with ANSEL masking
+  digital PORT/PPS inputs. Open drain releases high and sinks low; external pull-ups are needed
+  on a released output (the internal WPU remains disabled for an output).
+  Q10 EUSART TX1/2 PPS codes are 09h/0Bh; K22 uses its fixed UART pins. SPEN and asynchronous
+  TXEN enable the EUSART pin driver, overriding TRIS. RX samples RXxPPS (K22 fixed RX) at bit
+  centers, sharing the existing FIFO, framing, ninth-bit and overrun handling. SCKP inverts TX.
+  Q41 UART1/2/3 use TX PPS codes 10h/13h/16h and UxRXPPS, retain TRIS control, and apply
+  TXPOL/RXPOL, data/parity/address width and stop-bit settings. Byte stimuli and UART replies
+  keep their direct receiver interface and take precedence over pin reception.
+  MSSP SPI drives SCK/SDO through PPS and output TRIS, MSB first with CKP/CKE timing. Without
+  an explicit `[[spi]]` byte client, SDI samples the selected SSPxDATPPS pin (K22 fixed SDI).
+  Explicit SPI clients keep their byte-level response interface. I2C drives open-drain SCL/SDA
+  for Start, Restart, Stop, transmit, receive and acknowledge operations. The corresponding
+  PPS input and output must select the same pin; I2C takes output-enable control with TRIS set.
+  K22 uses its fixed MSSP pins. The pin log includes serial transitions in Fosc ticks, including
+  SPI half-cycle clock edges. Serial clocks and in-flight output levels pause in Sleep.
+  Limits: I2C clients remain byte-level devices; arbitrary external pin-driven I2C clients,
+  clock stretching, arbitration/collisions and MSSP client mode are not modelled. Byte-level
+  I2C stimuli retain their existing abstract bus interface even without physical routing;
+  board I2C devices still require their configured wiring. SPI SMP does not change sampling
+  (SDI is sampled at the end of each bit). No hardware validation is claimed.

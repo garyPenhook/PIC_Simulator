@@ -55,6 +55,10 @@ type Rx = (u8, bool, bool);
 #[derive(Clone)]
 pub struct QUart {
     pub num: u8,
+    frames: VecDeque<(u64, u64, u16, u64)>,
+    pin_prev: Option<bool>,
+    pin_paused: Option<u64>,
+    pin_rx: Option<(u64, u64, u8, u8, u16)>,
     pub replies: Vec<super::UartReply>,
     sent: u8,
     con0: usize,
@@ -89,7 +93,7 @@ pub struct QUart {
 impl QUart {
     /// Something is under way that `sync` must follow cycle by cycle (`Periph::tick` does not skip a sync meanwhile).
     pub fn busy(&self) -> bool {
-        self.cur.is_some() || self.next.is_some() || self.pending.is_some() || !self.rx_in.is_empty() || self.rx_cur.is_some()
+        self.cur.is_some() || self.next.is_some() || self.pending.is_some() || !self.rx_in.is_empty() || self.rx_cur.is_some() || self.pin_rx.is_some()
     }
 
     pub fn find(dev: &Device, n: u8) -> Option<(QUart, [usize; 9])> {
@@ -97,7 +101,7 @@ impl QUart {
         let (con0, con1, con2, errir, errie, fifo, brgl, brgh, txb, rxb, p1l) =
             (a("CON0")?, a("CON1")?, a("CON2")?, a("ERRIR")?, a("ERRIE")?, a("FIFO")?, a("BRGL")?, a("BRGH")?, a("TXB")?, a("RXB")?, a("P1L")?);
         let q = QUart {
-            num: n,
+            num: n, frames: VecDeque::new(), pin_prev: None, pin_paused: None, pin_rx: None,
             replies: Vec::new(), sent: 0,
             con0,
             con1,
@@ -125,6 +129,50 @@ impl QUart {
         // Registers in hook-sub-code order.
         let regs = [txb, rxb, con0, con1, brgl, brgh, fifo, errir, p1l];
         Some((q, regs))
+    }
+
+    pub fn rx_enabled(&self, m: &DataMem) -> bool { self.rx_on(m) }
+    pub fn tx_enabled(&self, m: &DataMem) -> bool { self.on(m) && (m.mem[self.con0] & 0x20 != 0 || self.cur.is_some()) && self.mode(m) <= 4 }
+    pub fn tx_inverted(&self, m: &DataMem) -> bool { m.mem[self.con2] & 4 != 0 }
+    pub fn tx_signal(&self, at: u64) -> bool {
+        let at = self.pin_paused.map_or(at, |t| at.min(t));
+        if let Some(&(start, bit, word, width)) = self.frames.iter().rev().find(|f| f.0 <= at) {
+            let n = (at - start) / bit;
+            if n == 0 { false } else if n <= width { word >> (n - 1) & 1 != 0 } else { true }
+        } else { true }
+    }
+    pub fn tx_times(&self, from: u64, to: u64) -> impl Iterator<Item=u64> + '_ {
+        self.frames.iter().flat_map(|&(start, bit, _, width)| (0..=width+1).map(move |n| start + n * bit)).filter(move |&t| from < t && t <= to)
+    }
+    pub fn rx_pin(&mut self, m: &mut DataMem, at: u64, high: bool, ev: &mut Vec<u64>) {
+        let high = high ^ (m.mem[self.con2] & 0x40 != 0);
+        if !self.rx_on(m) || (m.mem[self.errir] & 2 != 0 && m.mem[self.con2] & 0x80 == 0) || !self.rx_in.is_empty() || self.rx_cur.is_some() {
+            self.pin_rx = None; self.pin_prev = Some(high); return;
+        }
+        let falling = self.pin_prev == Some(true) && !high;
+        self.pin_prev = Some(high);
+        if self.pin_rx.is_none() && falling {
+            let bit = self.bit_cycles(m);
+            self.pin_rx = Some((at + bit / 2, bit, self.data_bits(m) as u8, 0, 0));
+        }
+        if let Some((next, bit, width, index, mut word)) = self.pin_rx {
+            if at < next { return; }
+            if index == 0 && high { self.pin_rx = None; return; }
+            if index > 0 && index <= width { word |= u16::from(high) << (index - 1); }
+            if index >= width + 1 {
+                let bad = word & 0x8000 != 0 || !high;
+                let stop = m.mem[self.con2] >> 4 & 3;
+                if stop == 2 && index == width + 1 {
+                    self.pin_rx = Some((next + bit, bit, width, index + 1, word | u16::from(bad) << 15));
+                    return;
+                }
+                self.pin_rx = None;
+                let delay = if m.mem[self.fifo] & 0x40 != 0 { if stop == 1 { bit } else { bit / 2 } } else { 0 };
+                self.rx_cur = Some((at + delay, word & 0x1FF, bad));
+                self.rx(m, at, ev);
+            } else { self.pin_rx = Some((next + bit, bit, width, index + 1, word)); }
+        }
+        self.bits(m);
     }
 
     pub fn rx_send(&mut self, s: RxStream) {
@@ -176,6 +224,13 @@ impl QUart {
         tx.push((self.num, t, self.sent));
         let stop = self.stop_halves(m);
         let end = t + self.span(m, 2 * (1 + self.data_bits(m)) + stop);
+        let mut word = w;
+        if matches!(self.mode(m), 2 | 3) {
+            let parity = (w as u8).count_ones() % 2 == 0;
+            word = (w & 0xFF) | u16::from(parity == (self.mode(m) == 2)) << 8;
+        }
+        self.frames.push_back((t, self.bit_cycles(m), word, self.data_bits(m)));
+        while self.frames.len() > 3 { self.frames.pop_front(); }
         self.cur = Some((end - self.span(m, stop), end));
     }
 
@@ -200,16 +255,20 @@ impl QUart {
 
     /// The part slept for `d` cycles with the module's clock stopped: the character in the shift register is `d` cycles later.
     pub fn shift(&mut self, d: u64) {
+        for frame in &mut self.frames { frame.0 += d; }
         if let Some(c) = &mut self.cur {
             (c.0, c.1) = (c.0 + d, c.1 + d);
         }
     }
 
     /// Entering Sleep: the character being received is lost, and until the wake-up the receiver sees nothing.
+    pub fn freeze_pins(&mut self, at: u64) { self.pin_paused = Some(at); }
+
     pub fn sleep(&mut self, on: bool) {
+        if !on { self.pin_paused = None; }
         self.asleep = on;
         if on {
-            self.rx_cur = None;
+            self.rx_cur = None; self.pin_prev = None; self.pin_rx = None;
         }
     }
 
@@ -221,6 +280,7 @@ impl QUart {
     /// Everything ON = 0 holds in reset.
     fn reset(&mut self, m: &mut DataMem) {
         self.cur = None;
+        self.frames.clear(); self.pin_paused = None; self.pin_prev = None; self.pin_rx = None;
         self.next = None;
         self.pending = None;
         self.rx_cur = None;
@@ -240,7 +300,7 @@ impl QUart {
         } else {
             f |= 0x10;
         }
-        if self.rx_cur.is_none() {
+        if self.rx_cur.is_none() && self.pin_rx.is_none() {
             f |= 0x08;
         }
         f |= match self.rx_fifo.len() {

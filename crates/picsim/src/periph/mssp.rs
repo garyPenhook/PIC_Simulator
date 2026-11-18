@@ -3,7 +3,7 @@
 //! the stimulus file: a byte-level SPI client (`[[spi]]`, answers every exchanged byte with the next byte of its list, then
 //! `fill`) and I2C clients on the bus (`[[i2c]]`, by 7-bit address). The bytes and conditions the host puts on the bus are
 //! logged. The bus has pull-ups and no other host: an address nobody owns is not acknowledged and a read from nobody gives FFh.
-//! PPS, TRIS and the pins are not modelled (the module runs once SSPEN is set).
+//! The owner routes the host waveforms through PPS/TRIS and supplies sampled SPI input bits.
 //!
 //! Sourced rules, SPI host (SSPM = 0000-0011, 1010):
 //! * The transfer starts when SSPxBUF is written (28.2.1 p.445); a write while a byte is shifting is ignored and sets WCOL
@@ -124,6 +124,12 @@ enum Step {
 #[derive(Clone)]
 pub struct Mssp {
     pub num: u8,
+    pub byte_client: bool,
+    pub pin_received: u8,
+    // Fosc ticks, SCK/SCL and SDO/SDA. Retained through the following pin-consumer scan.
+    wire: VecDeque<(u64, bool, bool)>,
+    pin_paused: Option<u64>,
+    samples: VecDeque<u64>,
     buf: usize,
     add: usize,
     stat: usize,
@@ -143,6 +149,43 @@ pub struct Mssp {
 }
 
 impl Mssp {
+    pub fn enabled(&self, m: &[u8]) -> bool { self.en(m) }
+    pub fn i2c_mode(&self, m: &[u8]) -> bool { self.en(m) && m[self.con1] & 15 == 8 }
+    pub fn freeze_pins(&mut self, now: u64) { self.pin_paused = Some(4 * now); }
+    pub fn pin_level(&self, tick: u64) -> (bool, bool) {
+        let tick = self.pin_paused.map_or(tick, |t| tick.min(t));
+        self.wire.iter().rev().find(|e| e.0 <= tick).map_or((false, false), |e| (e.1, e.2))
+    }
+    pub fn wire_times(&self, from: u64, to: u64) -> impl Iterator<Item=u64> + '_ {
+        self.wire.iter().map(|e| e.0).filter(move |&t| from < t && t <= to)
+    }
+    pub fn pin_times(&self, from: u64, to: u64) -> impl Iterator<Item=u64> + '_ {
+        self.wire.iter().map(|e| (e.0 + 3) / 4 + 1).filter(move |&t| from < t && t <= to)
+    }
+    pub fn take_samples(&mut self, now: u64) -> Vec<u64> {
+        let mut times = Vec::new();
+        while self.samples.front().is_some_and(|&t| t <= now) { times.push(self.samples.pop_front().unwrap()); }
+        times
+    }
+    fn wire_at(&mut self, tick: u64, clk: bool, data: bool) { self.wire.push_back((tick, clk, data)); }
+    fn wire_byte(&mut self, now: u64, period: u64, byte: u8, idle: bool, cke: bool, ack: Option<bool>) {
+        let start = 4 * now;
+        for n in 0..8u64 {
+            let data = byte & (0x80 >> n) != 0;
+            let t = start + n * 4 * period;
+            self.wire_at(t, idle, if cke { data } else { self.pin_level(t).1 });
+            self.wire_at(t + 2 * period, !idle, data);
+            self.wire_at(t + 4 * period, idle, data);
+        }
+        if let Some(ack) = ack {
+            let t = start + 32 * period;
+            self.wire_at(t, false, !ack);
+            self.wire_at(t + 2 * period, true, !ack);
+            self.wire_at(t + 4 * period, false, true);
+        }
+        while self.wire.len() > 512 { self.wire.pop_front(); }
+    }
+
     /// Something is under way that `sync` must follow cycle by cycle (`Periph::tick` does not skip a sync meanwhile).
     pub fn busy(&self) -> bool {
         !self.steps.is_empty()
@@ -151,7 +194,7 @@ impl Mssp {
     pub fn find(dev: &Device, n: u8) -> Option<(Mssp, [usize; 6])> {
         let a = |s: &str| addr(dev, &format!("SSP{n}{s}"));
         let s = Mssp {
-            num: n,
+            num: n, byte_client: false, pin_received: 0, wire: VecDeque::new(), pin_paused: None, samples: VecDeque::new(),
             buf: a("BUF")?,
             add: a("ADD")?,
             stat: a("STAT")?,
@@ -177,7 +220,7 @@ impl Mssp {
 
     /// A reset of the part: whatever was in flight is gone (the registers take their reset values elsewhere).
     pub fn abort(&mut self) {
-        self.steps.clear();
+        self.steps.clear(); self.wire.clear(); self.samples.clear();
         self.expect_addr = false;
         self.sel = None;
         self.read_idx = None;
@@ -189,6 +232,9 @@ impl Mssp {
 
     /// The part slept for `d` cycles with the module's clock stopped: everything in flight is `d` cycles later.
     pub fn shift(&mut self, d: u64) {
+        self.pin_paused = None;
+        for e in &mut self.wire { e.0 += 4 * d; }
+        for t in &mut self.samples { *t += d; }
         for (t, s) in &mut self.steps {
             *t += d;
             if let Step::SpiDone(_, start) = s {
@@ -219,7 +265,7 @@ impl Mssp {
             self.steps.pop_front();
             match st {
                 Step::SpiDone(sent, start) => {
-                    let got = self.spi.data.pop_front().unwrap_or(self.spi.fill);
+                    let got = if self.byte_client { self.spi.data.pop_front().unwrap_or(self.spi.fill) } else { self.pin_received };
                     spi_log.push((self.num, start, sent));
                     m[self.buf] = got;
                     m[self.stat] |= 1;
@@ -343,6 +389,9 @@ impl Mssp {
                             }
                             _ => 1,
                         };
+                        self.pin_received = 0;
+                        self.samples = (1..=8).map(|n| now + n * cycles).collect();
+                        self.wire_byte(now, cycles, v, m[self.con1] & 0x10 != 0, m[self.stat] & 0x40 != 0, None);
                         self.steps.push_back((now + 8 * cycles, Step::SpiDone(v, now)));
                     }
                     8 => {
@@ -352,6 +401,8 @@ impl Mssp {
                         }
                         m[self.buf] = v;
                         m[self.stat] |= 5; // BF, R/W
+                        let ack = if self.expect_addr { self.i2c.iter().any(|c| c.address == v >> 1 && !c.absent) } else { matches!(self.sel, Some((_, false))) };
+                        self.wire_byte(now, u64::from(m[self.add]) + 1, v, false, true, Some(ack));
                         let t = |k| self.tbrg(m, now, k);
                         let steps = [(t(16), Step::TxBf), (t(17), Step::TxAck(v)), (t(18), Step::TxDone)];
                         self.steps.extend(steps);
@@ -367,12 +418,14 @@ impl Mssp {
                 if (old & 0x20 != 0 && v & 0x20 == 0) || (old ^ v) & 15 != 0 {
                     // SSPEN cleared or SSPM changed: abort, clear BF, S, P, R/W. [A49]
                     self.steps.clear();
+                    self.wire.clear(); self.samples.clear();
                     m[self.stat] &= 0xC0;
                     m[self.con2] &= !0x1F;
                     self.expect_addr = false;
                     self.sel = None;
                     self.read_idx = None;
                 }
+                if v & 0x20 != 0 && self.wire.is_empty() { self.wire_at(now * 4, v & 15 == 8 || v & 0x10 != 0, v & 15 == 8); }
             }
             CON2 => {
                 if !(en && m[self.con1] & 15 == 8) {
@@ -399,6 +452,22 @@ impl Mssp {
                     0x10 => vec![(t(2), Step::AckDone(v & 0x20 != 0))],
                     _ => vec![],
                 };
+                let half = (u64::from(m[self.add]) + 1) * 2;
+                let start = now * 4;
+                match bit {
+                    1 => { self.wire_at(start, true, true); self.wire_at(start + half, true, false); self.wire_at(start + 2 * half, false, false); }
+                    2 => { self.wire_at(start, false, true); self.wire_at(start + half, true, true); self.wire_at(start + 2 * half, true, false); self.wire_at(start + 3 * half, false, false); }
+                    4 => { self.wire_at(start, false, false); self.wire_at(start + half, true, false); self.wire_at(start + 2 * half, true, true); }
+                    8 => {
+                        let byte = self.sel.filter(|s| s.1).map(|(i, _)| {
+                            let c = &self.i2c[i];
+                            c.memory.as_ref().map_or_else(|| c.data.front().copied().unwrap_or(c.fill), |mem| mem[usize::from(c.pointer)])
+                        }).unwrap_or(0xFF);
+                        self.wire_byte(now, u64::from(m[self.add]) + 1, byte, false, true, None);
+                    }
+                    16 => { let data = v & 0x20 != 0; self.wire_at(start, false, data); self.wire_at(start + half, true, data); self.wire_at(start + 2 * half, false, true); }
+                    _ => {}
+                }
                 self.steps.extend(steps);
             }
             ADD => m[self.add] = v,

@@ -547,6 +547,12 @@ struct Port {
     wpu_disable: Option<(usize, u8)>,
 }
 
+#[derive(Clone, PartialEq, Eq)]
+struct PinState {
+    output: u8, high: u8, od: u8, weak: u8, analog: u8, implemented: u8,
+    codes: [u8; 8], uart: [u8; 2], quart: [u8; 5], inverted: u8,
+}
+
 #[derive(Clone)]
 struct I2cPps {
     num: u8,
@@ -572,7 +578,11 @@ pub struct Periph {
     t1: Vec<Timer1>,
     t2: Vec<Timer2>,
     uarts: Vec<Uart>,
+    uart_pins: Vec<(usize, u8)>,
+    uart_scan: u64,
+    pin_history: Vec<VecDeque<(u64, PinState)>>,
     quarts: Vec<QUart>,
+    quart_pins: Vec<usize>,
     spis: Vec<Spi>,
     mssps: Vec<Mssp>,
     i2cqs: Vec<I2cQ>,
@@ -642,7 +652,7 @@ pub struct Periph {
     /// Output source changes scheduled for a later time (CCP compare and PWM edges).
     sched: Vec<Sched>,
     /// Changes of the pins driven by a peripheral through RxyPPS: (time in Fosc ticks = 4 * cycle + quarter,
-    /// port letter, pin, level). Only pins whose TRIS bit is clear at the time of the change are logged.
+    /// port letter, pin, level). Includes serial signals and peripheral output-enable overrides.
     pub pin_log: Log<(u64, u8, u8, bool)>,
     /// Cycle of the latest flag set by `sync` since the core last looked (`take_event`).
     event: Option<u64>,
@@ -728,7 +738,7 @@ impl Periph {
     /// replaces the fixed entries of the pin-output layer (DS40001412H Tables 2, 3 p.6-8, Register 24-4 p.348).
     pub fn route_k22_ccp(&mut self, ccp2mx: bool, ccp3mx: bool) {
         let Some(big) = self.k22_ccp else { return };
-        self.ppsout.retain(|o| o.0 < FIXED_PIN);
+        self.ppsout.retain(|o| o.0 < FIXED_PIN || matches!(o.0 - FIXED_PIN, 30 | 31));
         let pins: [(u8, u8, u8); 5] = [
             (1, b'C', 2),
             (2, if ccp2mx { b'C' } else { b'B' }, if ccp2mx { 1 } else { 3 }),
@@ -774,7 +784,7 @@ impl Periph {
 
     /// Find the timers the part has and mark their registers as hooked in `m`.
     pub fn bind(dev: &Device, m: &mut DataMem) -> Periph {
-        let mut p = Periph { q41: addr(dev, "ADCPCON").is_some(), pwmqs: Vec::new(), pwm_en: addr(dev, "PWMEN"), pwm_load: addr(dev, "PWMLOAD"), clc_select: None, ports: Vec::new(), drive: Default::default(), t0: None, t1: Vec::new(), t2: Vec::new(), uarts: Vec::new(), quarts: Vec::new(), spis: Vec::new(), mssps: Vec::new(), i2cqs: Vec::new(), adc: None, nvm: None, nvmq: None, stall: 0, fvr: None, tx: Log::new(), spi_tx: Log::new(), i2c_log: Log::new(), notes: BTreeSet::new(), ccps: Vec::new(), pwms: Vec::new(), cwg: None, cmps: Vec::new(), cmout: None, clcs: Vec::new(), clcin: Vec::new(), clcdata: None, in_clc: false, clc_scan: 0, crc: None, crcq: None, wdt: None, reset_req: None, sleeping: false, sleep_at: 0, fosc_off: false, wdt_wake: false, analog: Vec::new(), ccptmrs: ccp::TmrSel::Q10(None), k22_ccp: None, ppsout: Vec::new(), pps_by_port: Vec::new(), sig_src: 0, i2c_pps: Vec::new(), i2c_fixed: Vec::new(), board: Board::default(), pullup: Vec::new(), forced: Vec::new(), sig: 0, sig_log: Vec::new(), sched: Vec::new(), pin_log: Log::new(), event: None, ioc: Ioc::default(), sb: SyncBufs::default(), due: 0, owed: None };
+        let mut p = Periph { q41: addr(dev, "ADCPCON").is_some(), pwmqs: Vec::new(), pwm_en: addr(dev, "PWMEN"), pwm_load: addr(dev, "PWMLOAD"), clc_select: None, ports: Vec::new(), drive: Default::default(), t0: None, t1: Vec::new(), t2: Vec::new(), uarts: Vec::new(), uart_pins: Vec::new(), uart_scan: 0, pin_history: Vec::new(), quarts: Vec::new(), quart_pins: Vec::new(), spis: Vec::new(), mssps: Vec::new(), i2cqs: Vec::new(), adc: None, nvm: None, nvmq: None, stall: 0, fvr: None, tx: Log::new(), spi_tx: Log::new(), i2c_log: Log::new(), notes: BTreeSet::new(), ccps: Vec::new(), pwms: Vec::new(), cwg: None, cmps: Vec::new(), cmout: None, clcs: Vec::new(), clcin: Vec::new(), clcdata: None, in_clc: false, clc_scan: 0, crc: None, crcq: None, wdt: None, reset_req: None, sleeping: false, sleep_at: 0, fosc_off: false, wdt_wake: false, analog: Vec::new(), ccptmrs: ccp::TmrSel::Q10(None), k22_ccp: None, ppsout: Vec::new(), pps_by_port: Vec::new(), sig_src: 0, i2c_pps: Vec::new(), i2c_fixed: Vec::new(), board: Board::default(), pullup: Vec::new(), forced: Vec::new(), sig: 0, sig_log: Vec::new(), sched: Vec::new(), pin_log: Log::new(), event: None, ioc: Ioc::default(), sb: SyncBufs::default(), due: 0, owed: None };
         let mut hook = |a: usize, k: u8| m.special[a] = Special::Hook(k);
         if let (Some(l), Some(h), Some(c0), Some(c1), Some(flag)) =
             (addr(dev, "TMR0L"), addr(dev, "TMR0H"), addr(dev, "T0CON0"), addr(dev, "T0CON1"), Flag::find(dev, "TMR0IF"))
@@ -1090,13 +1100,28 @@ impl Periph {
                 m.special[a] = Special::Sync;
             }
         }
+        if p.ppsout.is_empty() || p.k22_ccp.is_some() {
+            for u in &p.uarts {
+                let (letter, bit) = if u.num == 1 { (b'C', 6) } else if p.ports.iter().any(|p| p.letter == b'D') { (b'D', 6) } else { (b'B', 6) };
+                if let Some(pi) = p.ports.iter().position(|p| p.letter == letter) {
+                    p.ppsout.push((FIXED_PIN + usize::from(29 + u.num), pi, bit));
+                }
+            }
+        }
         p.pps_by_port = vec![Vec::new(); p.ports.len()];
         for &(reg, pi, bit) in &p.ppsout {
             p.pps_by_port[pi].push((reg, bit));
         }
+        for u in &p.uarts {
+            let fixed = if u.num == 1 { 2 * 8 + 7 } else if p.ports.iter().any(|p| p.letter == b'D') { 3 * 8 + 7 } else { 1 * 8 + 7 };
+            let rx = addr(dev, &format!("RX{}PPS", u.num));
+            p.uart_pins.push((rx.unwrap_or(FIXED_PIN + fixed), if rx.is_some() { 0x09 + 2 * (u.num - 1) } else { 29 + u.num }));
+        }
+        p.quart_pins = p.quarts.iter().map(|q| addr(dev, &format!("U{}RXPPS", q.num)).unwrap()).collect();
         let sigs = p.ccps.iter().map(|c| c.sig).chain(p.pwms.iter().map(|c| c.sig)).chain(p.cmps.iter().map(|c| c.sig)).chain(p.clcs.iter().map(|c| c.sig));
         p.sig_src = sigs.fold(0, |a, c| a | 1u32.checked_shl(u32::from(c)).unwrap_or(0));
         if !p.pwmqs.is_empty() { p.sig_src |= 0xFC0; }
+        p.pin_history = (0..p.ports.len()).map(|i| VecDeque::from([(0, p.pin_state(i, m, 0))])).collect();
         p
     }
 
@@ -1190,6 +1215,7 @@ impl Periph {
             true
         } else if let Some(s) = self.mssps.iter_mut().find(|s| s.num == num) {
             s.spi = c;
+            s.byte_client = true;
             true
         } else {
             false
@@ -1257,7 +1283,7 @@ impl Periph {
                 if m.mem[c.cap] & 15 != 0 {
                     continue; // noted in `sync_with`
                 }
-                for at in self.drive.times(c.scan, now) {
+                for at in self.pin_times(c.scan, now) {
                     if best.is_none_or(|b| (at, i) < b) && self.pps_pin(m, reg, at) != self.pps_pin(m, reg, at - 1) {
                         best = Some((at, i));
                         break;
@@ -1272,6 +1298,7 @@ impl Periph {
         self.ioc_scan(m, now);
         self.sync_core(m, now, false);
         self.clc_eval(m, 4 * now);
+        self.publish_pins(m, now);
         self.wdt_tick(m, now);
         if let Some(c) = &mut self.crc {
             c.sync(m, now);
@@ -1339,6 +1366,7 @@ impl Periph {
         }
         let mut due = u64::MAX;
         let mut at = |c: u64| due = due.min(c.max(soon));
+        if let Some(t) = self.pin_history.iter().flat_map(|h| h.iter().map(|e| e.0)).chain(self.sig_log.iter().map(|e| (e.0 + 3) / 4 + 1)).filter(|&t| t > now).min() { at(t); }
         if let Some(t) = self.next_drive(now) {
             at(t);
         }
@@ -1425,13 +1453,13 @@ impl Periph {
         }
         let from = self.ioc.scan;
         self.ioc.scan = now;
-        let mut times: Vec<u64> = self.drive.times(from, now).collect();
+        let mut times = self.pin_times(from, now);
         times.sort_unstable();
         times.dedup();
         for t in times {
             for k in 0..self.ioc.ports.len() {
                 let (pi, f, n, pp) = self.ioc.ports[k];
-                let (old, new) = (self.port_levels(pi, m, t - 1), self.port_levels(pi, m, t));
+                let (old, new) = (self.port_levels_at(pi, m, t - 1), self.port_levels_at(pi, m, t));
                 let hit = (old ^ new) & (new & m.mem[pp] | !new & m.mem[n]);
                 if hit != 0 {
                     m.mem[f] |= hit & m.implemented[f];
@@ -1460,6 +1488,7 @@ impl Periph {
     /// Edges before `now` are not looked at (a reset: the pins are not watched meanwhile).
     pub fn ioc_rebase(&mut self, now: u64) {
         self.ioc.scan = now;
+        self.uart_scan = now;
     }
 
     /// The next time after `after` that the stimulus changes a pin.
@@ -1598,6 +1627,7 @@ impl Periph {
         for o in old.mssps {
             if let Some(s) = self.mssps.iter_mut().find(|s| s.num == o.num) {
                 s.spi = o.spi;
+                s.byte_client = o.byte_client;
                 s.i2c = o.i2c;
             }
         }
@@ -1705,9 +1735,12 @@ impl Periph {
             self.t1[i].sleep_run = self.t1_sleep_ok(m, i);
         }
         for u in &mut self.uarts {
+            u.freeze_pins(now);
             u.sleep(true, 0);
         }
+        for q in &mut self.mssps { q.freeze_pins(now); }
         for q in &mut self.quarts {
+            q.freeze_pins(now);
             q.sleep(true);
         }
     }
@@ -1717,6 +1750,7 @@ impl Periph {
     /// Timer1-type timers on a pin, LFINTOSC or SOSC count on (`sync_core` with `asleep`) `[A102]`.
     /// Characters the stimulus sends to a UART meanwhile are lost `[A94]`.
     fn sync_asleep(&mut self, m: &mut DataMem, now: u64) {
+        self.uart_scan = now;
         let mut ev: Vec<u64> = Vec::new();
         self.ioc_scan(m, now);
         self.clc_scan(m, now);
@@ -1740,6 +1774,7 @@ impl Periph {
         }
         self.sync_core(m, now, true);
         self.clc_eval(m, 4 * now);
+        self.publish_pins(m, now);
         self.wdt_tick(m, now);
         for e in ev {
             self.raised(e);
@@ -2268,7 +2303,7 @@ impl Periph {
             Clk::Pin(inv) => {
                 let mut l: Vec<u64> = Vec::new();
                 if let Some(reg) = cki {
-                    let mut times: Vec<u64> = self.drive.times(from, to).collect();
+                    let mut times = self.pin_times(from, to);
                     times.sort_unstable();
                     times.dedup();
                     for t in times {
@@ -2724,11 +2759,41 @@ impl Periph {
         for u in &mut self.uarts {
             u.sync(&mut m.mem, now, ev, &mut self.tx, &mut self.notes);
         }
+        for i in 0..self.uarts.len() {
+            if m.mem[self.uarts[i].rcsta] & 0x90 != 0x90 { continue; }
+            for t in self.uart_scan.saturating_add(1)..=now {
+                let high = self.pps_pin(m, self.uart_pins[i].0, t);
+                let len = self.uarts[i].fifo.len();
+                self.uarts[i].rx_pin(&mut m.mem, t, high);
+                if self.uarts[i].fifo.len() > len { ev.push(t); }
+            }
+            self.uarts[i].bits(&mut m.mem);
+        }
         for q in &mut self.quarts {
             q.sync(m, now, ev, &mut self.tx, &mut self.notes);
         }
+        for i in 0..self.quarts.len() {
+            if !self.quarts[i].rx_enabled(m) { continue; }
+            for t in self.uart_scan.saturating_add(1)..=now {
+                let high = self.pps_pin(m, self.quart_pins[i], t);
+                self.quarts[i].rx_pin(m, t, high, ev);
+            }
+        }
+        self.serial_edges(m, self.uart_scan, now);
+        self.uart_scan = now;
         for q in &mut self.spis {
             q.sync(m, now, ev, &mut self.spi_tx, &mut self.notes);
+        }
+        for i in 0..self.mssps.len() {
+            let samples = self.mssps[i].take_samples(now);
+            if !self.mssps[i].byte_client {
+                let reg = self.i2c_pps.iter().find(|p| p.num == self.mssps[i].num).map(|p| p.sda_in);
+                for t in samples {
+                    let reg = reg.or_else(|| self.i2c_fixed.iter().find(|f| f.0 == self.mssps[i].num).map(|f| FIXED_PIN + usize::from((f.2.0 - b'A') * 8 + f.2.1)));
+                    let high = reg.is_some_and(|reg| self.pps_pin_tick(m, reg, 4 * t - 1));
+                    self.mssps[i].pin_received = self.mssps[i].pin_received << 1 | u8::from(high);
+                }
+            }
         }
         for q in &mut self.mssps {
             q.sync(&mut m.mem, now, ev, &mut self.spi_tx, &mut self.i2c_log, &mut self.notes);
@@ -2838,6 +2903,8 @@ impl Periph {
 
     /// A write: `v` is already masked to the implemented bits. The caller has synced to the writing cycle.
     pub fn write(&mut self, k: u8, v: u8, now: u64, m: &mut DataMem, prog: &mut [u8]) {
+        let serial = (UART0..=39).contains(&k) || (QUART0..QUART_END).contains(&k) || (MSSP0..MSSP_END).contains(&k);
+        let before: Vec<_> = if serial { (0..self.ports.len()).map(|i| self.port_physical(i, m, now).1).collect() } else { Vec::new() };
         match k {
             NVMQ0..=NVMQ_LAST => {
                 let f = self.fosc_hz() as f64 / 1e6;
@@ -3035,42 +3102,162 @@ impl Periph {
             }
             _ => unreachable!("write of hook {k} has no model"),
         }
-    }
-
-    /// Physical driver mask and pin levels, before the analog input buffer.
-    fn port_physical(&self, i: usize, m: &DataMem, now: u64) -> (u8, u8) {
-        let p = &self.ports[i];
-        let tris = m.mem[p.tris];
-        let output = !tris & m.implemented[p.tris] & m.implemented[p.port];
-        let mut high = m.mem[p.lat];
-        for &(reg, bit) in &self.pps_by_port[i] {
-            let code = self.output_code(m, reg);
-            if self.sig_src >> code & 1 != 0 || ((1..=4).contains(&code) && self.cwg.as_ref().is_some_and(|c| c.hiz >> (code - 1) & 1 == 0)) {
-                high = high & !(1 << bit) | u8::from(self.sig >> code & 1 != 0) << bit;
+        for (i, old) in before.into_iter().enumerate() {
+            let (driven, new) = self.port_physical(i, m, now);
+            for bit in 0..8 {
+                if (old ^ new) & (1 << bit) != 0 && (driven & (1 << bit) != 0 || self.pin_state(i, m, now).output & (1 << bit) != 0) {
+                    self.pin_log.push((4 * now, self.ports[i].letter, bit, new & (1 << bit) != 0));
+                }
             }
         }
-        let od = p.odcon.map_or(0, |a| m.mem[a]);
-        let driven = output & !(od & high);
-        // Internal WPU is disabled for outputs, even while open drain releases them.
-        let weak = if p.wpu_disable.is_some_and(|(a, mask)| m.mem[a] & mask != 0) { 0 }
-            else { p.wpu.map_or(0, |a| m.mem[a]) & !output };
-        let pull = weak | self.pullup.get(i).copied().unwrap_or(0);
-        let input = self.drive.level(i, now) | pull & !self.drive.mask(i, now);
-        let levels = (high & driven | input & !driven)
-            & !self.forced.get(i).copied().unwrap_or(0) & m.implemented[p.port];
-        (driven, levels)
     }
 
-    /// Digital PORT/PPS readback; ANSEL disables the input buffer, including on outputs.
+    fn pin_state(&self, i: usize, m: &DataMem, now: u64) -> PinState {
+        let p = &self.ports[i];
+        let mut state = PinState { output: !m.mem[p.tris] & m.implemented[p.tris] & m.implemented[p.port],
+            high: m.mem[p.lat], od: p.odcon.map_or(0, |a| m.mem[a]), weak: 0,
+            analog: p.ansel.map_or(0, |a| m.mem[a]), implemented: m.implemented[p.port], codes: [0; 8], uart: [0; 2], quart: [0; 5], inverted: 0 };
+        for &(reg, bit) in &self.pps_by_port[i] {
+            let code = self.output_code(m, reg);
+            if self.sig_src >> code & 1 != 0 || ((1..=4).contains(&code) && self.cwg.as_ref().is_some_and(|c| c.hiz >> (code - 1) & 1 == 0)) { state.codes[usize::from(bit)] = code; }
+            for q in &self.mssps {
+                if q.enabled(&m.mem) && (code == 0x0F + 2 * (q.num - 1) || code == 0x10 + 2 * (q.num - 1)) {
+                    if q.i2c_mode(&m.mem) {
+                        let selected = self.i2c_pps.iter().find(|pp| pp.num == q.num).map(|pp| m.mem[if code == pp.scl_code { pp.scl_in } else { pp.sda_in }]);
+                        let pin = ((p.letter - b'A') << 3) | bit;
+                        if selected != Some(pin) { continue; }
+                    }
+                    state.codes[usize::from(bit)] = code;
+                    if q.i2c_mode(&m.mem) {
+                        // MSSP owns the output enable in I2C mode; both TRIS bits must be inputs.
+                        if m.mem[p.tris] & (1 << bit) != 0 { state.output |= 1 << bit; state.od |= 1 << bit; }
+                    }
+                }
+            }
+            for (k, u) in self.uarts.iter().enumerate() {
+                if self.uart_pins[k].1 == code && u.tx_level(&m.mem, now).is_some() {
+                    state.uart[k] |= 1 << bit;
+                    if m.mem[u.baud] & 0x10 != 0 { state.inverted |= 1 << bit; }
+                }
+            }
+        }
+        for &(reg, bit) in &self.pps_by_port[i] {
+            let code = out_code(m, reg);
+            for (k, q) in self.quarts.iter().enumerate() {
+                if code == 0x10 + 3 * (q.num - 1) && q.tx_enabled(m) {
+                    state.quart[k] |= 1 << bit;
+                    if q.tx_inverted(m) { state.inverted |= 1 << bit; }
+                }
+            }
+        }
+        for &(num, scl, sda) in &self.i2c_fixed {
+            let Some(q) = self.mssps.iter().find(|q| q.num == num && q.enabled(&m.mem)) else { continue; };
+            let i2c = q.i2c_mode(&m.mem);
+            let data = if i2c { sda } else if num == 1 { (b'C', 5) } else if scl.0 == b'D' { (b'D', 4) } else { (b'B', 3) };
+            for (pin, code) in [(scl, 0x0F + 2 * (num - 1)), (data, 0x10 + 2 * (num - 1))] {
+                if pin.0 != p.letter { continue; }
+                state.codes[usize::from(pin.1)] = code;
+                if i2c && m.mem[p.tris] & (1 << pin.1) != 0 { state.output |= 1 << pin.1; state.od |= 1 << pin.1; }
+            }
+        }
+        state.output |= state.uart.iter().fold(0, |a, b| a | b);
+        let weak = if p.wpu_disable.is_some_and(|(a, mask)| m.mem[a] & mask != 0) { 0 } else { p.wpu.map_or(0, |a| m.mem[a]) & !state.output };
+        state.weak = weak | self.pullup.get(i).copied().unwrap_or(0);
+        state
+    }
+
+    pub fn publish_pins(&mut self, m: &DataMem, now: u64) {
+        for i in 0..self.ports.len() {
+            let state = self.pin_state(i, m, now);
+            let h = &mut self.pin_history[i];
+            let at = now + 1;
+            if h.back().is_none_or(|e| e.1 != state) {
+                if h.back().is_some_and(|e| e.0 == at) { h.pop_back(); }
+                h.push_back((at, state));
+            }
+            while h.len() > 2 && h[1].0 < now.saturating_sub(4) { h.pop_front(); }
+        }
+    }
+
+    fn pin_times(&self, from: u64, to: u64) -> Vec<u64> {
+        let mut times: Vec<_> = self.drive.times(from, to).collect();
+        times.extend(self.pin_history.iter().flat_map(|h| h.iter().map(|e| e.0)).filter(|&t| from < t && t <= to));
+        times.extend(self.mssps.iter().flat_map(|q| q.pin_times(from, to)));
+        times.extend(self.sig_log.iter().map(|e| (e.0 + 3) / 4 + 1).filter(|&t| from < t && t <= to));
+        times.extend(self.quarts.iter().flat_map(|u| u.tx_times(from.saturating_sub(1), to.saturating_sub(1))).map(|t| t + 1));
+        times.extend(self.uarts.iter().flat_map(|u| u.tx_times(from.saturating_sub(1), to.saturating_sub(1))).map(|t| t + 1));
+        times.sort_unstable(); times.dedup(); times
+    }
+
+    fn serial_edges(&mut self, m: &DataMem, from: u64, now: u64) {
+        let mut times: Vec<_> = self.uarts.iter().flat_map(|u| u.tx_times(from, now)).map(|t| 4 * t).collect();
+        times.extend(self.quarts.iter().flat_map(|q| q.tx_times(from, now)).map(|t| 4 * t));
+        times.extend(self.mssps.iter().flat_map(|q| q.wire_times(4 * from, 4 * now)));
+        times.sort_unstable(); times.dedup();
+        for tick in times {
+            for i in 0..self.ports.len() {
+                let state = self.pin_state(i, m, tick / 4);
+                let serial = state.uart.iter().chain(state.quart.iter()).fold(0, |a, b| a | b)
+                    | state.codes.iter().enumerate().fold(0, |a, (bit, &code)| a | if (0x0F..=0x12).contains(&code) { 1 << bit } else { 0 });
+                let old = self.resolve_pin_state(i, tick / 4, &state, tick.saturating_sub(1)).1;
+                let new = self.resolve_pin_state(i, tick / 4, &state, tick).1;
+                let changed = (old ^ new) & serial & state.output;
+                for bit in 0..8 { if changed & (1 << bit) != 0 { self.pin_log.push((tick, self.ports[i].letter, bit, new & (1 << bit) != 0)); } }
+            }
+        }
+    }
+
+    // `now` selects external stimulus in instruction cycles; `source` selects internal Fosc ticks.
+    fn resolve_pin_state(&self, i: usize, now: u64, state: &PinState, source: u64) -> (u8, u8) {
+        let mut high = state.high;
+        for (bit, &code) in state.codes.iter().enumerate() {
+            if code != 0 {
+                let level = self.mssps.iter().find_map(|q| {
+                    let base = 0x0F + 2 * (q.num - 1);
+                    if code == base { Some(q.pin_level(source).0) }
+                    else if code == base + 1 { Some(q.pin_level(source).1) } else { None }
+                }).unwrap_or_else(|| self.sig_level(code, source));
+                high = high & !(1 << bit) | u8::from(level) << bit;
+            }
+        }
+        for (k, &mask) in state.uart.iter().enumerate() {
+            if mask != 0 { high = high & !mask | if self.uarts[k].tx_signal(source / 4) { mask } else { 0 }; }
+        }
+        for (k, &mask) in state.quart.iter().enumerate() {
+            if mask != 0 { high = high & !mask | if self.quarts[k].tx_signal(source / 4) { mask } else { 0 }; }
+        }
+        high ^= state.inverted;
+        let driven = state.output & !(state.od & high);
+        let input = self.drive.level(i, now) | state.weak & !self.drive.mask(i, now);
+        (driven, (high & driven | input & !driven) & !self.forced.get(i).copied().unwrap_or(0) & state.implemented)
+    }
+
+    fn port_physical(&self, i: usize, m: &DataMem, now: u64) -> (u8, u8) {
+        self.resolve_pin_state(i, now, &self.pin_state(i, m, now), 4 * now)
+    }
+
     fn port_levels(&self, i: usize, m: &DataMem, now: u64) -> u8 {
         self.port_physical(i, m, now).1 & !self.ports[i].ansel.map_or(0, |a| m.mem[a])
+    }
+
+    fn port_levels_at(&self, i: usize, m: &DataMem, now: u64) -> u8 {
+        let state = self.pin_history.get(i).and_then(|h| h.iter().rev().find(|e| e.0 <= now)).map(|e| e.1.clone()).unwrap_or_else(|| self.pin_state(i, m, now));
+        self.resolve_pin_state(i, now, &state, 4 * now.saturating_sub(1)).1 & !state.analog
+    }
+
+    fn pps_pin_tick(&self, m: &DataMem, reg: usize, tick: u64) -> bool {
+        let pin = if reg >= FIXED_PIN { (reg - FIXED_PIN) as u8 } else { m.mem[reg] };
+        self.ports.iter().position(|p| p.letter == b'A' + (pin >> 3 & 7)).is_some_and(|i| {
+            let state = self.pin_state(i, m, tick / 4);
+            self.resolve_pin_state(i, tick / 4, &state, tick).1 & !state.analog & (1 << (pin & 7)) != 0
+        })
     }
 
     /// Level of the pin a PPS input register selects (PORT field at bits 5:3, PIN at 2:0).
     fn pps_pin(&self, m: &DataMem, reg: usize, now: u64) -> bool {
         let v = if reg >= FIXED_PIN { (reg - FIXED_PIN) as u8 } else { m.mem[reg] };
         let letter = b'A' + (v >> 3 & 7);
-        self.ports.iter().position(|p| p.letter == letter).is_some_and(|i| self.port_levels(i, m, now) >> (v & 7) & 1 != 0)
+        self.ports.iter().position(|p| p.letter == letter).is_some_and(|i| self.port_levels_at(i, m, now) >> (v & 7) & 1 != 0)
     }
 
     /// Timer1 gate value (GVAL): the gate source after the polarity bit. `[A17]` MDB (probed with every GE/GPOL/GTM/GSPM
@@ -3193,7 +3380,7 @@ impl Periph {
         let counts = |ff: bool, run: bool, b: bool| !ge || if gspm { run && if gtm { ff } else { b } } else if gtm { ff } else { b };
         times.clear();
         match src {
-            GSrc::Pin(_) => times.extend(self.drive.times(from, to)),
+            GSrc::Pin(_) => times.extend(self.pin_times(from, to)),
             GSrc::Sig(code) => times.extend(self.sig_log.iter().filter(|e| e.1 == code).map(|e| e.0.div_ceil(4)).filter(|&c| c > from && c <= to)),
             GSrc::None => {}
         }
