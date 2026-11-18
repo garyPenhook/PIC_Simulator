@@ -206,3 +206,90 @@ fn stimulus_zero_restores_automatic_timing_with_or_without_parts() {
         assert_eq!(m.cpu.board.effective_fosc_mhz(), 1.0);
     }
 }
+
+fn r18(m: &Machine, reg: &str) -> u8 {
+    m.cpu.peek(m.dev.find_sfr(reg).unwrap().addr)
+}
+
+/// `[A157]`: a switch to a source with a start-up time keeps the old clock running until the source is ready.
+#[test]
+fn pic18_switch_waits_for_the_pll_and_the_oscillator_start_up_timer() {
+    for (part, pir, cswif) in [("18F27Q10", "PIR1", 0x40u8), ("18F16Q41", "PIR0", 0x08)] {
+        // HFINTOSC 1 MHz; an HS crystal (OST 1024 TOSC) is assumed to run at the family maximum; the PLL adds 200 us.
+        for (nosc, pll) in [(0x70u8, 0.0), (0x20, 200.0)] {
+            let mut m = Machine::new(dev(part)).unwrap();
+            m.cpu.load(&config(&m.dev, &[("RSTOSC", 6), ("CSWEN", 1), ("FEXTOSC", 2)]));
+            m.load_stimulus("").ok();
+            m.cpu.prog.fill(0);
+            let start = m.cpu.cycles;
+            w18(&mut m, "OSCCON1", nosc);
+            assert_eq!(r18(&m, "OSCCON3") & 0x18, 0, "{part}: switch in progress");
+            assert_eq!(r18(&m, "OSCCON2") >> 4, 6, "{part}: COSC unchanged");
+            assert_eq!(m.cpu.p.board.effective_fosc_mhz(), 1.0);
+            let us = 1024.0 / m.dev.fosc_max_mhz() + pll;
+            let expect = (us / 4.0).ceil() as u64;
+            while r18(&m, "OSCCON3") & 0x10 == 0 {
+                m.cpu.step();
+                assert!(m.cpu.cycles - start < 200, "{part}: never ready");
+            }
+            let took = m.cpu.cycles - start;
+            assert!(took >= expect && took <= expect + 2, "{part}: {took} cycles, wanted {expect}");
+            assert_eq!(r18(&m, "OSCCON2") >> 4, nosc >> 4);
+            assert_ne!(r18(&m, pir) & cswif, 0, "{part}: CSWIF");
+        }
+    }
+}
+
+#[test]
+fn pic18_switch_hold_abandon_and_reset() {
+    let mut m = Machine::new(dev("18F27Q10")).unwrap();
+    m.cpu.load(&config(&m.dev, &[("RSTOSC", 6), ("CSWEN", 1), ("FEXTOSC", 2)]));
+    m.cpu.prog.fill(0);
+    w18(&mut m, "OSCCON3", 0x80);
+    w18(&mut m, "OSCCON1", 0x70);
+    for _ in 0..100 {
+        m.cpu.step();
+    }
+    assert_eq!(r18(&m, "OSCCON3") & 0x18, 0x08, "held: NOSCR set, ORDY clear");
+    assert_ne!(r18(&m, "PIR1") & 0x40, 0);
+    assert_eq!(r18(&m, "OSCCON2") >> 4, 6);
+    w18(&mut m, "OSCCON3", 0x00);
+    assert_eq!(r18(&m, "OSCCON3") & 0x18, 0x10);
+    assert_eq!(r18(&m, "OSCCON2") >> 4, 7);
+    // abandon: a request, then COSC copied back into NOSC
+    w18(&mut m, "OSCCON1", 0x60);
+    w18(&mut m, "OSCCON1", 0x70);
+    w18(&mut m, "OSCCON1", 0x60);
+    for _ in 0..100 {
+        m.cpu.step();
+    }
+    assert_eq!(r18(&m, "OSCCON2") >> 4, 6);
+    assert_eq!(r18(&m, "OSCCON3") & 0x18, 0x10);
+}
+
+#[test]
+fn pic18_switch_completes_in_idle() {
+    let mut m = Machine::new(dev("18F27Q10")).unwrap();
+    m.cpu.load(&config(&m.dev, &[("RSTOSC", 6), ("CSWEN", 1), ("FEXTOSC", 2)]));
+    m.cpu.prog.fill(0);
+    m.cpu.prog[0] = 0x03; // SLEEP
+    w18(&mut m, "CPUDOZE", 0x80); // IDLEN: Idle, Fosc keeps running
+    w18(&mut m, "OSCCON1", 0x70);
+    m.cpu.step();
+    for _ in 0..50 {
+        m.cpu.step();
+    }
+    assert_eq!(r18(&m, "OSCCON2") >> 4, 7, "Idle: the switch completes");
+
+    // Sleep proper: it does not, until the part wakes (DS40002043F 5.3.3 p.49)
+    let mut m = Machine::new(dev("18F27Q10")).unwrap();
+    m.cpu.load(&config(&m.dev, &[("RSTOSC", 6), ("CSWEN", 1), ("FEXTOSC", 2), ("WDTE", 0)]));
+    m.cpu.prog.fill(0);
+    m.cpu.prog[0] = 0x03;
+    w18(&mut m, "OSCCON1", 0x70);
+    m.cpu.step();
+    for _ in 0..50 {
+        m.cpu.step();
+    }
+    assert_eq!(r18(&m, "OSCCON2") >> 4, 6, "Sleep: no switch");
+}

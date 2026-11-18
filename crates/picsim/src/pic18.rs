@@ -112,6 +112,8 @@ pub struct Pic18 {
     /// PIC18(L)F2x/4xK22 oscillator status (`osc_status`): OSCCON, OSCCON2, OSCTUNE, and the FOSC and PLLCFG configuration fields.
     osc: Option<(usize, usize, usize)>,
     oscillator: crate::oscillator::Oscillator,
+    /// PIRx register and mask of CSWIF (Q10 PIR1 bit 6, Q41 PIR0 bit 3).
+    cswif: Option<(usize, u8)>,
     fosc_cfg: u8,
     pllcfg: bool,
     /// TO and PD of STATUS (`[A129]`): read only, 1 after a power-on reset, set by CLRWDT. 0 on a part whose STATUS has neither.
@@ -247,6 +249,7 @@ impl Pic18 {
             core_irq,
             osc,
             oscillator: crate::oscillator::Oscillator::new(dev),
+            cswif: crate::oscillator::Oscillator::new(dev).delayed().then(|| ()).and_then(|()| dev.sfr.iter().find_map(|r| r.fields.iter().find(|f| f.name == "CSWIF").map(|f| (r.addr as usize, 1u8 << f.pos)))),
             fosc_cfg: 0,
             pllcfg: false,
             vic: dev.find_sfr("SHADCON").is_some(),
@@ -336,6 +339,7 @@ impl Pic18 {
     /// Decode the configuration words and set the SFR reset values that depend on them. Called on every load, and
     /// a reset builds a fresh core and loads again, so it runs after every power-on reset.
     fn apply_config(&mut self) {
+        self.oscillator.cancel(); // a reset or a new program abandons a clock switch
         self.cfg.redecode(&self.cfg_regs, &self.aux);
         self.apply_decoded_config();
     }
@@ -391,6 +395,34 @@ impl Pic18 {
         }
         if !modelled && self.cfg.get("WDTE").is_some_and(|w| w != 0) {
             self.notes.insert("watchdog enabled by WDTE: a timeout reset is not modelled (CLRWDT does nothing)".into());
+        }
+    }
+
+    /// Time and frequencies a clock switch needs (`[A157]`). An external oscillator's frequency is not known: a stimulus or CLI
+    /// override stands in for it, else the family maximum.
+    fn osc_timing(&self) -> crate::oscillator::Timing {
+        let b = &self.p.board;
+        crate::oscillator::Timing { now: self.cycles, cur_mhz: b.effective_fosc_mhz(), ext_mhz: if b.fosc_mhz > 0.0 { b.fosc_mhz } else { self.dev.fosc_max_mhz() } }
+    }
+
+    /// CSWIF rises with NOSCR (DS40002043F 5.3.1 p.48); a completed switch changes the clock.
+    fn osc_event(&mut self, ev: crate::oscillator::SwitchEvent) {
+        if ev.ready && let Some((a, m)) = self.cswif {
+            self.m.mem[a] |= m;
+            self.p.invalidate();
+        }
+        if ev.done {
+            self.update_clock();
+        }
+    }
+
+    fn osc_poll(&mut self) {
+        let now = self.cycles;
+        let ev = self.oscillator.poll(&mut self.m.mem, now);
+        if ev.ready || ev.done {
+            self.p.catch_up(&mut self.m);
+            self.p.invalidate();
+            self.osc_event(ev);
         }
     }
 
@@ -566,7 +598,9 @@ impl Pic18 {
         }
         if self.oscillator.contains(i) {
             let old = self.m.mem[i];
-            self.oscillator.write(&mut self.m.mem, i, v & self.m.implemented[i], &self.cfg);
+            let t = self.osc_timing();
+            let ev = self.oscillator.write_at(&mut self.m.mem, i, v & self.m.implemented[i], &self.cfg, Some(t));
+            self.osc_event(ev);
             if self.osc.is_some_and(|(con, _, _)| con == i) && (old ^ self.m.mem[i]) & 0x70 != 0 {
                 self.p.k22_wdt_clock_clear(self.cycles);
             }
@@ -718,6 +752,8 @@ impl Pic18 {
 
     /// Execute one instruction; returns the cycles it took (also added to `self.cycles`).
     pub fn step(&mut self) -> u32 {
+        // A switch does not complete in Sleep (DS40002043F 5.3.3 p.49); in Idle Fosc runs, so it does.
+        if self.state != State::Sleeping || !self.p.fosc_stopped() { self.osc_poll(); }
         self.p.board.clock_changed(self.cycles);
         self.p.wdt_fosc(self.cycles);
         let n = if !self.p.fosc_stopped() && !self.mclr_hold && let Some(n) = self.dma_cycle() { n } else { self.step_inner() };
