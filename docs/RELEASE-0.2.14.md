@@ -1,25 +1,23 @@
-# PicSim 0.2.13
+# PicSim 0.2.14
 
 PIC16/PIC18 firmware simulation with a graphical debugger, command-line runner,
 programmable stimulus and editor debugging through the Debug Adapter Protocol.
 
 ## Changes
 
-* Peripherals tab: a pending interrupt flag whose enable is set now says
-  whether the global enables (`GIE`, `PEIE`, `IPEN`, `GIEH`, `GIEL`) let it
-  interrupt, names the blockers, and shows the priority. Rules follow the
-  Q10, Q41, K22 and PIC16 data sheets.
-* Right-click a pin in the Pins tab, or a register in the SFRs tab, to add it
-  to the Waves capture.
-* Waves plot is thinned above about 4,000 visible samples for speed; zoom in
-  for detail. VCD export is unchanged.
-* Earlier in the 0.2.12 line: Pins tab, change highlighting, Peripherals tab
+* Peripherals tab: **Fire an interrupt**. Every interrupt flag of the part is
+  listed with a **Fire** or **Clear** button. **Also enable it** sets the
+  flag's enable bit and the global enables that block it (`PEIE`, `GIE`/`GIEH`,
+  `GIEL`). The status line reports whether the interrupt will be taken, what
+  blocks it, or that the flag is read-only on the part.
+* Earlier in the 0.2.x line: interrupt gating in the Peripherals tab,
+  right-click trace from the Pins and SFRs tabs, Pins tab, change highlighting
   and an interactive Waves tab.
-* New `Debugger::add_signal`; manual and release notes updated.
+* Manual rebuilt.
 
 ## Downloads and installation
 
-`picsim-0.2.13-linux-x86_64.tar.gz` contains `pic-sim`, `basil-sim`,
+`picsim-0.2.14-linux-x86_64.tar.gz` contains `pic-sim`, `basil-sim`,
 `basil-sim-dap`, device descriptions, documentation and a blink example.
 Extract it and run the binaries in place; keep `devices/` beside them.
 This binary bundle targets x86-64 Linux and was built on Kali Linux 2026.3 with
@@ -35,7 +33,7 @@ From source, build with `cargo build --release --workspace` and run
 manual under `~/.local` (or pass `--prefix`).
 
 After building, `python3 scripts/package-release.py` creates the Linux archive,
-manual, VSIX and checksums under `target/dist/0.2.13/`.
+manual, VSIX and checksums under `target/dist/0.2.14/`.
 
 ## Validation and limits
 

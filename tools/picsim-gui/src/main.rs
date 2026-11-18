@@ -146,6 +146,7 @@ struct App {
     pin_snap: std::collections::HashMap<Pin, bool>,
     /// SFRs tab: list only the registers that changed since the last Step/Run began.
     only_changed: bool,
+    fire: monitor::Fire,
     job: Option<Job>,
     /// (time, cycles) at the last rate sample, and the measured simulated cycles per second.
     rate: (std::time::Instant, u64, f64),
@@ -210,6 +211,7 @@ impl App {
             view_snap: None,
             pin_snap: std::collections::HashMap::new(),
             only_changed: false,
+            fire: monitor::Fire::default(),
             job: None,
             rate: (std::time::Instant::now(), 0, 0.0),
             sw: Stopwatch::default(),
@@ -918,7 +920,16 @@ impl eframe::App for App {
                         None => {}
                     }
                 }
-                8 => monitor::periph_ui(ui, &m.dev, &|a| m.cpu.peek(a), self.view_snap.as_deref()),
+                8 => {
+                    let idle = !self.running && self.job.is_none();
+                    if let Some(req) = monitor::periph_ui(ui, &m.dev, &|a| m.cpu.peek(a), self.view_snap.as_deref(), &mut self.fire, idle) {
+                        for (a, v) in monitor::fire_writes(&m.dev, &|a| m.cpu.peek(a), &req) {
+                            m.cpu.write(a, v);
+                        }
+                        m.cpu.settle();
+                        self.msg = monitor::fire_report(&m.dev, &|a| m.cpu.peek(a), &req);
+                    }
+                }
                 9 => {
                     let idle = !self.running && self.job.is_none();
                     self.debugger_tools.waves(ui, &mut m.debugger, idle);
@@ -1322,7 +1333,16 @@ impl App {
                         None => {}
                     }
                 }
-                8 => monitor::periph_ui(ui, &m.dev, &|a| m.cpu.peek(a), self.view_snap.as_deref()),
+                8 => {
+                    let idle = !self.running && self.job.is_none();
+                    if let Some(req) = monitor::periph_ui(ui, &m.dev, &|a| m.cpu.peek(a), self.view_snap.as_deref(), &mut self.fire, idle) {
+                        for (a, v) in monitor::fire_writes(&m.dev, &|a| m.cpu.peek(a), &req) {
+                            m.cpu.write(a, v);
+                        }
+                        m.cpu.settle();
+                        self.msg = monitor::fire_report(&m.dev, &|a| m.cpu.peek(a), &req);
+                    }
+                }
                 9 => {
                     let idle = !self.running && self.job.is_none();
                     self.debugger_tools.waves(ui, &mut m.debugger, idle);

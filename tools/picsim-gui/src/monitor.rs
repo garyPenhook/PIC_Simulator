@@ -249,15 +249,19 @@ pub struct Pending {
     pub gate: Option<Gate>,
 }
 
-/// A single-bit field by any of its names, in the named registers (`RCON` holds `IPEN` on the K22).
-fn bit(dev: &Device, peek: &dyn Fn(u32) -> u8, regs: &[&str], names: &[&str]) -> Option<bool> {
+/// Address and position of a single-bit field by any of its names, in the named registers (`RCON` holds `IPEN` on the K22).
+fn locate_bit(dev: &Device, regs: &[&str], names: &[&str]) -> Option<(u32, u8)> {
     for r in regs {
         let Some(s) = sfr(dev, r) else { continue };
         if let Some(f) = s.fields.iter().chain(&s.legacy).find(|f| f.width == 1 && f.pos < 8 && names.contains(&f.name.as_str())) {
-            return Some(peek(s.addr) >> f.pos & 1 != 0);
+            return Some((s.addr, f.pos));
         }
     }
     None
+}
+
+fn bit(dev: &Device, peek: &dyn Fn(u32) -> u8, regs: &[&str], names: &[&str]) -> Option<bool> {
+    locate_bit(dev, regs, names).map(|(a, p)| peek(a) >> p & 1 != 0)
 }
 
 /// The global enables decide whether a flag whose enable is set interrupts (DS40002043F 15.13.1 p.198 and 15.13.2 p.199
@@ -330,8 +334,113 @@ pub fn pending(dev: &Device, peek: &dyn Fn(u32) -> u8) -> Vec<Pending> {
     out
 }
 
+/// State of the "fire an interrupt" list in the Peripherals tab.
+#[derive(Default)]
+pub struct Fire {
+    pub filter: String,
+    /// Firing also sets the flag's enable bit and the global enables that would block it.
+    pub with_enables: bool,
+}
+
+/// A request to set or clear one interrupt flag.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FireRequest {
+    pub name: String,
+    pub set: bool,
+    pub with_enables: bool,
+}
+
+/// Where a flag, its enable and its priority bit live.
+struct Located {
+    flag: (u32, u8),
+    enable: Option<(u32, u8, String)>,
+    priority: Option<(u32, u8)>,
+}
+
+fn locate(dev: &Device, flag: &str) -> Option<Located> {
+    let stem = flag.strip_suffix("IF").filter(|s| !s.is_empty())?;
+    let find = |name: String, want_reg: bool| {
+        dev.sfr.iter().find_map(|s| s.fields.iter().chain(&s.legacy).find(|f| f.width == 1 && f.pos < 8 && f.name == name).map(|f| (s.addr, f.pos, want_reg.then(|| s.name.clone()).unwrap_or_default())))
+    };
+    let (fa, fp, _) = find(flag.to_string(), false)?;
+    Some(Located { flag: (fa, fp), enable: find(format!("{stem}IE"), true), priority: find(format!("{stem}IP"), false).map(|(a, p, _)| (a, p)) })
+}
+
+/// Every interrupt flag the part has (`xxxIF`, one bit), by name, with its address and bit.
+fn all_flags(dev: &Device) -> Vec<(String, u32, u8)> {
+    let mut v: Vec<(String, u32, u8)> = Vec::new();
+    for s in &dev.sfr {
+        for f in s.fields.iter().chain(&s.legacy) {
+            if f.width == 1 && f.pos < 8 && f.name.len() > 2 && f.name.ends_with("IF") && !v.iter().any(|x| x.0 == f.name) {
+                v.push((f.name.clone(), s.addr, f.pos));
+            }
+        }
+    }
+    v.sort();
+    v
+}
+
+/// The register writes (address, whole new byte) that carry out `req`, in the order to apply them: the enables first
+/// and the flag last, so that the interrupt arrives with everything already enabled, as a hardware event would.
+pub fn fire_writes(dev: &Device, peek: &dyn Fn(u32) -> u8, req: &FireRequest) -> Vec<(u32, u8)> {
+    let Some(loc) = locate(dev, &req.name) else { return Vec::new() };
+    let mut over: BTreeMap<u32, u8> = BTreeMap::new();
+    let mut order: Vec<u32> = Vec::new();
+    let mut put = |over: &mut BTreeMap<u32, u8>, addr: u32, pos: u8, on: bool| {
+        let cur = over.get(&addr).copied().unwrap_or_else(|| peek(addr));
+        over.insert(addr, if on { cur | 1 << pos } else { cur & !(1 << pos) });
+        order.retain(|&a| a != addr);
+        order.push(addr);
+    };
+    if req.set && req.with_enables {
+        if let Some((a, p, reg)) = &loc.enable {
+            put(&mut over, *a, *p, true);
+            // Setting a blocker can reveal another (GIEH, then GIEL), so look again until nothing blocks it.
+            for _ in 0..4 {
+                let now = |a: u32| over.get(&a).copied().unwrap_or_else(|| peek(a));
+                let high = loc.priority.is_none_or(|(pa, pp)| now(pa) >> pp & 1 != 0);
+                let Gate::Blocked(why) = gate(dev, &now, reg, high) else { break };
+                for w in why {
+                    let names: &[&str] = match w {
+                        "GIE=0" | "GIEH=0" => &["GIE_GIEH", "GIE", "GIEH"],
+                        "PEIE=0" => &["PEIE_GIEL", "PEIE"],
+                        _ => &["PEIE_GIEL", "GIEL"],
+                    };
+                    if let Some((ga, gp)) = locate_bit(dev, &["INTCON", "INTCON0"], names) {
+                        put(&mut over, ga, gp, true);
+                    }
+                }
+            }
+        }
+    }
+    put(&mut over, loc.flag.0, loc.flag.1, req.set);
+    // The flag's register goes last even when an enable shares it.
+    order.retain(|&a| a != loc.flag.0);
+    order.push(loc.flag.0);
+    order.into_iter().map(|a| (a, over[&a])).collect()
+}
+
+/// What happened after `fire_writes` were applied (`peek` reads the machine now).
+pub fn fire_report(dev: &Device, peek: &dyn Fn(u32) -> u8, req: &FireRequest) -> String {
+    let Some(loc) = locate(dev, &req.name) else { return format!("{}: no such interrupt flag", req.name) };
+    let is_set = peek(loc.flag.0) >> loc.flag.1 & 1 != 0;
+    if is_set != req.set {
+        return format!("{} did not {}: the bit is read-only or hardware-controlled on this part", req.name, if req.set { "set" } else { "clear" });
+    }
+    if !req.set {
+        return format!("{} cleared", req.name);
+    }
+    match pending(dev, peek).iter().find(|p| p.name == req.name) {
+        Some(Pending { gate: Some(Gate::Open(prio)), .. }) => format!("{} fired: it will interrupt{} on the next Step", req.name, prio.map_or(String::new(), |p| format!(" ({p})"))),
+        Some(Pending { gate: Some(Gate::Blocked(why)), .. }) => format!("{} set, but blocked by {} (tick \"also enable it\" or set them)", req.name, why.join(" ")),
+        Some(Pending { enable: Some(false), .. }) => format!("{} set, but its enable bit is clear (tick \"also enable it\" or set it)", req.name),
+        _ => format!("{} set (it has no enable bit of that name, so it cannot interrupt)", req.name),
+    }
+}
+
 /// The Peripherals tab: timers, EUSART, ADC and pending interrupt flags, decoded from the SFRs.
-pub fn periph_ui(ui: &mut egui::Ui, dev: &Device, peek: &dyn Fn(u32) -> u8, prev: Option<&[u8]>) {
+pub fn periph_ui(ui: &mut egui::Ui, dev: &Device, peek: &dyn Fn(u32) -> u8, prev: Option<&[u8]>, fire: &mut Fire, can_write: bool) -> Option<FireRequest> {
+    let mut request = None;
     egui::ScrollArea::vertical().show(ui, |ui| {
         ui.label("Decoded from the special function registers. Orange: changed since the last Step or Run began.");
         egui::CollapsingHeader::new("Interrupts").default_open(true).show(ui, |ui| {
@@ -359,6 +468,30 @@ pub fn periph_ui(ui: &mut egui::Ui, dev: &Device, peek: &dyn Fn(u32) -> u8, prev
                 };
                 ui.label(egui::RichText::new(format!("{:<10} {txt}", x.name)).monospace().color(col));
             }
+            ui.separator();
+            ui.label("Fire an interrupt");
+            ui.horizontal(|ui| {
+                ui.add(egui::TextEdit::singleline(&mut fire.filter).hint_text("filter, e.g. TMR1").desired_width(110.0));
+                ui.checkbox(&mut fire.with_enables, "also enable it").on_hover_text("also set the flag's enable bit and whichever of PEIE, GIE/GIEH and GIEL block it");
+            });
+            if !can_write {
+                ui.small("Stop the simulator to fire or clear a flag.");
+            }
+            let f = fire.filter.trim().to_uppercase();
+            egui::ScrollArea::vertical().id_salt("fire_list").max_height(150.0).show(ui, |ui| {
+                for (name, addr, pos) in all_flags(dev).into_iter().filter(|(n, ..)| f.is_empty() || n.to_uppercase().contains(&f)) {
+                    let set = peek(addr) >> pos & 1 != 0;
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new(format!("{name:<10} {}", if set { "1" } else { "0" })).monospace().color(if set { CHANGED } else { ui.visuals().text_color() }));
+                        if ui.add_enabled(can_write && !set, egui::Button::new("Fire")).on_hover_text("set the flag (and the enables, if ticked); the interrupt is taken on the next Step if it is allowed").clicked() {
+                            request = Some(FireRequest { name: name.clone(), set: true, with_enables: fire.with_enables });
+                        }
+                        if ui.add_enabled(can_write && set, egui::Button::new("Clear")).clicked() {
+                            request = Some(FireRequest { name: name.clone(), set: false, with_enables: false });
+                        }
+                    });
+                }
+            });
         });
         egui::CollapsingHeader::new("Timers").default_open(true).show(ui, |ui| {
             let mut ids: Vec<String> = dev.sfr.iter().filter_map(|s| s.name.strip_prefix("TMR").filter(|r| digits(r)).map(str::to_string)).collect();
@@ -410,6 +543,7 @@ pub fn periph_ui(ui: &mut egui::Ui, dev: &Device, peek: &dyn Fn(u32) -> u8, prev
         group(ui, "EUSART", &is_uart, &["SP1BRG", "SP2BRG", "U1BRG", "U2BRG"]);
         group(ui, "ADC", &is_adc, &["ADRES", "ADRES0"]);
     });
+    request
 }
 
 #[cfg(test)]
@@ -547,11 +681,12 @@ mod tests {
         let prev: HashMap<Pin, bool> = pins.iter().map(|p| (p.pin, !p.high)).collect();
         let snap = vec![0u8; 0x1000];
         let ctx = egui::Context::default();
+        let mut fire = Fire::default();
         for round in 0..2 {
             frame(&ctx, |ui| {
                 let clicked = pins_ui(ui, &pins, true, true, &prev);
                 assert!(clicked.is_none(), "{round}: nothing was clicked");
-                periph_ui(ui, &dev, &|a| (a & 0xFF) as u8, Some(&snap));
+                assert!(periph_ui(ui, &dev, &|a| (a & 0xFF) as u8, Some(&snap), &mut fire, true).is_none());
                 memory_row(ui, 0x10, &std::array::from_fn(|i| (i % 5 != 0).then_some(i as u8 * 17)), Some(&snap));
             });
         }
@@ -588,5 +723,85 @@ mod tests {
         d.samples.push(Sample { ns: 0, values: vec![0, 0] });
         assert!(trace_byte(&mut d, "TRISB", 1).contains("clear the capture"));
         assert_eq!(d.signals.len(), 2);
+    }
+
+    fn fire_q10(m: &mut picsim::Machine, name: &str, set: bool, with_enables: bool) -> String {
+        let req = FireRequest { name: name.into(), set, with_enables };
+        for (a, v) in fire_writes(&m.dev, &|a| m.cpu.peek(a), &req) {
+            m.cpu.write(a, v);
+        }
+        m.cpu.settle();
+        fire_report(&m.dev, &|a| m.cpu.peek(a), &req)
+    }
+
+    /// The part runs erased flash (NOPs), so reaching the vector address by counting proves nothing: an interrupt pushes the
+    /// return address.
+    fn taken(m: &mut picsim::Machine) -> bool {
+        (0..40).any(|_| {
+            m.step();
+            m.cpu.stack_level() > 0
+        })
+    }
+
+    #[test]
+    fn firing_with_the_enables_takes_the_interrupt_on_a_real_q10() {
+        let mut m = picsim::Machine::new(load("18F27Q10")).unwrap();
+        let report = fire_q10(&mut m, "TMR1IF", true, true);
+        assert!(report.contains("will interrupt"), "{report}");
+        assert!(taken(&mut m), "the interrupt was not taken");
+        assert_eq!(m.cpu.pc, m.dev.vectors.interrupt_high, "and it went to the high vector");
+    }
+
+    #[test]
+    fn firing_without_the_enables_sets_the_flag_and_says_what_blocks_it() {
+        let mut m = picsim::Machine::new(load("18F27Q10")).unwrap();
+        let report = fire_q10(&mut m, "TMR1IF", true, false);
+        assert!(report.contains("enable bit is clear"), "{report}");
+        assert!(!taken(&mut m), "it must not interrupt");
+        // The enable alone is not enough while GIE and PEIE are clear.
+        let (enable_addr, ..) = locate(&m.dev, "TMR1IF").unwrap().enable.unwrap();
+        m.cpu.write(enable_addr, 0xFF);
+        let p = pending(&m.dev, &|a| m.cpu.peek(a));
+        assert_eq!(find(&p, "TMR1IF").gate, Some(Gate::Blocked(vec!["GIE=0", "PEIE=0"])));
+        // Clearing works and is reported.
+        assert_eq!(fire_q10(&mut m, "TMR1IF", false, false), "TMR1IF cleared");
+    }
+
+    #[test]
+    fn a_low_priority_source_with_ipen_gets_both_global_enables() {
+        let mut m = picsim::Machine::new(load("18F27Q10")).unwrap();
+        let w = |m: &mut picsim::Machine, n: &str, v: u8| m.cpu.write(m.dev.find_sfr(n).unwrap().addr, v);
+        w(&mut m, "INTCON", 0x20); // IPEN = 1, no global enable
+        w(&mut m, "IPR1", 0x00); // every PIE1 source low priority
+        let report = fire_q10(&mut m, "ADIF", true, true);
+        assert!(report.contains("low priority"), "{report}");
+        let intcon = m.cpu.peek(m.dev.find_sfr("INTCON").unwrap().addr);
+        assert_eq!(intcon & 0xC0, 0xC0, "GIEH and GIEL both set");
+        assert!(taken(&mut m), "the low-priority interrupt was not taken");
+        assert_eq!(m.cpu.pc, m.dev.vectors.interrupt_low, "and it went to the low vector");
+    }
+
+    #[test]
+    fn a_read_only_flag_is_reported_not_silently_ignored() {
+        // Hardware-controlled flags of the Q41 UART: writes do not set them.
+        let mut m = picsim::Machine::new(load("18F16Q41")).unwrap();
+        let report = fire_q10(&mut m, "U1FERIF", true, false);
+        assert!(report.contains("did not set"), "{report}");
+        assert!(fire_writes(&m.dev, &|a| m.cpu.peek(a), &FireRequest { name: "NOPE".into(), set: true, with_enables: true }).is_empty());
+    }
+
+    #[test]
+    fn firing_works_on_a_pic16_too() {
+        let mut m = picsim::machine16::Machine16::new(load("16F17146")).unwrap();
+        let vector = m.dev.vectors.interrupt_high;
+        let req = FireRequest { name: "TMR1IF".into(), set: true, with_enables: true };
+        for (a, v) in fire_writes(&m.dev, &|a| m.cpu.peek(a), &req) {
+            m.cpu.write(a, v);
+        }
+        m.cpu.settle();
+        let report = fire_report(&m.dev, &|a| m.cpu.peek(a), &req);
+        assert!(report.contains("will interrupt"), "{report}");
+        assert!((0..40).any(|_| { m.step(); m.cpu.depth() > 0 }), "the interrupt was not taken");
+        assert_eq!(m.cpu.pc, vector, "and it went to the vector");
     }
 }
