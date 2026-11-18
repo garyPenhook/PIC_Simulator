@@ -22,7 +22,7 @@ programmable stimulus and editor debugging through the Debug Adapter Protocol.
 `picsim-0.2.11-linux-x86_64.tar.gz` contains `pic-sim`, `basil-sim`,
 `basil-sim-dap`, device descriptions, documentation and a blink example.
 Extract it and run the binaries in place; keep `devices/` beside them.
-This binary bundle targets x86-64 Linux and was built on Ubuntu 24.04 with
+This binary bundle targets x86-64 Linux and was built on Kali Linux 2026.3 with
 its system libraries; the GUI needs a working graphical desktop.
 
 `PicSim_Manual.pdf` is also available separately. Install
@@ -33,6 +33,9 @@ configuration and supported requests. `SHA256SUMS` covers these downloads.
 From source, build with `cargo build --release --workspace` and run
 `python3 scripts/install-local.py` to install the three binaries, devices and
 manual under `~/.local` (or pass `--prefix`).
+
+After building, `python3 scripts/package-release.py` creates the Linux archive,
+manual, VSIX and checksums under `target/dist/0.2.11/`.
 
 ## Validation and limits
 
