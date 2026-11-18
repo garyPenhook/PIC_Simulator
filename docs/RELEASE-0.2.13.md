@@ -1,26 +1,25 @@
-# PicSim 0.2.12
+# PicSim 0.2.13
 
 PIC16/PIC18 firmware simulation with a graphical debugger, command-line runner,
 programmable stimulus and editor debugging through the Debug Adapter Protocol.
 
 ## Changes
 
-* `pic-sim` Pins tab: level and direction of every pin at the current cycle
-  (driven high/low, input high/low, analog); click an input to drive it.
-* Orange change highlighting in the Memory and SFRs tabs (with a
-  changed-only filter) and on pins, against the state when the last Step or
-  Run began.
-* Peripherals tab: pending interrupt flags with their enables, timer counts
-  with period and control registers, and EUSART and ADC registers, decoded
-  from the SFRs.
-* Waves tab: interactive capture plot with time axis, zoom, pan and a hover
-  readout; VCD export is unchanged.
-* New `Periph::pin_overview` / `Pic16::pin_overview` with tests.
-* Manual updated for the new tabs.
+* Peripherals tab: a pending interrupt flag whose enable is set now says
+  whether the global enables (`GIE`, `PEIE`, `IPEN`, `GIEH`, `GIEL`) let it
+  interrupt, names the blockers, and shows the priority. Rules follow the
+  Q10, Q41, K22 and PIC16 data sheets.
+* Right-click a pin in the Pins tab, or a register in the SFRs tab, to add it
+  to the Waves capture.
+* Waves plot is thinned above about 4,000 visible samples for speed; zoom in
+  for detail. VCD export is unchanged.
+* Earlier in the 0.2.12 line: Pins tab, change highlighting, Peripherals tab
+  and an interactive Waves tab.
+* New `Debugger::add_signal`; manual and release notes updated.
 
 ## Downloads and installation
 
-`picsim-0.2.12-linux-x86_64.tar.gz` contains `pic-sim`, `basil-sim`,
+`picsim-0.2.13-linux-x86_64.tar.gz` contains `pic-sim`, `basil-sim`,
 `basil-sim-dap`, device descriptions, documentation and a blink example.
 Extract it and run the binaries in place; keep `devices/` beside them.
 This binary bundle targets x86-64 Linux and was built on Kali Linux 2026.3 with
@@ -36,7 +35,7 @@ From source, build with `cargo build --release --workspace` and run
 manual under `~/.local` (or pass `--prefix`).
 
 After building, `python3 scripts/package-release.py` creates the Linux archive,
-manual, VSIX and checksums under `target/dist/0.2.12/`.
+manual, VSIX and checksums under `target/dist/0.2.13/`.
 
 ## Validation and limits
 
