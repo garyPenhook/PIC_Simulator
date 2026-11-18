@@ -1043,7 +1043,11 @@ declared results, after running each program to `__halt` in both engines. Result
     FOSC/64 base clock instead of FOSC/16; the sim takes 40 (n+1) (10 bit times of 4 (n+1)), as the data sheet.
   So the 1.8 of `lib_serial` (BRG16 = 1, BRGH = 1) is 8 extra bit times per character whenever BRG16 = 1 (a 16-bit BRG treated as 16
   data bits, 1 + 16 + 1 = 18, is a guess that fits both the count and TX9; not shown), and BRG16 = 1 with BRGH = 0 has a base clock four
-  times too slow in MDB. The sim stays on the data sheet. Receive side and the K22/PIC16 EUSARTs not probed.
+  times too slow in MDB. The sim stays on the data sheet.
+  K22 (PIC18F25K22, DS40001412H Table 16-3 p.272, Table 16-6 p.276, same formulas; `eusart_char.S` with `K22=1`): the same result, pass for pass.
+  BRG16 = 0: identical in both engines (n = 3, 15, 63; TX9 adds one bit time). BRG16 = 1, BRGH = 1: counts 42 (n = 15) and 165 (n = 63)
+  in MDB against 23 and 92 in the sim, TX9 and a second character add 9 and 165 passes as on the Q10; BRG16 = 1, BRGH = 0: 659 and 2634 against
+  92 and 366. So the defect is in MDB's EUSART model of both the Q10 and the K22. Receive side and the PIC16 and Q41 UARTs not probed.
 * D-SIM-18 (decided: the sim stays, MDB differs from the data sheet; silicon not measured): on the Q10 one ADC conversion (`ADCON2` = A0h | ADCS 31, FOSC/64, polled `GO`) takes 289 cycles in the sim
   and 247 in MDB, 42 less (a repeated `AdcRead(13)`; the first call, which also selects the channel, differs by 84).
   This is the opposite sign to D-SIM-12 (K22). `lib_adc` (717 / 633, 84 = two conversions) and `lib_adin` (1345 / 1177, 168 = four) differ by whole multiples of it. Probe `tests/probe/adc_q10.S`
