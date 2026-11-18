@@ -416,7 +416,13 @@ When LEDs or an OLED are wired, a strip along the bottom shows them. An LED is a
 
 **Time a routine.** Breakpoints at its first and last line, Stopwatch as above.
 
-**Check an output waveform.** In Debugger, select a pin, press **Trace pin**, then **Record** and Run or Step. Pause, inspect the waveform and use **Export VCD…** to open the capture in a waveform viewer. For visual feedback, wire an LED and run at 1/10 or 1/100 speed; `basil-sim` also reports LED changes (section 6).
+**Check an output waveform.** Right-click a pin in the Pins tab (or a register in SFRs) and choose **Trace … in Waves**, open Waves, press **Record** and Run or Step. Pause and inspect the plot: scroll to zoom, drag to pan, hover to read values. Use **Export VCD…** to open the capture in another viewer. For visual feedback, wire an LED and run at 1/10 or 1/100 speed; `basil-sim` also reports LED changes (section 6).
+
+**See what a program changed.** Press Run (or a step button), pause, and look for orange in Memory, SFRs, Pins and Peripherals: everything that changed since the run began. Tick **changed only** in SFRs to list just those registers.
+
+**Stop when a register or pin reaches a value.** In Debugger, under **Break when**, enter `TMR1` (tick **16-bit**), choose `>=` and a value, press **Add condition** and Run. For a pin, use `PORTB` with *bit set* and the bit number. Add an address in **at** to stop only at one line of code, and **hit** to skip the first hits.
+
+**Exercise an interrupt handler.** In Peripherals, find the flag in **Fire an interrupt**, tick **also enable it** and press **Fire**, then Step: the status line says whether the interrupt will be taken, and the call stack shows the handler. To see the real hardware path instead, drive the pin in the Pins tab or use a stimulus file (section 7).
 
 **Test serial input.** Write a stimulus file with a `[[uart]]` section, load it with the program, and Run; the characters arrive at the receiver at the cycle you chose. Watch the receive variables in the Variables tab.
 
@@ -1009,11 +1015,17 @@ The simulator follows the data sheet. Where it differs from MDB it says so in `d
 | Program pane | follow PC, stay in my code, goto/Go | View control |
 | CPU panel | Stopwatch Start/Stop/Lap/Clear | Time simulated intervals |
 | CPU panel | Edit… | Open the Debugger tab |
-| Right tabs | Memory, SFRs, Watch, Board, Variables, UART, Debugger | Inspection, register editing, wiring, terminal and debugging |
+| Right tabs | Memory, SFRs, Watch, Board, Variables, UART, Debugger, Pins, Peripherals, Waves | Inspection, register editing, wiring, terminal, debugging, live pins, decoded peripherals and waveforms |
 | Debugger | Write / Drive pin / Apply | Edit a data byte or PC; change digital or ADC input while paused |
 | Debugger | Break on value change / Remove | Add or remove a data watchpoint |
+| Debugger | Break when: target, comparison, value, at, hit, **Add condition** / Remove | Stop when a byte or 16-bit value satisfies a comparison (edge-triggered), or at an address when it holds there; stop on the Nth hit |
 | Debugger | Trace data byte / Trace pin; Record / Stop capture / Clear capture | Choose signals and control waveform capture |
-| Debugger | Export VCD… | Save the waveform with simulated nanosecond timestamps |
+| Debugger, Waves | Export VCD… | Save the waveform with simulated nanosecond timestamps |
+| Memory, SFRs, Pins, Peripherals | orange | Changed since the last Step or Run began; SFRs also has **changed only** |
+| SFRs | right-click a name | Trace the register in Waves |
+| Pins | click an input / right-click a pin | Drive the input to the opposite level (when stopped) / trace the pin in Waves |
+| Peripherals | **Fire**, **Clear**, also enable it | Set or clear an interrupt flag, optionally with its enable and the global enables |
+| Waves | scroll, drag, Zoom in/out, Fit, hover | Zoom about the pointer, pan, rescale, read values at the cursor |
 | Window | drop `.hex`/`.elf`/`.toml` | Load the program / set the stimulus |
 
 ## basil-sim options
