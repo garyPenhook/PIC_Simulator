@@ -29,8 +29,10 @@ Code: `crates/picsim/src/pic18.rs` (`irq_check`, `retfie`), `periph.rs` (Timer0/
 * Q10 entry clears GIE/GIEH (GIEL for low) and saves W/STATUS/BSR in the fast stack; `RETFIE` sets GIE/GIEH, or GIEL
   when leaving a low handler (p.194). Q41 (`SHADCON` present) leaves GIE alone, tracks the level itself, saves
   W, STATUS, BSR, FSR0-2, PROD, PCLATH/U per level and `RETFIE 1` restores them (FACTS-18F-Q41.md section 4).
-* Entry timing, measured against MDB: the vector is reached 3 cycles after the cycle the flag was set, never less
-  than 2 after the instruction `[A4]`. isr_single's first 27 entries and all `lib_timer*` cycle counts match MDB exactly.
+* Entry timing, measured against MDB: the vector is reached 3 cycles after the cycle the flag was set `[A4]`, and (Q10 and
+  K22 core, `[A108]`) the instruction already fetched after the one that raised the flag runs first: the vector is at
+  max(flag + 3, end of that instruction + 1) and the stacked address is the one after it. `isr_dual` (320 entries) and
+  `bit_packed_isr` (200 entries) match MDB entry for entry; `isr_single` for its first 54 (see D-SIM-2, D-SIM-1).
 * Timer0 8-bit compares TMR0L with the *live* TMR0H (a write right after the flag applies to the period that has just
   started; measured, MDB), period TMR0H+1 clocks; 16-bit buffers TMR0H. Timer1: FOSC/4 and FOSC, RD16 buffer.
   Timer2: free-running and software one-shot (MODE 00000 / 01000). Other clock sources, gates and hardware reset
@@ -43,8 +45,18 @@ Code: `crates/picsim/src/pic18.rs` (`irq_check`, `retfie`), `periph.rs` (Timer0/
   clears the prescaler on writes only (DS40002043F 19.2.4 p.297), and `movf f,f` writes. Probe programs:
   `tests/hw/t0_*_sim.bas` (sim gives 402 / 401 / 500 / 401 for nowrite / readw / movf / tmr0l). `isr_single` differs by
   565 cycles because of it. Settle on silicon with the `_hw` flavours (results in EEPROM 0-1).
-* D-SIM-2 (open): interrupt entry racing a `bcf INTCON,7` critical section differs from MDB by 1-8 cycles over a run
-  (`bit_packed_isr` +4, `isr_dual` +2 total); MDB defers some requests the sim takes. Not yet understood.
+* D-SIM-2 (fixed in the sim): the Q10/K22 core took an interrupt right after the instruction that raised the flag and idled
+  3 cycles, while MDB runs the instruction already fetched first (the PIC16 core already did, `[A108]`). Probes
+  `tests/probe/gie_race1.S`, `t0_isr_entries.S` (single entries with the stacked address, and 40 consecutive entries with a
+  mix of 1-cycle, taken 2-cycle, `movff` and skip instructions, prescaler 1:1 and 1:2, with and without a `TMR0H` rewrite
+  in the handler): the vector cycle and the stacked address agree for every phase. Rule (pic18.rs `irq_defer`): a request
+  raised while the program runs waits one instruction; vector = max(flag + 3, end of that instruction + 1). A request
+  raised in the *last* cycle of `bcf INTCON,7` is not taken by it (MDB waits for the `bsf`; the earlier `[A6]` special
+  case is gone), but a request raised in an earlier cycle of a multi-cycle instruction still is when the instruction
+  that runs first clears GIE. Entry-by-entry against MDB: `bit_packed_isr` 200 of 200 and `isr_dual` 320 of 320 equal
+  (before: `bit_packed_isr` diverged from entry 26, 14 cycles in total). Left over: 3 of 64 single-shot phases of the
+  `bcf INTCON,7` race (`gie_race1.S`, e.g. PERIOD=2 NIN=1) have equal cycles and a stacked address one instruction
+  later than MDB's.
 * TMR0L read right after a TMR0H change in 8-bit mode differs by 1-2 counts.
 
 ## EUSART transmitter (S4, Q10 style)
@@ -744,7 +756,7 @@ vectors 0008h/0018h are those of the Q10. Tests: `tests/exec_k22` of the basil r
 
 * Equal cycle counts: Timer0/1/2 (`lib_timer`), `isr_save`, `events_isr`, `gosub_isr`, `bit_packed_isr`, `lib_pinio`; the device-independent
   programs of basil's `tests/exec` (as on the Q10). `isr_single` differs by 331 cycles (the D-SIM-1 kind: MDB drops prescaler counts around
-  TMR0 accesses) and `isr_dual` by 1 (D-SIM-2). The EEPROM write times differ as D-SIM-3 says.
+  TMR0 accesses) and `isr_dual` by 1, with the scratch temp `__ISV1` (a saved value, GPR 11Dh) also different since the D-SIM-2 fix: on the K22 every `isr_dual` entry is 1 cycle later than MDB's from the first one (old and new core alike; the Timer0 flag phase of the K22 model, not examined), so the last interrupt lands on another instruction. The EEPROM write times differ as D-SIM-3 says.
 * D-SIM-12: an ADC conversion takes one TAD more in MDB than Figures 17-3/17-4 give: GO to GO clear, polled, with FOSC/64 and ACQT 8 TAD is 305
   cycles in the sim and 320 in MDB, with FOSC/16 and ACQT 20 TAD 125 and 128 (the poll loop takes 3 cycles a pass, so short conversions do
   not separate). The model follows the data sheet.
@@ -1017,10 +1029,18 @@ declared results, after running each program to `__halt` in both engines. Result
   `SerialWriteByte` n times and `SerialFlush` at 64 MHz give, sim against MDB: 115200 baud 1 byte 1419 / 2529, 2 bytes 2810 / 5033,
   3 bytes 4202 / 7535; 9600 baud 1 byte 16699 / 30034, 2 bytes 33372 / 60042. The sim's step per byte is 10 bit times;
   MDB's is about 18. This is the whole cycle difference of `lib_serial` and `serial_word_digits`. The cause in MDB is not known.
-* D-SIM-18 (open): on the Q10 one ADC conversion (`ADCON2` = A0h | ADCS 31, FOSC/64, polled `GO`) takes 289 cycles in the sim
+* D-SIM-18 (decided: the sim stays, MDB differs from the data sheet; silicon not measured): on the Q10 one ADC conversion (`ADCON2` = A0h | ADCS 31, FOSC/64, polled `GO`) takes 289 cycles in the sim
   and 247 in MDB, 42 less (a repeated `AdcRead(13)`; the first call, which also selects the channel, differs by 84).
-  This is the opposite sign to D-SIM-12 (K22). `lib_adc` (717 / 633, 84 = two conversions) and `lib_adin` (1345 / 1177, 168 = four) differ by whole multiples of it. Not yet checked against the
-  Q10 data sheet's conversion-time table, so it is not known which engine is right.
+  This is the opposite sign to D-SIM-12 (K22). `lib_adc` (717 / 633, 84 = two conversions) and `lib_adin` (1345 / 1177, 168 = four) differ by whole multiples of it. Probe `tests/probe/adc_q10.S`
+  (cycles from setup to GO clear, 22 of them fixed; ADCLK 31 = TAD 16 cycles at 64 MHz): ACQ = 0: sim 206, MDB 236; ACQ = 5: sim 284, MDB 242;
+  ACQ = 100: sim 1805, MDB 335; ACQ = 255: sim 4286, MDB 491. So MDB counts ADACQ in instruction cycles (about 1 per count whatever ADCLK is)
+  and the sim in ADC clocks. ADPRE ≠ 0 with ADACQ = 0 adds about 256 cycles in MDB (the maximum acquisition, which the Q10 data sheet does not state;
+  the Q41's does, 8192 Fosc clocks), the sim adds ADPRE clocks. With ADACQ = 0 the conversion is 13.5 TAD - 2 cycles in MDB (ADCLK 7/15/31/63: 52, 106, 214, 430 cycles),
+  11.5 TAD in the sim. Data sheet DS40002043F: ADPRE and ADACQ (33.7.9, 33.7.10 p.575-576) are "number of ADC clock periods", but Figure 33-2 p.550
+  labels the same intervals "1-255 TCY"; 33.1.4 p.549 gives 11.5 TAD per conversion and AD22 p.705 gives 11 + 3 TCY in TAD (GO set to GO clear).
+  The register text is the normative one and the sim follows it; MDB's 13.5 TAD matches neither conversion figure and its acquisition matches the figure
+  only. The sim's 11.5 TAD is 5 cycles above AD22 at TAD = 16 cycles; not changed (the two data-sheet figures disagree). Settle on silicon with
+  an `ADACQ` sweep before changing the sim.
 * D-SIM-19: with `RSTOSC = HFINTOSC_64MHZ` MDB's `SysClockHz` returns 0 (the `lib_system` test comment says MDB leaves the oscillator
   registers at 0 after reset; not re-measured here), the sim returns 64 000 000 because it loads them from the configuration
   (commit ec40006). The data sheet's reset-value text for these registers was not re-read for this entry.

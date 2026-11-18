@@ -8,7 +8,7 @@ and the cycle count. Machine-readable results: `target/regression/gpr-Q10-O.json
 
 | Build | Identical GPR snapshots | Differ |
 |---|---:|---:|
-| default | 213 | 8 |
+| default | 214 | 7 |
 | `-O0` | 212 | 9 |
 
 Programs with a different snapshot: `isr_dual`, `lib_aht30`, `lib_i2c`, `lib_intosc`, `lib_intosc_div`, `lib_rtcc`, `lib_spi`,
@@ -23,9 +23,9 @@ identical GPR contents, so a cycle difference alone did not change any stored by
 | lib_spi_pins | 10560/10432 | same, +1 per computed jump (128 jumps) | D-SIM-15 |
 | lib_pwm_pins | 118152/117624 | same; `addwf PCL` runs exactly 528 times | D-SIM-15 |
 | isr_single | 159781/160074 | Timer0 prescaler lost around TMR0 accesses in MDB | D-SIM-1 |
-| bit_packed_isr, isr_dual | 101564/101550, 120635/120634 | interrupt entry racing `bcf INTCON,7` | D-SIM-2, **still open**; isr_dual also differs in `__ISV1` (a saved-value temp) |
+| bit_packed_isr, isr_dual | 101564/101550, 120635/120634 | interrupt entry racing `bcf INTCON,7` | D-SIM-2, **fixed** (same day): now 101550/101550 and 120634/120634, `__ISV1` equal; entry by entry 200/200 and 320/320 equal to MDB |
 | lib_serial, serial_word_digits | 8429/15098, 21305/35761 | MDB character time ≈ 18 bit times, data sheet 10 | D-SIM-17 (new) |
-| lib_adc, lib_adin | 717/633, 1345/1177 | one ADC conversion 42 cycles shorter in MDB | D-SIM-18 (new, **open**: engine not decided) |
+| lib_adc, lib_adin | 717/633, 1345/1177 | one ADC conversion 42 cycles shorter in MDB | D-SIM-18: MDB counts `ADACQ` in cycles and converts in about 13.5 TAD; the sim follows the register text; data sheet inconsistent (Figure 33-2 against 33.7.10), silicon not measured |
 | lib_system | 1616/1488 | MDB `SysClockHz` returns 0 | D-SIM-19 (new) |
 | lib_eeprom | 480370 / 373 (MDB finishes the write at once) | MDB does not model write durations | D-SIM-3 |
 | lib_spi, lib_i2c, lib_aht30, lib_rtcc | up to 9.6 M in MDB | library timeouts expire in MDB; `SpiStatus` 1 there | MDB does not complete the MSSP transfer |
@@ -41,9 +41,10 @@ was added after these runs; re-running the Q10 default build gave the same resul
 
 ## What is not settled
 
-* D-SIM-2 (interrupt entry race): unchanged.
-* D-SIM-18 (ADC conversion time on the Q10): the two engines differ and the Q10 data sheet's conversion-time table has not
-  yet been compared with either.
+* D-SIM-2 (interrupt entry race): the PIC18 core now runs the already-fetched instruction before an entry (`FACTS-SIM.md`). Left: 3 of 64
+  single-shot phases of the `bcf INTCON,7` race with equal cycles and a different stacked address; `isr_single` entry cycles match for the first 54
+  entries and then drift with D-SIM-1; the K22 `isr_dual` has a constant +1 entry offset (and now a different `__ISV1`, so 10 of 11 K22 programs are identical).
+* D-SIM-18 (ADC conversion time on the Q10): compared with DS40002043F (`FACTS-SIM.md`). The sim is kept; only silicon can settle ADACQ's unit.
 * Causes of D-SIM-16/-17/-19 inside MDB are not known; the entries record only what was measured.
 
 ## Other parts (default build only; `-O0` not run)

@@ -922,7 +922,8 @@ PIC16 and PIC18 `WPUx` raise otherwise undriven inputs; an explicit low stimulus
 The simulator follows the data sheet. Where it differs from MDB it says so in `docs/FACTS-SIM.md`:
 
 * **D-SIM-1:** MDB loses part of the Timer0 prescaler count on a read of `TMR0L`; the data sheet clears the prescaler on writes only.
-* **D-SIM-2 (open):** interrupt entry racing a `bcf INTCON,7` critical section differs from MDB by a few cycles.
+* **D-SIM-2 (fixed):** the Q10/K22 core now runs the already-fetched instruction before an interrupt entry, as MDB and the PIC16 core do; a few phases of the `bcf INTCON,7` race still differ in the stacked address (`docs/FACTS-SIM.md`).
+* **D-SIM-18:** MDB counts the Q10 `ADACQ` in instruction cycles and converts in about 13.5 TAD; the simulator follows the register description (ADC clocks, 11.5 TAD).
 * **D-SIM-5:** on PIC16F183xx with `PR2 = 0` MDB never sets the Timer2 flag; the simulator does, every prescaler × postscaler cycles, as the data sheet says.
 * MDB has no write time for EEPROM and flash; the simulator does, so cycle counts differ there while results agree.
 

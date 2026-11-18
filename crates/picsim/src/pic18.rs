@@ -61,6 +61,9 @@ pub struct Pic18 {
     pub lazy: bool,
     /// Interrupts being served, innermost last (`true` = high priority).
     pub in_service: Vec<bool>,
+    /// `[A108]` A request that arrived while the program ran waits one instruction (the one already fetched); this is the
+    /// cycle it was raised. Only the Q10/K22 core (no vector table).
+    irq_defer: Option<(u64, u64)>,
     /// Registers saved by the vectored controller's hardware context (Q41), innermost last.
     ctx: Vec<Ctx>,
     /// PIRn/PIEn/IPRn addresses per interrupt register group n.
@@ -236,6 +239,7 @@ impl Pic18 {
             p,
             dma,
             in_service: Vec::new(),
+            irq_defer: None,
             ctx: Vec::new(),
             irq,
             intcon,
@@ -763,7 +767,7 @@ impl Pic18 {
                     self.p.exit_sleep(self.cycles);
                 }
                 if self.state == State::Running {
-                    self.irq_check(ic0);
+                    self.irq_check(ic0, false);
                     if let Some(k) = self.stk_fault.take() { self.reset_cond(k); }
                 }
             }
@@ -832,7 +836,9 @@ impl Pic18 {
         }
         let ic0 = self.m.mem[self.intcon];
         let was_isr = !self.in_service.is_empty();
-        self.p.clear_event();
+        if self.irq_defer.is_none() {
+            self.p.clear_event();
+        }
         let w = self.fetch(self.pc);
         let at = self.pc;
         self.pc = (self.pc + 2) & self.pc_mask;
@@ -1063,7 +1069,7 @@ impl Pic18 {
             return (self.cycles - start) as u32;
         }
         self.p.board_poll(&self.m, now);
-        self.irq_check(ic0);
+        self.irq_check(ic0, true);
         if let Some(k) = self.stk_fault.take() {
             self.reset_cond(k);
         }
@@ -1197,12 +1203,22 @@ impl Pic18 {
     /// Take an interrupt if one is enabled and pending after the instruction that just finished.
     /// Rules: DS40002043F 15.1-15.3 p.193-194 (Q10), DS40002214G 11.3-11.8 p.113-124 (Q41, `MVECEN` 0 or 1, `[A126]`).
     /// `[A4]` Entry costs two cycles (return address pushed, vector fetched), like a CALL.
-    fn irq_check(&mut self, ic0: u8) {
+    fn irq_check(&mut self, ic0: u8, allow_defer: bool) {
+        let deferred = self.irq_defer.take();
+        self.irq_try(ic0, deferred, allow_defer && !self.vic);
+        if deferred.is_some() && self.irq_defer.is_none() {
+            self.p.take_event(); // the request was dropped (GIE or the enable cleared by the instruction that ran first)
+        }
+    }
+
+    fn irq_try(&mut self, ic0: u8, deferred: Option<(u64, u64)>, allow_defer: bool) {
         // A flag set in the last cycle of the instruction that clears GIE is still taken `[A6]` (MDB; the Q10 code
         // that clears GIE re-checks it for exactly this reason).
         let mut c = self.m.mem[self.intcon];
-        if c & 0x80 == 0 && ic0 & 0x80 != 0 && self.p.peek_event() == Some(self.cycles) {
+        let mut gie_cleared = false;
+        if c & 0x80 == 0 && ic0 & 0x80 != 0 && deferred.is_some_and(|(e, end1)| e < end1) && self.p.peek_event().is_some() {
             c = ic0;
+            gie_cleared = true;
         }
         if c & 0x80 == 0 {
             return;
@@ -1284,6 +1300,11 @@ impl Pic18 {
         } else {
             self.vec_low
         };
+        if allow_defer && deferred.is_none() && !gie_cleared && !mvec && self.p.peek_event().is_some() {
+            // `[A108]` the instruction already fetched runs first; the vector is 3 cycles after it started.
+            self.irq_defer = self.p.peek_event().map(|e| (e, self.cycles));
+            return;
+        }
         let ret = self.pc;
         self.push(ret);
         let level = self.stack_level() as usize;
@@ -1296,6 +1317,7 @@ impl Pic18 {
         // With the vector table the latency is three cycles instead of two `DS40002214G 11.8 p.122` `[A126]`.
         let lat = u64::from(mvec);
         self.cycles = match self.p.take_event() {
+            _ if let Some((e, _)) = deferred => (e + 3).max(end + 1) + lat,
             Some(e) => (e + 3 + lat).max(end + 2 + lat),
             // Already pending and enabled by this very instruction (BSF INTCON, GIE): MDB enters one cycle after it
             // `[A7]`; otherwise (RETFIE re-enabling, PIE written) two.
@@ -1686,6 +1708,7 @@ impl Pic18 {
             ResetKind::StackUnderflow => self.set_pcon(0x40), // STKUNF
         }
         self.stk_fault = None;
+        self.irq_defer = None;
         self.apply_config();
         self.in_service.clear();
         self.set_stat();
