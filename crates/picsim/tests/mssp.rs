@@ -666,3 +666,197 @@ fn client_general_call_stretches_with_ahen() {
     assert_eq!(rd(&mut m, "SSP1CON1") & 0x10, 0, "AHEN: the clock is held after the eighth falling edge");
     assert_eq!(ack_log(&m).len(), 1, "the acknowledge waits for the firmware");
 }
+
+// ---- 10-bit I2C client mode (`[A168]`) ----
+
+/// Let the host run long enough to show whether it is held.
+fn ten_wait(m: &mut Machine) { run_for(m, 600); }
+
+#[test]
+fn client_10bit_write_updates_ssp_add_between_the_address_bytes() {
+    // DS40002043F 28.5.1.2 (p.457), 28.5.4 (p.468), 28.5.6.2 (p.472); DS40001412H 15.5.1.2 (p.219).
+    // SSPxADD<2:1> = 11: high byte 11110 11 0 = F6h; the low address is 55h.
+    let (mut m, e) = client(r#"["S", "w 0xF6", "w 0x55", "w 0x12", "P"]"#, 0x06, 0x37);
+    run_to(&mut m, e + 10 + 160 + 1);
+    assert_eq!(rd(&mut m, "SSP1STAT") & 0x27, 0x01, "the high byte is loaded: BF, R/W = 0, D/A = 0");
+    assert_eq!(rd(&mut m, "SSP1STAT") & 2, 0, "UA only after the acknowledge");
+    run_to(&mut m, e + 10 + 181);
+    assert_eq!(rd(&mut m, "SSP1STAT") & 2, 2, "UA after the acknowledge of the high byte");
+    assert!(sspif(&m));
+    assert_eq!(rd(&mut m, "SSP1BUF"), 0xF6);
+    clear_sspif(&mut m);
+    ten_wait(&mut m);
+    assert_eq!(ack_log(&m), [I2cEv::Start, I2cEv::Addr(0xF6, true)], "SCL is held low: the host waits for SSPxADD");
+    assert_eq!(rd(&mut m, "SSP1CON1") & 0x10, 0x10, "UA stretches without clearing CKP");
+    let c = m.cpu.cycles;
+    w(&mut m, "SSP1ADD", 0x55);
+    assert_eq!(rd(&mut m, "SSP1STAT") & 2, 0, "writing SSPxADD clears UA");
+    run_to(&mut m, c + 1 + 180 + 1);
+    assert_eq!(rd(&mut m, "SSP1STAT") & 2, 2, "UA again after the low byte");
+    assert!(sspif(&m));
+    assert_eq!(rd(&mut m, "SSP1BUF"), 0x55, "a matching low byte is loaded");
+    clear_sspif(&mut m);
+    w(&mut m, "SSP1ADD", 0x06);
+    run_for(&mut m, 200);
+    assert_eq!(rd(&mut m, "SSP1STAT") & 0x21, 0x21, "then data: D/A and BF");
+    assert_eq!(rd(&mut m, "SSP1BUF"), 0x12);
+    assert_eq!(ack_log(&m), [I2cEv::Start, I2cEv::Addr(0xF6, true), I2cEv::Addr(0x55, true), I2cEv::Write(0x12, true), I2cEv::Stop]);
+}
+
+#[test]
+fn client_10bit_low_byte_mismatch_still_sets_ua_and_sspif() {
+    let (mut m, e) = client(r#"["S", "w 0xF6", "w 0x55", "w 0x12", "P"]"#, 0x06, 0x37);
+    run_to(&mut m, e + 10 + 181);
+    clear_sspif(&mut m);
+    assert_eq!(rd(&mut m, "SSP1BUF"), 0xF6);
+    let c = m.cpu.cycles;
+    w(&mut m, "SSP1ADD", 0x54);
+    run_to(&mut m, c + 1 + 180 + 1);
+    assert_eq!(rd(&mut m, "SSP1STAT") & 3, 2, "UA set, BF not set: nothing loaded");
+    assert!(sspif(&m));
+    assert_eq!(rd(&mut m, "SSP1BUF"), 0xF6);
+    clear_sspif(&mut m);
+    w(&mut m, "SSP1ADD", 0x06); // back to the high byte
+    run_for(&mut m, 400);
+    assert_eq!(ack_log(&m), [I2cEv::Start, I2cEv::Addr(0xF6, true), I2cEv::Addr(0x55, false), I2cEv::Write(0x12, false), I2cEv::Stop]);
+    assert!(!sspif(&m), "the data byte is not for this client");
+}
+
+#[test]
+fn client_10bit_high_byte_of_another_address_is_ignored() {
+    // the mask does not apply to the high byte; A9 A8 differ
+    let (mut m, _) = client(r#"["S", "w 0xF2", "w 0x55", "P"]"#, 0x06, 0x37);
+    w(&mut m, "SSP1MSK", 0x00);
+    run_for(&mut m, 700);
+    assert_eq!(rd(&mut m, "SSP1STAT") & 0x23, 0);
+    assert_eq!(ack_log(&m), [I2cEv::Start, I2cEv::Addr(0xF2, false), I2cEv::Write(0x55, false), I2cEv::Stop]);
+    // a 7-bit looking address does not match either
+    let (mut m, _) = client(r#"["S", "w 0x06"]"#, 0x06, 0x37);
+    run_for(&mut m, 300);
+    assert_eq!(ack_log(&m)[1], I2cEv::Addr(0x06, false));
+}
+
+#[test]
+fn client_10bit_low_byte_honours_the_mask() {
+    let (mut m, e) = client(r#"["S", "w 0xF6", "w 0x5A"]"#, 0x06, 0x37);
+    w(&mut m, "SSP1MSK", 0xF0);
+    run_to(&mut m, e + 10 + 181);
+    rd(&mut m, "SSP1BUF");
+    w(&mut m, "SSP1ADD", 0x55);
+    run_for(&mut m, 200);
+    assert_eq!(rd(&mut m, "SSP1BUF"), 0x5A, "the low nibble is a don't care");
+    assert_eq!(ack_log(&m)[2], I2cEv::Addr(0x5A, true));
+}
+
+#[test]
+fn client_10bit_read_needs_a_full_match_and_a_restart() {
+    // 28.5.1 (p.456): after a full match with R/W clear the prior match flag lets a Restart with the high byte and R/W set read.
+    let (mut m, e) = client(r#"["S", "w 0xF6", "w 0x55", "Sr", "w 0xF7", "r", "rn", "P"]"#, 0x06, 0x37);
+    run_to(&mut m, e + 10 + 181);
+    clear_sspif(&mut m);
+    rd(&mut m, "SSP1BUF");
+    w(&mut m, "SSP1ADD", 0x55);
+    run_for(&mut m, 200);
+    clear_sspif(&mut m);
+    rd(&mut m, "SSP1BUF");
+    w(&mut m, "SSP1ADD", 0x06);
+    run_for(&mut m, 400);
+    assert_eq!(rd(&mut m, "SSP1STAT") & 6, 4, "R/W = read, no UA for a read request");
+    assert_eq!(rd(&mut m, "SSP1CON1") & 0x10, 0, "the clock is held for the data");
+    assert!(sspif(&m));
+    clear_sspif(&mut m);
+    assert_eq!(rd(&mut m, "SSP1BUF"), 0xF7);
+    w(&mut m, "SSP1BUF", 0x5A);
+    w(&mut m, "SSP1CON1", 0x37);
+    run_for(&mut m, 200);
+    clear_sspif(&mut m);
+    w(&mut m, "SSP1BUF", 0x6B);
+    w(&mut m, "SSP1CON1", 0x37);
+    run_for(&mut m, 300);
+    assert_eq!(ack_log(&m), [
+        I2cEv::Start, I2cEv::Addr(0xF6, true), I2cEv::Addr(0x55, true), I2cEv::Restart,
+        I2cEv::Addr(0xF7, true), I2cEv::Read(0x5A, true), I2cEv::Read(0x6B, false), I2cEv::Stop,
+    ]);
+}
+
+#[test]
+fn client_10bit_read_without_a_prior_match_is_not_acknowledged() {
+    let (mut m, _) = client(r#"["S", "w 0xF7"]"#, 0x06, 0x37);
+    run_for(&mut m, 300);
+    assert_eq!(ack_log(&m)[1], I2cEv::Addr(0xF7, false));
+    assert_eq!(rd(&mut m, "SSP1STAT") & 7, 0);
+    // a Stop between the full match and the read request drops the flag
+    let (mut m, e) = client(r#"["S", "w 0xF6", "w 0x55", "P", "S", "w 0xF7"]"#, 0x06, 0x37);
+    run_to(&mut m, e + 10 + 181);
+    w(&mut m, "SSP1ADD", 0x55);
+    run_for(&mut m, 200);
+    w(&mut m, "SSP1ADD", 0x06);
+    run_for(&mut m, 600);
+    assert_eq!(*ack_log(&m).last().unwrap(), I2cEv::Addr(0xF7, false));
+}
+
+#[test]
+fn client_10bit_a_new_write_request_clears_the_prior_match_flag() {
+    // S F6 55 | Sr F6 (write again, flag cleared) | Sr F7: the second address was never completed
+    let (mut m, e) = client(r#"["S", "w 0xF6", "w 0x55", "Sr", "w 0xF6", "Sr", "w 0xF7"]"#, 0x06, 0x37);
+    run_to(&mut m, e + 10 + 181);
+    rd(&mut m, "SSP1BUF");
+    w(&mut m, "SSP1ADD", 0x55);
+    run_for(&mut m, 200);
+    rd(&mut m, "SSP1BUF");
+    w(&mut m, "SSP1ADD", 0x06);
+    run_for(&mut m, 250);
+    assert_eq!(rd(&mut m, "SSP1STAT") & 2, 2, "the second high byte asks for a low byte");
+    w(&mut m, "SSP1ADD", 0x06); // the firmware answers UA without a full match
+    run_for(&mut m, 700);
+    assert_eq!(*ack_log(&m).last().unwrap(), I2cEv::Addr(0xF7, false));
+}
+
+#[test]
+fn client_10bit_general_call_does_not_set_ua() {
+    // 28.5.8 (p.473): the byte after it is data
+    let (mut m, e) = client(r#"["S", "w 0x00", "w 0x12"]"#, 0x06, 0x37);
+    w(&mut m, "SSP1CON2", 0x80);
+    run_to(&mut m, e + 10 + 181);
+    assert_eq!(rd(&mut m, "SSP1STAT") & 2, 0, "no UA");
+    rd(&mut m, "SSP1BUF");
+    run_for(&mut m, 200);
+    assert_eq!(rd(&mut m, "SSP1STAT") & 0x21, 0x21);
+    assert_eq!(ack_log(&m), [I2cEv::Start, I2cEv::Addr(0x00, true), I2cEv::Write(0x12, true)]);
+}
+
+#[test]
+fn client_10bit_sen_stretches_after_data_but_ua_holds_the_address() {
+    let (mut m, e) = client(r#"["S", "w 0xF6", "w 0x55", "w 0x12"]"#, 0x06, 0x37);
+    w(&mut m, "SSP1CON2", 0x01); // SEN
+    run_to(&mut m, e + 10 + 181);
+    assert_eq!(rd(&mut m, "SSP1CON1") & 0x10, 0x10, "an address byte leaves CKP alone");
+    rd(&mut m, "SSP1BUF");
+    w(&mut m, "SSP1ADD", 0x55);
+    run_for(&mut m, 190);
+    assert_eq!(rd(&mut m, "SSP1CON1") & 0x10, 0x10);
+    rd(&mut m, "SSP1BUF");
+    w(&mut m, "SSP1ADD", 0x06);
+    run_for(&mut m, 190);
+    assert_eq!(rd(&mut m, "SSP1CON1") & 0x10, 0, "the data byte clears CKP (SEN)");
+}
+
+#[test]
+fn client_10bit_start_stop_interrupts_only_in_mode_1111() {
+    let (mut m, e) = client(r#"["S"]"#, 0x06, 0x37);
+    run_to(&mut m, e + 15);
+    assert!(!sspif(&m), "SSPM = 0111");
+    let (mut m, e) = client(r#"["S"]"#, 0x06, 0x3F);
+    run_to(&mut m, e + 15);
+    assert!(sspif(&m), "SSPM = 1111");
+}
+
+#[test]
+fn client_10bit_pins_show_scl_held_low_by_ua() {
+    let (mut m, e) = client_pins(r#"["S", "w 0xF6", "w 0x55"]"#, 0x06);
+    w(&mut m, "SSP1CON1", 0x37);
+    run_to(&mut m, e + 10 + 181);
+    let held = m.cpu.cycles;
+    run_for(&mut m, 400);
+    assert_eq!(bus(&mut m, held + 300) & 1, 0, "SCL stays low while UA is set");
+}

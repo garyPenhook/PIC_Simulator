@@ -97,6 +97,12 @@ pub const HOOKS: u8 = 6;
 
 pub use super::spi::SpiClient;
 
+/// SSPM of an I2C client mode (7-bit 0110 / 1110, 10-bit 0111 / 1111).
+fn client_mode(mode: u8) -> bool { matches!(mode, 6 | 7 | 14 | 15) }
+
+/// SSPM of an I2C mode that owns SCL / SDA as open-drain pins: the client modes and the host (1000).
+fn i2c_mode(mode: u8) -> bool { client_mode(mode) || mode == 8 }
+
 /// One thing the external I2C host does (`[[i2c_host]]`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HostOp {
@@ -210,6 +216,15 @@ enum Step {
     Finish(u8),
 }
 
+/// What a 10-bit address byte being received is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TenAddr {
+    /// A high byte with R/W clear: UA is set once it is acknowledged.
+    High,
+    /// The low byte: UA and SSPxIF are set whether it matched or not; `true` = it matched.
+    Low(bool),
+}
+
 #[derive(Clone)]
 pub struct Mssp {
     pub num: u8,
@@ -245,6 +260,12 @@ pub struct Mssp {
     harmed: bool,
     /// Client mode: addressed by the host, true = the host reads.
     cl_sel: Option<bool>,
+    /// 10-bit client: the high address byte (R/W clear) was acknowledged, the next byte is the low address byte (`[A168]`).
+    ten_low: bool,
+    /// 10-bit client: the prior match flag, set by a full match with R/W clear, kept until a Stop, a high address with R/W clear, or a failed high address match.
+    prior: bool,
+    /// 10-bit client: the address byte on the bus sets UA with SSPxIF at its ninth falling edge.
+    ten_ev: Option<TenAddr>,
     /// Client mode: SCL is held low from outside; the cycle up to which the host's schedule has been stalled.
     held: Option<u64>,
     /// Port index and bit mask of the SDA pin, for an outside device holding it low (set by the owner before `sync`).
@@ -254,7 +275,7 @@ pub struct Mssp {
 impl Mssp {
     pub fn enabled(&self, m: &[u8]) -> bool { self.en(m) }
     /// I2C host or client mode: the module owns SCL / SDA as open-drain pins.
-    pub fn i2c_pins(&self, m: &[u8]) -> bool { self.en(m) && matches!(m[self.con1] & 15, 6 | 8 | 14) }
+    pub fn i2c_pins(&self, m: &[u8]) -> bool { self.en(m) && i2c_mode(m[self.con1] & 15) }
     pub fn freeze_pins(&mut self, now: u64) { self.pin_paused = Some(4 * now); }
     pub fn pin_level(&self, tick: u64) -> (bool, bool) {
         let tick = self.pin_paused.map_or(tick, |t| tick.min(t));
@@ -316,7 +337,7 @@ impl Mssp {
             sel: None,
             read_idx: None,
             msk: addr(dev, &format!("SSP{n}MSK")),
-            host: None, ph: Ph::Next, hdue: None, hblock: false, harmed: false, cl_sel: None, held: None, sda_pin: None,
+            host: None, ph: Ph::Next, hdue: None, hblock: false, harmed: false, cl_sel: None, ten_low: false, prior: false, ten_ev: None, held: None, sda_pin: None,
         };
         let regs = [s.buf, s.stat, s.con1, s.con2, s.add, s.con3];
         Some((s, regs))
@@ -340,6 +361,7 @@ impl Mssp {
     fn host_stop(&mut self) {
         self.held = None;
         self.ph = Ph::Next; self.hdue = None; self.hblock = false; self.harmed = false; self.cl_sel = None;
+        self.ten_low = false; self.prior = false; self.ten_ev = None;
     }
 
     fn en(&self, m: &[u8]) -> bool {
@@ -408,7 +430,7 @@ impl Mssp {
             return;
         }
         let mode = m[self.con1] & 15;
-        if matches!(mode, 6 | 14) {
+        if client_mode(mode) {
             if self.host.is_none() {
                 notes.insert(format!("MSSP{} I2C client mode is modelled only with an [[i2c_host]] stimulus (byte level on PIC16, with pin waveforms on PIC18 / K22); nothing drives the bus", self.num));
             }
@@ -419,7 +441,7 @@ impl Mssp {
             return;
         }
         if !matches!(mode, 0..=3 | 8 | 10) {
-            notes.insert(format!("MSSP{} mode SSPM = {mode:04b} (10-bit client, firmware controlled host, SPI client) is not modelled", self.num));
+            notes.insert(format!("MSSP{} mode SSPM = {mode:04b} (firmware controlled host, SPI client) is not modelled", self.num));
             return;
         }
         while let Some(&(t, st)) = self.steps.front() {
@@ -512,6 +534,16 @@ impl Mssp {
         (b ^ m[self.add]) & mask & 0xFE == 0
     }
 
+    /// 10-bit client, high byte: `11110 A9 A8` against SSPxADD<2:1>, the mask not applied, R/W ignored; a read (R/W set) needs the prior match flag (`[A168]`).
+    fn high_match(&self, m: &[u8], b: u8) -> bool {
+        b & 0xF8 == 0xF0 && (b ^ m[self.add]) & 0x06 == 0 && (b & 1 == 0 || self.prior)
+    }
+
+    /// 10-bit client, low byte: all eight bits against SSPxADD under SSPxMSK<7:0>.
+    fn low_match(&self, m: &[u8], b: u8) -> bool {
+        (b ^ m[self.add]) & self.msk.map_or(0xFF, |a| m[a]) == 0
+    }
+
     /// A byte arrives from the host: load SSPxBUF per the overflow rules. Returns true when it is acknowledged by hardware.
     fn load_rx(&mut self, m: &mut [u8], b: u8) -> bool {
         let (bf, ov, boen) = (m[self.stat] & 1 != 0, m[self.con1] & 0x40 != 0, m[self.con3] & 0x10 != 0);
@@ -529,7 +561,8 @@ impl Mssp {
             Ph::Next => {
                 let Some(&op) = self.host.as_ref().and_then(|h| h.ops.front()) else { return; };
                 // Start can happen on an idle bus; everything else needs SCL released by the client.
-                if !ckp && op != HostOp::Start { self.hblock = true; return; }
+                // (a 10-bit client with UA set holds SCL low until SSPxADD is written)
+                if m[self.stat] & 2 != 0 || (!ckp && op != HostOp::Start) { self.hblock = true; return; }
                 self.host.as_mut().unwrap().ops.pop_front();
                 match op {
                     HostOp::Start => self.cond(m, t, false, ev, log),
@@ -546,12 +579,13 @@ impl Mssp {
                         self.ph = Ph::StopEv; self.hdue = Some(t + half);
                     }
                     HostOp::Write(b) => {
-                        let addr = self.expect_addr;
+                        let addr = self.expect_addr || self.ten_low;
                         self.wire_bits(t, period, b);
                         self.ph = Ph::W8 { b, addr };
                         self.hdue = Some(t + 8 * period);
                     }
                     HostOp::Read(ack) => {
+                        self.ten_low = false;
                         let mine = self.cl_sel == Some(true);
                         let b = if mine { m[self.buf] } else { 0xFF };
                         self.wire_bits(t, period, b);
@@ -563,8 +597,9 @@ impl Mssp {
             Ph::Cond => self.cond(m, t, true, ev, log),
             Ph::StopEv => {
                 self.cl_sel = None; self.expect_addr = false;
+                self.ten_low = false; self.prior = false; self.ten_ev = None;
                 m[self.stat] = m[self.stat] & !8 | 0x10;
-                if mode == 14 || m[self.con3] & 0x40 != 0 { self.sspif.set_in(m); ev.push(t); }
+                if mode >= 14 || m[self.con3] & 0x40 != 0 { self.sspif.set_in(m); ev.push(t); }
                 log.push((self.num, t, I2cEv::Stop));
                 self.wire_at(4 * t, true, true);
                 self.ph = Ph::Next;
@@ -573,7 +608,17 @@ impl Mssp {
             Ph::W8 { b, addr } => {
                 let b = self.sda_and(drive, t, b);
                 let (ahen, dhen) = (m[self.con3] & 2 != 0, m[self.con3] & 1 != 0);
-                let mine = if addr { self.addr_match(m, b) || (b == 0 && m[self.con2] & 0x80 != 0) } else { matches!(self.cl_sel, Some(false)) };
+                let ten = mode & 7 == 7;
+                let low = addr && ten && self.ten_low;
+                let gcall = b == 0 && m[self.con2] & 0x80 != 0;
+                let mine = if !addr { matches!(self.cl_sel, Some(false)) }
+                    else if low { self.low_match(m, b) }
+                    else { gcall || if ten { self.high_match(m, b) } else { self.addr_match(m, b) } };
+                self.ten_low = false;
+                // the prior match flag survives only a high address with R/W set that matched, or bytes that are not addresses
+                if addr && ten && !low && !gcall && (!mine || b & 1 == 0) { self.prior = false; }
+                if low { self.ten_ev = Some(TenAddr::Low(mine)); }
+                else if addr && ten && mine && !gcall && b & 1 == 0 { self.ten_ev = Some(TenAddr::High); }
                 if !mine {
                     if addr { self.cl_sel = None; }
                     self.expect_addr = false;
@@ -584,7 +629,8 @@ impl Mssp {
                 }
                 self.expect_addr = false;
                 let acked = self.load_rx(m, b);
-                if addr { m[self.stat] = m[self.stat] & !0x24 | (b & 1) << 2; self.cl_sel = Some(b & 1 != 0); }
+                let read = b & 1 != 0 && !low;
+                if addr { m[self.stat] = m[self.stat] & !0x24 | u8::from(read) << 2; self.cl_sel = Some(read); }
                 else { m[self.stat] |= 0x20; }
                 if (addr && ahen) || (!addr && dhen) {
                     m[self.con3] |= 0x80;
@@ -615,8 +661,21 @@ impl Mssp {
             }
             Ph::W9f { b, addr, mine, ack, held } => {
                 log.push((self.num, t, if addr { I2cEv::Addr(b, ack) } else { I2cEv::Write(b, ack) }));
+                let ten_ev = self.ten_ev.take();
                 if mine && (!held || ack) { self.sspif.set_in(m); ev.push(t); }
-                if mine && ack && (self.cl_sel == Some(true) || m[self.con2] & 1 != 0) { self.set_ckp(m, false); }
+                match ten_ev {
+                    // an acknowledged high byte asks for the low byte; UA holds SCL until SSPxADD is written
+                    Some(TenAddr::High) if ack => { self.ten_low = true; m[self.stat] |= 2; }
+                    // the low byte sets UA and SSPxIF even when it did not match; a full match sets the prior match flag
+                    Some(TenAddr::Low(hit)) => {
+                        m[self.stat] |= 2;
+                        if !(mine && (!held || ack)) { self.sspif.set_in(m); ev.push(t); }
+                        self.prior = hit && ack;
+                    }
+                    _ => {}
+                }
+                // SEN does not stretch after a 10-bit address byte written to the client: UA does (28.5.6.2)
+                if mine && ack && ten_ev.is_none() && (self.cl_sel == Some(true) || m[self.con2] & 1 != 0) { self.set_ckp(m, false); }
                 self.ph = Ph::Next;
                 self.hdue = Some(t);
             }
@@ -651,7 +710,8 @@ impl Mssp {
         m[self.stat] = m[self.stat] & !0x10 | 8;
         self.expect_addr = true;
         self.cl_sel = None;
-        if m[self.con1] & 15 == 14 || m[self.con3] & 0x20 != 0 { self.sspif.set_in(m); ev.push(t); }
+        self.ten_low = false; self.ten_ev = None;
+        if m[self.con1] & 15 >= 14 || m[self.con3] & 0x20 != 0 { self.sspif.set_in(m); ev.push(t); }
         log.push((self.num, t, if restart { I2cEv::Restart } else { I2cEv::Start }));
         // SDA falls while SCL is high; SCL follows half a period later.
         self.wire_at(4 * t, true, false);
@@ -764,7 +824,7 @@ impl Mssp {
                         let steps = [(t(16), Step::TxBf), (t(17), Step::TxAck(v)), (t(18), Step::TxDone)];
                         self.steps.extend(steps);
                     }
-                    6 | 14 => {
+                    6 | 7 | 14 | 15 => {
                         if self.cl_sel == Some(true) {
                             if m[self.stat] & 1 != 0 {
                                 m[self.con1] |= 0x80; // WCOL: still holds the previous word
@@ -794,8 +854,8 @@ impl Mssp {
                     self.host_stop();
                 }
                 if old & 0x10 == 0 && v & 0x10 != 0 { self.host_resume(now); }
-                if v & 0x20 != 0 && matches!(v & 15, 6 | 14) { self.host_arm(now); }
-                if v & 0x20 != 0 && self.wire.is_empty() { self.wire_at(now * 4, matches!(v & 15, 6 | 8 | 14) || v & 0x10 != 0, matches!(v & 15, 6 | 8 | 14)); }
+                if v & 0x20 != 0 && client_mode(v & 15) { self.host_arm(now); }
+                if v & 0x20 != 0 && self.wire.is_empty() { self.wire_at(now * 4, i2c_mode(v & 15) || v & 0x10 != 0, i2c_mode(v & 15)); }
             }
             CON2 => {
                 if !(en && m[self.con1] & 15 == 8) {
@@ -840,7 +900,14 @@ impl Mssp {
                 }
                 self.steps.extend(steps);
             }
-            ADD => m[self.add] = v,
+            ADD => {
+                m[self.add] = v;
+                // 10-bit client: the update answers UA and releases SCL (`[A168]`)
+                if en && client_mode(m[self.con1] & 15) && m[self.stat] & 2 != 0 {
+                    m[self.stat] &= !2;
+                    self.host_resume(now);
+                }
+            }
             CON3 => m[self.con3] = v & 0x7F | m[self.con3] & 0x80, // ACKTIM is hardware only
             _ => {}
         }
