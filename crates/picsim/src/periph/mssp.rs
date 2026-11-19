@@ -76,6 +76,9 @@
 //!   rising SCL edge reads 0 (a byte the host writes arrives with that bit cleared, a byte the client sends reaches the host with it cleared), and
 //!   on the ninth clock of a read it makes a host NACK read as an acknowledge (ACKSTAT = 0, the client keeps CKP clear). Not modelled: a
 //!   Start/Stop made by the outside device, the host's own view of the client's acknowledge, arbitration. PIC18 / K22 only.
+//! * `[A167]` General call: with GCEN (SSPxCON2<7>) set the module also takes the address byte 00h (R/W clear) as its own, whatever SSPxADD and SSPxMSK say,
+//!   and acknowledges it as any address (BF, SSPxIF, AHEN stretching, overflow NACK all as for a normal address; R/W = 0, D/A = 0). 01h is not a general call.
+//!   In 10-bit mode UA is not set for it (10-bit mode itself is not modelled).
 //! * `[A163]` A read the host makes of a client that is not addressed for reading returns FFh and touches no register.
 
 use crate::drive::Drive;
@@ -570,7 +573,7 @@ impl Mssp {
             Ph::W8 { b, addr } => {
                 let b = self.sda_and(drive, t, b);
                 let (ahen, dhen) = (m[self.con3] & 2 != 0, m[self.con3] & 1 != 0);
-                let mine = if addr { self.addr_match(m, b) } else { matches!(self.cl_sel, Some(false)) };
+                let mine = if addr { self.addr_match(m, b) || (b == 0 && m[self.con2] & 0x80 != 0) } else { matches!(self.cl_sel, Some(false)) };
                 if !mine {
                     if addr { self.cl_sel = None; }
                     self.expect_addr = false;

@@ -450,7 +450,7 @@ sends are printed by `basil-sim` as `spiN: ...`. Chip select (SS_out, SSET), SS_
 
 ## MSSP of the PIC18-Q10 (S5, `periph/mssp.rs`, DS40002043F ch.28)
 
-SPI host and I2C host, and the 7-bit I2C client mode (SSPM = 0110, 1110) against an external `[[i2c_host]]` (`[A160]`-`[A166]`). SPI slave modes, 10-bit
+SPI host and I2C host, and the 7-bit I2C client mode (SSPM = 0110, 1110) against an external `[[i2c_host]]` (`[A160]`-`[A167]`). SPI slave modes, 10-bit
 client modes, the firmware controlled I2C host (SSPM = 1011) and multi-master bus collisions are not modelled (a
 note is printed; BCLxIF is never set). Pin waveforms, PPS/TRIS routing and SPI pin reception are covered by `[A155]`.
 The existing byte-level host engine still runs once SSPEN is set. The outside world comes
@@ -504,7 +504,8 @@ NACKed and a read from nobody gives FFh.
   * `[A164]` the pins show the bus: SCL / SDA waveforms of the host and the client's acknowledge (and read data) reach the PPS-selected pins as open-drain levels (the board needs a pull-up, `[[pin]] level = 1`); a clock held by CKP is SCL left low. Levels the firmware drives are not fed back to the module. Test `client_pins_*` in `tests/mssp.rs`.
   * `[A165]` an outside device holding SCL low (a `[[pin]]` driving the SCL pin low) stops the host's clock; its remaining waveform is delayed by the hold, to instruction granularity (a pulse shorter than the instruction it falls in is not seen). Tests `client_host_waits_while_an_outside_device_holds_scl_low` and `client_host_is_not_delayed_by_a_hold_that_has_ended` in `tests/mssp.rs`.
   * `[A166]` an outside device holding SDA low (a `[[pin]]` driving the SDA pin low) is wired-AND with the bus: a data bit it holds low at the rising SCL edge reads 0 (in a byte the host writes and in a byte the client sends), and on the ninth clock of a read it makes a host NACK read as an acknowledge (ACKSTAT = 0, CKP stays clear). Not modelled: a Start/Stop made by the outside device, the host's own view of the client's acknowledge, arbitration. PIC18 / K22 only. Tests `client_data_bit_held_low_*` and `client_host_nack_reads_as_ack_*` in `tests/mssp.rs`.
-  * Not modelled: 10-bit addressing (UA), general call (GCEN), SBCDE slave bus collision, Sleep wake-up on an address match (the host is paused in Sleep), SDA held low by an outside device while the module is not in a byte (spurious Start/Stop), arbitration,
+  * `[A167]` general call (DS40002043F 28.5.8 p.473, DS40001412H 15.5.8 p.234): with GCEN = 1 the address byte 00h (R/W clear) is taken as the module's own address whatever SSPxADD / SSPxMSK hold, and acknowledged like any address (BF, SSPxIF, AHEN stretching, overflow NACK; R/W = 0, D/A = 0). 00h with R/W set (01h) is not a general call. Tests `client_general_call_*` in `tests/mssp.rs`.
+  * Not modelled: 10-bit addressing (UA, so UA not set by a general call), SBCDE slave bus collision, Sleep wake-up on an address match (the host is paused in Sleep), SDA held low by an outside device while the module is not in a byte (spurious Start/Stop), arbitration,
     SDAHT, pin waveforms on PIC16 parts (their `[[i2c_host]]` runs at byte level only, test `i2c_host_drives_the_client_mode_of_a_pic16_mssp` in `tests/pic16_board.rs`).
   stretching by a client are not modelled.
 * Tests: `crates/picsim/tests/mssp.rs`; `tests/sim/spi_q10` and `tests/sim/i2c_q10` run the library `Spi` and `I2c` modules (compiled with

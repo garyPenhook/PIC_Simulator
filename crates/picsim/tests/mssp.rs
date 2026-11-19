@@ -629,3 +629,40 @@ fn client_host_nack_reads_as_ack_while_an_outside_device_holds_sda_low() {
     assert_eq!(c2, c, "the hold does not change the timing");
     assert_eq!((ackstat, ckp), (0, false), "SDA low on the ninth clock is an acknowledge: ACKSTAT = 0, CKP stays clear");
 }
+
+#[test]
+fn client_general_call_is_acknowledged_with_gcen_whatever_the_address() {
+    // DS40002043F 28.5.8 (p.473), DS40001412H 15.5.8 (p.234).
+    let (mut m, e) = client(r#"["S", "w 0x00", "w 0x12", "P"]"#, 0xA0, 0x36);
+    w(&mut m, "SSP1CON2", 0x80);
+    run_to(&mut m, e + 10 + 181);
+    assert_eq!(rd(&mut m, "SSP1STAT") & 0x25, 0x01, "BF set, R/W = 0, D/A = 0: an address");
+    assert!(sspif(&m));
+    assert_eq!(rd(&mut m, "SSP1BUF"), 0x00);
+    clear_sspif(&mut m);
+    run_for(&mut m, 200);
+    assert_eq!(rd(&mut m, "SSP1BUF"), 0x12, "the data after it is received too");
+    assert_eq!(ack_log(&m), [I2cEv::Start, I2cEv::Addr(0x00, true), I2cEv::Write(0x12, true), I2cEv::Stop]);
+}
+
+#[test]
+fn client_general_call_needs_gcen_and_a_clear_rw_bit() {
+    let (mut m, _) = client(r#"["S", "w 0x00"]"#, 0xA0, 0x36);
+    run_for(&mut m, 200);
+    assert_eq!(ack_log(&m)[1], I2cEv::Addr(0x00, false), "GCEN clear: not acknowledged");
+    assert_eq!(rd(&mut m, "SSP1BUF"), 0, "and nothing is loaded");
+    let (mut m, _) = client(r#"["S", "w 0x01"]"#, 0xA0, 0x36);
+    w(&mut m, "SSP1CON2", 0x80);
+    run_for(&mut m, 200);
+    assert_eq!(ack_log(&m)[1], I2cEv::Addr(0x01, false), "00h with R/W set is not a general call");
+}
+
+#[test]
+fn client_general_call_stretches_with_ahen() {
+    let (mut m, e) = client(r#"["S", "w 0x00"]"#, 0xA0, 0x36);
+    w(&mut m, "SSP1CON2", 0x80);
+    w(&mut m, "SSP1CON3", 0x02);
+    run_to(&mut m, e + 10 + 181);
+    assert_eq!(rd(&mut m, "SSP1CON1") & 0x10, 0, "AHEN: the clock is held after the eighth falling edge");
+    assert_eq!(ack_log(&m).len(), 1, "the acknowledge waits for the firmware");
+}
