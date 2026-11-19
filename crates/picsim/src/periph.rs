@@ -2877,8 +2877,12 @@ impl Periph {
             let low = self.mssps[i].has_host() && self.mssps[i].i2c_pins(&m.mem) && self.scl_held_low(m, self.mssps[i].num, now);
             self.mssps[i].scl_hold(now, low);
         }
+        for i in 0..self.mssps.len() {
+            let sda = self.i2c_pin(m, self.mssps[i].num, false);
+            self.mssps[i].sda_pin = sda;
+        }
         for q in &mut self.mssps {
-            q.sync(&mut m.mem, now, ev, &mut self.spi_tx, &mut self.i2c_log, &mut self.notes);
+            q.sync(&mut m.mem, Some(&self.drive), now, ev, &mut self.spi_tx, &mut self.i2c_log, &mut self.notes);
         }
         for q in &mut self.i2cqs {
             q.sync(m, now, ev, &mut self.i2c_log, &mut self.notes);
@@ -3338,14 +3342,18 @@ impl Periph {
         self.resolve_pin_state(i, now, &state, 4 * now.saturating_sub(1)).1 & !state.analog
     }
 
+    /// The port index and bit of the pin MSSP `num` takes its SCL (or SDA) input from.
+    fn i2c_pin(&self, m: &DataMem, num: u8, scl: bool) -> Option<(usize, u8)> {
+        let pin = if let Some(pp) = self.i2c_pps.iter().find(|pp| pp.num == num) { m.mem[if scl { pp.scl_in } else { pp.sda_in }] }
+            else if let Some(f) = self.i2c_fixed.iter().find(|f| f.0 == num) { let p = if scl { f.1 } else { f.2 }; (p.0.wrapping_sub(b'A') << 3) | p.1 }
+            else { return None };
+        let i = self.ports.iter().position(|p| p.letter == b'A' + (pin >> 3 & 7))?;
+        Some((i, 1u8 << (pin & 7)))
+    }
+
     /// An outside device (a `[[pin]]` drive) holds SCL of MSSP `num` low at cycle `now`: the pin the module's clock input selects.
     fn scl_held_low(&self, m: &DataMem, num: u8, now: u64) -> bool {
-        let pin = if let Some(pp) = self.i2c_pps.iter().find(|pp| pp.num == num) { m.mem[pp.scl_in] }
-            else if let Some(f) = self.i2c_fixed.iter().find(|f| f.0 == num) { (f.1.0.wrapping_sub(b'A') << 3) | f.1.1 }
-            else { return false };
-        let Some(i) = self.ports.iter().position(|p| p.letter == b'A' + (pin >> 3 & 7)) else { return false };
-        let bit = 1u8 << (pin & 7);
-        self.drive.mask(i, now) & bit != 0 && self.drive.level(i, now) & bit == 0
+        self.i2c_pin(m, num, true).is_some_and(|(i, bit)| self.drive.mask(i, now) & bit != 0 && self.drive.level(i, now) & bit == 0)
     }
 
     fn pps_pin_tick(&self, m: &DataMem, reg: usize, tick: u64) -> bool {

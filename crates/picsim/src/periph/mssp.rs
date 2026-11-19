@@ -72,8 +72,13 @@
 //! * `[A165]` An outside device holding SCL low (a `[[pin]]` driving the SCL pin low) stops the host's clock: the rest of its planned
 //!   waveform moves later by the time SCL stays held (seen at instruction boundaries, so to about an instruction). Held data (SDA)
 //!   is not read back and there is no arbitration; a pulse shorter than the instruction it falls in is not seen. PIC18 / K22 only (PIC16 has no pin waveforms).
+//! * `[A166]` An outside device holding SDA low (a `[[pin]]` driving the SDA pin low) is wired-AND with the bus: each data bit it holds low at the
+//!   rising SCL edge reads 0 (a byte the host writes arrives with that bit cleared, a byte the client sends reaches the host with it cleared), and
+//!   on the ninth clock of a read it makes a host NACK read as an acknowledge (ACKSTAT = 0, the client keeps CKP clear). Not modelled: a
+//!   Start/Stop made by the outside device, the host's own view of the client's acknowledge, arbitration. PIC18 / K22 only.
 //! * `[A163]` A read the host makes of a client that is not addressed for reading returns FFh and touches no register.
 
+use crate::drive::Drive;
 use crate::log::Log;
 use super::{addr, Flag};
 use devdesc::Device;
@@ -239,6 +244,8 @@ pub struct Mssp {
     cl_sel: Option<bool>,
     /// Client mode: SCL is held low from outside; the cycle up to which the host's schedule has been stalled.
     held: Option<u64>,
+    /// Port index and bit mask of the SDA pin, for an outside device holding it low (set by the owner before `sync`).
+    pub sda_pin: Option<(usize, u8)>,
 }
 
 impl Mssp {
@@ -306,7 +313,7 @@ impl Mssp {
             sel: None,
             read_idx: None,
             msk: addr(dev, &format!("SSP{n}MSK")),
-            host: None, ph: Ph::Next, hdue: None, hblock: false, harmed: false, cl_sel: None, held: None,
+            host: None, ph: Ph::Next, hdue: None, hblock: false, harmed: false, cl_sel: None, held: None, sda_pin: None,
         };
         let regs = [s.buf, s.stat, s.con1, s.con2, s.add, s.con3];
         Some((s, regs))
@@ -370,13 +377,30 @@ impl Mssp {
         }
     }
 
+    /// An outside device (a `[[pin]]` drive) holds SDA low at cycle `t` (`[A166]`).
+    fn sda_low(&self, drive: Option<&Drive>, t: u64) -> bool {
+        let (Some(d), Some((i, bit))) = (drive, self.sda_pin) else { return false };
+        d.mask(i, t) & bit != 0 && d.level(i, t) & bit == 0
+    }
+
+    /// The byte whose eight bits the wire shows ending before cycle `t`, with each bit forced to 0 where an outside device held SDA low at its rising SCL edge:
+    /// the AND of what the sender drives and what the others pull down (`[A166]`).
+    fn sda_and(&self, drive: Option<&Drive>, t: u64, byte: u8) -> u8 {
+        if drive.is_none() || self.sda_pin.is_none() { return byte; }
+        let mut out = byte;
+        for (n, e) in self.wire.iter().rev().filter(|e| e.1 && e.0 <= 4 * t).take(8).enumerate() {
+            if self.sda_low(drive, e.0 / 4) { out &= !(1 << n); }
+        }
+        out
+    }
+
     /// Cycles of `k` TBRG from `t`.
     fn tbrg(&self, m: &[u8], t: u64, k: u64) -> u64 {
         t + (k * (u64::from(m[self.add]) + 1)).div_ceil(2)
     }
 
     /// Apply the steps due up to cycle `now`.
-    pub fn sync(&mut self, m: &mut [u8], now: u64, ev: &mut Vec<u64>, spi_log: &mut Log<(u8, u64, u8)>, i2c_log: &mut Log<(u8, u64, I2cEv)>, notes: &mut BTreeSet<String>) {
+    pub fn sync(&mut self, m: &mut [u8], drive: Option<&Drive>, now: u64, ev: &mut Vec<u64>, spi_log: &mut Log<(u8, u64, u8)>, i2c_log: &mut Log<(u8, u64, I2cEv)>, notes: &mut BTreeSet<String>) {
         if !self.en(m) {
             return;
         }
@@ -387,7 +411,7 @@ impl Mssp {
             }
             while self.held.is_none() && let Some(t) = self.hdue && t <= now {
                 self.hdue = None;
-                self.host_step(m, t, ev, i2c_log);
+                self.host_step(m, drive, t, ev, i2c_log);
             }
             return;
         }
@@ -494,7 +518,7 @@ impl Mssp {
     }
 
     /// One phase of the external host at cycle `t`.
-    fn host_step(&mut self, m: &mut [u8], t: u64, ev: &mut Vec<u64>, log: &mut Log<(u8, u64, I2cEv)>) {
+    fn host_step(&mut self, m: &mut [u8], drive: Option<&Drive>, t: u64, ev: &mut Vec<u64>, log: &mut Log<(u8, u64, I2cEv)>) {
         let (period, half) = (self.period(), self.half());
         let mode = m[self.con1] & 15;
         let ckp = m[self.con1] & 0x10 != 0;
@@ -544,6 +568,7 @@ impl Mssp {
                 self.hdue = Some(t + half);
             }
             Ph::W8 { b, addr } => {
+                let b = self.sda_and(drive, t, b);
                 let (ahen, dhen) = (m[self.con3] & 2 != 0, m[self.con3] & 1 != 0);
                 let mine = if addr { self.addr_match(m, b) } else { matches!(self.cl_sel, Some(false)) };
                 if !mine {
@@ -594,6 +619,9 @@ impl Mssp {
             }
             Ph::R8 { b, mine, ack } => {
                 self.wire_ack(t, half, ack);
+                let b = self.sda_and(drive, t, b);
+                // an outside device pulling SDA low on the ninth clock reads as an acknowledge
+                let ack = ack || self.sda_low(drive, t + half);
                 if mine { m[self.stat] = m[self.stat] & !1 | 0x20; }
                 self.ph = Ph::R9r { b, mine, ack };
                 self.hdue = Some(t + half);

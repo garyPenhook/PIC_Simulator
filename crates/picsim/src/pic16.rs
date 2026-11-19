@@ -1942,7 +1942,7 @@ impl Pic16 {
         for i in 0..self.mssps.len() {
             let fl = self.mssps[i].sspif();
             let before = self.mem[fl.0] & fl.1 != 0;
-            self.mssps[i].sync(&mut self.mem, self.cycles, &mut ev, &mut self.spi_log, &mut self.i2c_log, &mut self.notes);
+            self.mssps[i].sync(&mut self.mem, None, self.cycles, &mut ev, &mut self.spi_log, &mut self.i2c_log, &mut self.notes);
             self.mssp_flag_after(fl, before);
         }
     }

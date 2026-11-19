@@ -580,3 +580,52 @@ fn client_host_is_not_delayed_by_a_hold_that_has_ended() {
     let (mut m, e) = client_pins_with(r#"["S", "w 0xA0"]"#, 0xA0, hold);
     assert_eq!(bus(&mut m, e + 186), 0b01, "a one-cycle hold costs about a cycle");
 }
+
+fn sda_pin(at: u64, level: u8) -> String { format!("[[pin]]\nport = \"C\"\nbit = 1\nlevel = {level}\nat = {at}\n") }
+
+#[test]
+fn client_data_bit_held_low_by_an_outside_device_reads_zero() {
+    // 0xA0 = 1010 0000. Bit 5 (a 1) has its rising SCL edge at e + 60; SDA is held low from 55 to 65, so the client sees 0x80.
+    let (mut m, e) = client_pins(r#"["S", "w 0xA0"]"#, 0xA0);
+    run_to(&mut m, e + 200);
+    assert_eq!(ack_log(&m)[1], I2cEv::Addr(0xA0, true), "control: no hold");
+    let hold = sda_pin(55, 0) + &sda_pin(65, 1);
+    let (mut m, e) = client_pins_with(r#"["S", "w 0xA0"]"#, 0xA0, &hold);
+    run_to(&mut m, e + 200);
+    assert_eq!(ack_log(&m)[1], I2cEv::Addr(0x80, false), "bit 5 reads 0: the address no longer matches");
+}
+
+#[test]
+fn client_data_bit_held_low_outside_the_clock_high_time_is_not_seen() {
+    // Bit 5's rising edge is at e + 60; a hold from 62 to 70 ends before the next edge at e + 80 and starts after bit 5 was sampled.
+    let hold = sda_pin(62, 0) + &sda_pin(70, 1);
+    let (mut m, e) = client_pins_with(r#"["S", "w 0xA0"]"#, 0xA0, &hold);
+    run_to(&mut m, e + 200);
+    assert_eq!(ack_log(&m)[1], I2cEv::Addr(0xA0, true));
+}
+
+/// The ACKSTAT after the client sends 0x00 and the host answers NACK, with `extra` stimulus; also the cycle the second byte was released.
+fn nack_after_second_byte(extra: &str) -> (u8, bool, u64) {
+    let (mut m, e) = client_pins_with(r#"["S", "w 0xA1", "r", "rn", "P"]"#, 0xA0, extra);
+    run_to(&mut m, e + 10 + 181);
+    clear_sspif(&mut m);
+    w(&mut m, "SSP1BUF", 0x5A);
+    w(&mut m, "SSP1CON1", 0x36);
+    run_to(&mut m, e + 400);
+    clear_sspif(&mut m);
+    w(&mut m, "SSP1BUF", 0x00);
+    w(&mut m, "SSP1CON1", 0x36);
+    let c = m.cpu.cycles;
+    run_to(&mut m, c + 200);
+    (rd(&mut m, "SSP1CON2") >> 6 & 1, rd(&mut m, "SSP1CON1") & 0x10 != 0, c)
+}
+
+#[test]
+fn client_host_nack_reads_as_ack_while_an_outside_device_holds_sda_low() {
+    let (ackstat, ckp, c) = nack_after_second_byte("");
+    assert_eq!((ackstat, ckp), (1, true), "control: NACK, the clock is released");
+    let hold = sda_pin(c + 1, 0) + &sda_pin(c + 190, 1);
+    let (ackstat, ckp, c2) = nack_after_second_byte(&hold);
+    assert_eq!(c2, c, "the hold does not change the timing");
+    assert_eq!((ackstat, ckp), (0, false), "SDA low on the ninth clock is an acknowledge: ACKSTAT = 0, CKP stays clear");
+}
