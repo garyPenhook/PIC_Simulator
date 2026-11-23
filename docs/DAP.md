@@ -8,7 +8,7 @@ to stderr. No TCP listener or external debugger is required.
 ## VS Code
 
 Run `python3 scripts/package-vscode.py` to create
-`target/basil-picsim-debug-0.1.0.vsix`, then use **Extensions: Install from VSIX**.
+`target/basil-picsim-debug-0.1.1.vsix`, then use **Extensions: Install from VSIX**.
 Set `basilSim.adapterPath` to the absolute path of `basil-sim-dap` in Settings.
 The extension source is `tools/vscode-picsim`; it has no npm dependencies.
 
