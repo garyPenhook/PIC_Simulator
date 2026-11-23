@@ -249,6 +249,16 @@ impl App {
             dev_note = format!(" - device set to {x} from the ELF (was {})", self.device);
             self.device = x.clone();
         }
+        // A program from a PIC BASIC compiler that writes a COFF file names its part in its build log.
+        let hex = std::path::Path::new(self.hex_path.trim());
+        if picsim::debuginfo::elf_for(hex).is_none()
+            && let Some(d) = picsim::cofinfo::device_of_listing(hex)
+            && let Some(x) = self.devices.iter().find(|x| x.eq_ignore_ascii_case(&d))
+            && *x != self.device
+        {
+            dev_note = format!(" - device set to {x} from the build log (was {})", self.device);
+            self.device = x.clone();
+        }
         self.m16 = None;
         let is16 = devdesc::Device::load(&self.devices_dir.join(format!("{}.toml", self.device))).is_ok_and(|d| d.device.family == "pic16e");
         if is16 {
@@ -284,7 +294,16 @@ impl App {
                     }
                     Err(er) => format!(" - {er}"),
                 },
-                None => " - no .elf beside the hex: no source view or variables".to_string(),
+                None => match picsim::cofinfo::cof_for(std::path::Path::new(self.hex_path.trim())) {
+                    Some(c) => match m.load_cof(&c) {
+                        Ok(()) => {
+                            self.elf_dir = c.parent().map(PathBuf::from).unwrap_or_default();
+                            if m.debug.lines.source_files().is_empty() { " - the COFF file has no source lines".to_string() } else { String::new() }
+                        }
+                        Err(er) => format!(" - {er}"),
+                    },
+                    None => " - no .elf or .cof beside the hex: no source view or variables".to_string(),
+                },
             };
             Ok((m, format!("{dev_note}{note}")))
         })();
@@ -364,7 +383,16 @@ impl App {
                     }
                     Err(er) => format!(" - {er}"),
                 },
-                None => " - no .elf beside the hex: no source view or variables".to_string(),
+                None => match picsim::cofinfo::cof_for(std::path::Path::new(self.hex_path.trim())) {
+                    Some(c) => match m.load_cof(&c) {
+                        Ok(()) => {
+                            self.elf_dir = c.parent().map(PathBuf::from).unwrap_or_default();
+                            if m.debug.lines.source_files().is_empty() { " - the COFF file has no source lines".to_string() } else { String::new() }
+                        }
+                        Err(er) => format!(" - {er}"),
+                    },
+                    None => " - no .elf or .cof beside the hex: no source view or variables".to_string(),
+                },
             };
             Ok((m, labels, note))
         })();

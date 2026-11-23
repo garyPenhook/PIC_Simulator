@@ -26,10 +26,10 @@
       "languages": ["basic", "c"],
       "configurationAttributes": {
         "launch": {
-          "required": ["program", "device"],
+          "required": ["program"],
           "properties": {
-            "program": { "type": "string", "description": "Compiled HEX or ELF file." },
-            "device": { "type": "string", "description": "PIC part, for example 18F27Q10 or 16F17146." },
+            "program": { "type": "string", "description": "Compiled HEX or ELF file. A HEX with a .cof file beside it (PIC BASIC compilers that write COFF) is debugged from that file and its BASIC source." },
+            "device": { "type": "string", "description": "PIC part, for example 18F27Q10. May be left out when the ELF names it or the build log (prog.pbe) or listing (prog.asm) of a COFF build does." },
             "devices": { "type": "string", "description": "Optional device description directory." },
             "asm": { "type": "string", "description": "Optional assembly symbol listing." },
             "stimulus": { "type": "string", "description": "Optional TOML stimulus file." },
