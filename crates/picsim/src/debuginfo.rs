@@ -509,6 +509,8 @@ pub struct Ty {
 pub enum Form {
     /// Integer, character, boolean or float: `kind` says which.
     Scalar,
+    /// One bit of the byte at the variable's address (`bit` 0 is the least significant): a BASIC `Bit` variable.
+    Bit { bit: u8 },
     Array { of: Box<Ty>, count: u32 },
     /// A structure, or a union (every member at offset 0).
     Struct { union: bool, members: Vec<Member>, id: u32 },
@@ -807,6 +809,7 @@ impl Ty {
         let Some(raw) = mem.get(addr as usize..(addr as usize).saturating_add(self.bytes as usize)) else { return "(outside RAM)".into() };
         match &self.form {
             Form::Scalar => scalar(&self.kind, raw),
+            Form::Bit { bit } => (raw[0] >> (bit & 7) & 1).to_string(),
             Form::Array { of, count } => {
                 if of.kind == Kind::Char && matches!(of.form, Form::Scalar) {
                     // A string: up to the first NUL.

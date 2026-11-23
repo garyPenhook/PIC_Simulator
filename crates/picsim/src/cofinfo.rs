@@ -37,6 +37,8 @@ struct CofVar {
     addr: u32,
     basic: u16,
     array: Option<(u32, u32)>,
+    /// A `Bit` variable: the bit of the byte at `addr`.
+    bit: Option<u8>,
 }
 
 #[derive(Debug, Default)]
@@ -48,6 +50,8 @@ struct Cof {
     /// Ends of the sections that carry line records, in program addresses.
     ends: Vec<u32>,
     vars: Vec<CofVar>,
+    /// The main program's section: (name without `.main_`, low, high) in program addresses.
+    main: Option<(String, u32, u32)>,
 }
 
 fn parse(bytes: &[u8], word_addressed: bool) -> Result<Cof, String> {
@@ -60,6 +64,7 @@ fn parse(bytes: &[u8], word_addressed: bool) -> Result<Cof, String> {
     let nsyms = u32at(bytes, 12).ok_or_else(bad)? as usize;
     let opt = u16at(bytes, 16).ok_or_else(bad)? as usize;
     let mut cof = Cof::default();
+    let strtab = bytes.get(symptr + 20 * nsyms..).ok_or_else(bad)?;
     for i in 0..nscns {
         let h = 20 + opt + 40 * i;
         let (paddr, size, lnptr) = (u32at(bytes, h + 8).ok_or_else(bad)?, u32at(bytes, h + 16).ok_or_else(bad)?, u32at(bytes, h + 28).ok_or_else(bad)? as usize);
@@ -69,11 +74,15 @@ fn parse(bytes: &[u8], word_addressed: bool) -> Result<Cof, String> {
             let (file, line, addr) = (u32at(bytes, r).ok_or_else(bad)?, u16at(bytes, r + 4).ok_or_else(bad)?, u32at(bytes, r + 6).ok_or_else(bad)?);
             cof.rows.push((addr, file, u32::from(line)));
         }
+        let raw = bytes.get(h..h + 8).ok_or_else(bad)?;
+        let sname = if raw[..4] == [0; 4] { cstr(strtab, u32at(raw, 4).unwrap_or(0) as usize) } else { cstr(raw, 0) };
+        if let Some(n) = sname.strip_prefix(".main_") {
+            cof.main = Some((n.to_string(), paddr, paddr.saturating_add(if word_addressed { size / 2 } else { size })));
+        }
         if nln > 0 {
             cof.ends.push(paddr.saturating_add(if word_addressed { size / 2 } else { size }));
         }
     }
-    let strtab = bytes.get(symptr + 20 * nsyms..).ok_or_else(bad)?;
     let mut i = 0;
     while i < nsyms {
         let o = symptr + 20 * i;
@@ -85,11 +94,26 @@ fn parse(bytes: &[u8], word_addressed: bool) -> Result<Cof, String> {
             if let Some(off) = u32at(aux, 0) {
                 cof.files.push((i as u32, cstr(strtab, off as usize)));
             }
-        } else if scn == 1 && class == 2 && !name.starts_with('.') && !name.contains(" (bit") {
+        } else if scn == 1 && class == 2 && !name.starts_with('.') {
+            // A Bit variable is written `name (bitN)`: the byte it lives in is the symbol's address.
+            let (name, bit) = match name.rsplit_once(" (bit") {
+                Some((n, b)) => match b.strip_suffix(')').and_then(|b| b.parse::<u8>().ok()).filter(|b| *b < 8) {
+                    Some(bit) => (n.to_string(), Some(bit)),
+                    None => {
+                        i += 1 + naux; // a malformed bit suffix: not a variable this reader knows
+                        continue;
+                    }
+                },
+                None => (name, None),
+            };
+            if name.contains(' ') || (bit.is_none() && name.contains('(')) {
+                i += 1 + naux;
+                continue;
+            }
             // Basic type in the low 5 bits; bits 5-6 are the first derived type (3 = array).
             let array = (ty >> 5) & 3 == 3 && aux.len() >= 10;
             let array = if array { Some((u32::from(u16at(aux, 6).unwrap_or(0)), u32::from(u16at(aux, 8).unwrap_or(0)))) } else { None };
-            cof.vars.push(CofVar { name, addr: value, basic: ty & 0x1f, array });
+            cof.vars.push(CofVar { name, addr: value, basic: ty & 0x1f, array, bit });
         }
         i += 1 + naux;
     }
@@ -248,6 +272,10 @@ fn make_var(v: &CofVar, name: String, declared: Option<&str>, scope: Option<usiz
         Some(t) => t,
         None => coff_type(v.basic),
     };
+    if let Some(bit) = v.bit {
+        let layout = Ty { bytes: 1, elem: 1, kind: Kind::Unsigned, array: false, name: "Bit".into(), form: Form::Bit { bit } };
+        return Var { name, addr: v.addr, bytes: 1, kind: Kind::Unsigned, elem: 1, array: false, ty: "Bit".into(), scope, param, rom: false, layout, frame: None, unit: 0, file_static: false };
+    }
     let text = declared == Some("string");
     let layout = match v.array {
         Some((size, count)) if count > 0 => {
@@ -298,6 +326,11 @@ impl DebugInfo {
                 let high = end_of(last).unwrap_or(last + 1);
                 info.funcs.push(Func { name: p.name.clone(), low, high, frame_reg: None, unit });
             }
+        }
+        // The main program: its section, after the routines so that an address inside a routine is found in the routine first.
+        if let Some((name, low, high)) = &cof.main {
+            let unit = rows.iter().find(|r| r.2 != 0 && (*low..*high).contains(&r.0)).map_or(0, |r| r.1 as usize);
+            info.funcs.push(Func { name: name.clone(), low: *low, high: *high, frame_reg: None, unit });
         }
         // Variables: a name is a global of the source, or a routine's name followed by a parameter, local or `Result`.
         for v in &cof.vars {

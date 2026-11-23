@@ -47,8 +47,11 @@ fn variables_have_the_types_the_source_declares() {
     assert_eq!((a.addr, a.bytes, a.elem, a.array, a.ty.as_str()), (0x1E, 5, 1, true, "Byte[5]"));
     let w = g("warr");
     assert_eq!((w.addr, w.bytes, w.elem, w.ty.as_str()), (0x23, 6, 2, "Word[3]"));
-    // A bit variable is not listed.
-    assert!(!d.vars.iter().any(|v| v.name.contains("flag")));
+    // A bit variable is the bit of a byte.
+    let f = g("flag");
+    assert_eq!((f.addr, f.bytes, f.ty.as_str()), (0x00, 1, "Bit"));
+    assert_eq!(f.show(&[1]), "1");
+    assert_eq!(f.show(&[0xFE]), "0");
     // Names are found in any case.
     assert_eq!(d.global("VSW", None).map(|v| v.addr), Some(0x09));
 }
@@ -105,6 +108,11 @@ fn a_running_pic18_program_is_read_by_name() {
     assert_eq!(m.cpu.pc, stop, "reached the Stop line");
     let v: std::collections::HashMap<_, _> = values(&m.cpu.m.mem, &m.debug, None).into_iter().collect();
     assert_eq!(v["vb"], "2 (0x02)");
+    assert_eq!(v["flag"], "1");
+    // The main program is a routine of its own, found after the routines inside its section.
+    let main = m.debug.func_at(stop).expect("the main program");
+    assert_eq!(m.debug.funcs[main].name, "Main");
+    assert_ne!(m.debug.func_at(m.debug.lines.first_addr(&file, 25).unwrap()), Some(main));
     assert_eq!(v["vw"], "7 (0x0007)");
     assert_eq!(v["vsb"], "-3 (0xFD)");
     assert_eq!(v["vsw"], "-300 (0xFED4)");
