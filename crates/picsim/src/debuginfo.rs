@@ -773,7 +773,87 @@ impl Var {
     }
 }
 
+/// A number as typed: decimal or `0x` hex (the flag), with an optional sign.
+fn parse_int(text: &str) -> Option<(i128, bool)> {
+    let t = text.trim();
+    let (neg, t) = match t.strip_prefix('-') {
+        Some(r) => (true, r.trim_start()),
+        None => (false, t.strip_prefix('+').unwrap_or(t)),
+    };
+    let (v, hex) = match t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
+        Some(h) => (i128::from_str_radix(h, 16).ok()?, true),
+        None => (t.parse::<i128>().ok()?, false),
+    };
+    Some((if neg { -v } else { v }, hex))
+}
+
 impl Ty {
+    /// The bytes that hold `text` as a value of this type, for writing a variable. `current` is the variable's bytes now: a `Bit`
+    /// changes only its bit of them. Only a scalar, enumeration, pointer or `Bit` can be set; an integer must fit its size.
+    pub fn encode(&self, text: &str, current: &[u8]) -> Result<Vec<u8>, String> {
+        let text = text.trim();
+        let size = self.bytes as usize;
+        if current.len() != size || size == 0 {
+            return Err("the variable is outside data memory".into());
+        }
+        if let Form::Bit { bit } = &self.form {
+            let on = match text.to_ascii_lowercase().as_str() {
+                "1" | "true" | "on" => true,
+                "0" | "false" | "off" => false,
+                _ => return Err(format!("{text} is not 0 or 1")),
+            };
+            let mut b = current.to_vec();
+            b[0] = if on { b[0] | 1 << (bit & 7) } else { b[0] & !(1 << (bit & 7)) };
+            return Ok(b);
+        }
+        let int = |name: &str| -> Result<Vec<u8>, String> {
+            if size > 8 {
+                return Err(format!("{name} is too large to set"));
+            }
+            let mut hex = false;
+            let v = match (&self.form, text.to_ascii_lowercase().as_str()) {
+                (_, "true") if self.kind == Kind::Bool => 1,
+                (_, "false") if self.kind == Kind::Bool => 0,
+                (Form::Enum(names), t) => match names.iter().find(|(_, n)| n.eq_ignore_ascii_case(t)) {
+                    Some((v, _)) => i128::from(*v),
+                    None => parse_int(text).map(|(v, _)| v).ok_or_else(|| format!("{text} is not a number or enumerator"))?,
+                },
+                _ if self.kind == Kind::Char && text.len() == 3 && text.starts_with('\'') && text.ends_with('\'') => i128::from(text.as_bytes()[1]),
+                _ => {
+                    let (v, h) = parse_int(text).ok_or_else(|| format!("{text} is not a whole number"))?;
+                    hex = h;
+                    v
+                }
+            };
+            let bits = 8 * size as u32;
+            // A hex literal may use the whole width (0xFB for an SByte); a decimal one must be in the signed range.
+            let (lo, hi) = if self.kind == Kind::Signed { (-(1i128 << (bits - 1)), if hex { (1i128 << bits) - 1 } else { (1i128 << (bits - 1)) - 1 }) } else { (0, (1i128 << bits) - 1) };
+            if v < lo || v > hi {
+                return Err(format!("{v} does not fit {} byte{} ({name})", size, if size == 1 { "" } else { "s" }));
+            }
+            Ok((v as u64).to_le_bytes()[..size].to_vec())
+        };
+        match (&self.form, &self.kind) {
+            (Form::Scalar, Kind::Float | Kind::FloatMchp) if size == 4 => {
+                let f: f32 = text.parse().map_err(|_| format!("{text} is not a number"))?;
+                if !f.is_finite() {
+                    return Err("the value must be finite".into());
+                }
+                if self.kind == Kind::Float {
+                    return Ok(f.to_bits().to_le_bytes().to_vec());
+                }
+                // Microchip order (AN575): exponent, then the sign with the top 7 fraction bits, then the rest of the fraction.
+                let i = f.to_bits();
+                let (sign, exp, frac) = (i >> 31, (i >> 23) & 0xFF, i & 0x7F_FFFF);
+                Ok(vec![exp as u8, (sign << 7 | frac >> 16) as u8, (frac >> 8) as u8, frac as u8])
+            }
+            (Form::Scalar, Kind::Float | Kind::FloatMchp) => Err("only 4-byte floats can be set".into()),
+            (Form::Scalar, _) => int("value"),
+            (Form::Enum(_), _) | (Form::Pointer { .. }, _) => int("value"),
+            _ => Err("only a scalar variable can be set".into()),
+        }
+    }
+
     /// Follow `.member` and `[index]` steps; returns the byte offset from the start of `self` and the type reached.
     pub fn resolve(&self, mut path: &str) -> Option<(u32, &Ty)> {
         let (mut off, mut ty) = (0, self);

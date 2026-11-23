@@ -57,14 +57,21 @@ Disconnect remain responsive even for endless firmware loops.
 * Stack traces and scopes for live hardware-stack frames; globals, locals and
   parameters use the simulator's typed DWARF formatting and software-frame bases.
 * Evaluate a variable name, `pc` or `cycles`. Hover evaluation has no side effects.
+* setVariable on a scalar, enumeration, pointer or `Bit` variable while stopped: a number (decimal, or `0x` hex that may
+  use the whole width, so `0xFB` is an `SByte` -5), `true`/`false` for a Boolean or Bit, a `'c'` character, an enumerator
+  name, or a decimal for a `Float`. A value that does not fit is refused. A `Bit` changes only its bit of the byte.
+  Arrays, strings and structures cannot be set; a `const` in program memory cannot either.
+* Data breakpoints (dataBreakpointInfo, setDataBreakpoints; write access, replaced as a set): the program stops after the
+  instruction that changes the variable, whoever changes it (the CPU or a peripheral). A `Bit` variable watches only its
+  own bit, so another bit of the byte changing does not stop. The watch is on the address the variable has now, so it is
+  not offered for a variable that has no live frame.
 
 Addresses use native PC units: bytes on PIC18, words on PIC16. Lines and columns
 are one-based and source paths are native filesystem paths. Optimized code can
 merge lines or inline calls; build with `-O0` to retain routine boundaries.
 Arrays and structures are formatted values rather than expandable variable trees.
 
-Conditional/hit/log breakpoints, arbitrary expressions, memory editing, data
-breakpoints, disassembly requests and reverse execution are not advertised.
+Conditional/hit/log breakpoints, arbitrary expressions, memory editing, disassembly requests and reverse execution are not advertised.
 Unsupported requests return failed responses; unsupported source breakpoints are
 unverified. The core still supports the GUI's editing/watchpoint/VCD features.
 

@@ -1,7 +1,7 @@
 //! Debug Adapter Protocol over stdin/stdout. Stdout contains protocol frames only.
 use picsim::{
     LineStep, Machine, Stop,
-    debuginfo::{DebugInfo, Frame},
+    debuginfo::{DebugInfo, Form, Frame, Var},
     machine16::Machine16,
 };
 use serde_json::{Value, json};
@@ -43,6 +43,34 @@ impl Target {
             Self::P18(m) => &m.cpu.m.mem,
             Self::P16(m) => &m.cpu.mem,
         }
+    }
+    fn peek(&self, addr: u32, len: usize) -> Vec<u8> {
+        target!(self, m, m.peek(addr, len))
+    }
+    fn write(&mut self, addr: u32, bytes: &[u8]) {
+        target!(self, m, {
+            for (i, b) in bytes.iter().enumerate() {
+                m.cpu.write(addr + i as u32, *b);
+            }
+            m.cpu.settle();
+        })
+    }
+    fn debugger(&mut self) -> &mut picsim::debugger::Debugger {
+        target!(self, m, &mut m.debugger)
+    }
+    /// The data address of `v` in the frame whose base is `base`, as the CPU's memory has it, checked to lie inside data memory.
+    /// A PIC16 frame on XC8's software stack is at a linear address (from 2000h), which is translated to its banked one.
+    fn data_place(&self, v: &Var, base: Option<u32>) -> Result<u32, String> {
+        if v.rom {
+            return Err("a constant in program memory cannot be changed".into());
+        }
+        let a = v.place(base).ok_or("the variable is not in a live frame")?;
+        let mem = self.mem().len() as u32;
+        let a = if self.debug().word_addressed && mem <= 0x2000 && a >= 0x2000 { picsim::pic16::linear_to_data(a - 0x2000) as u32 } else { a };
+        if a.checked_add(v.bytes).is_none_or(|end| end > mem) {
+            return Err("the variable is outside data memory".into());
+        }
+        Ok(a)
     }
     fn sites(&self) -> Vec<u32> {
         target!(self, m, m.call_sites())
@@ -173,6 +201,34 @@ fn string<'a>(a: &'a Value, key: &str) -> Result<&'a str, String> {
     a[key]
         .as_str()
         .ok_or_else(|| format!("{key} must be a string"))
+}
+/// The variable `name` in the scope `reference` (as `variables` lists them) and the base of the frame it is read in.
+fn scope_var(t: &Target, reference: u64, name: &str) -> Result<(Var, Option<u32>), String> {
+    let frame = reference / 2;
+    if frame == 0 || frame > 1 + t.sites().len() as u64 {
+        return Err("invalid variablesReference".into());
+    }
+    let (d, frames) = (t.debug(), t.frames());
+    let f = frames.get(frame as usize - 1);
+    let v = d
+        .vars
+        .iter()
+        .filter(|v| if reference % 2 == 1 { v.scope.is_none() } else { v.scope.is_some() && v.scope == f.and_then(|f| f.func) })
+        .find(|v| d.var_label(v) == name)
+        .ok_or("unknown variable")?;
+    Ok((v.clone(), f.and_then(|f| f.base)))
+}
+/// `dataBreakpointInfo`'s id: `address(hex):bytes:mask(hex)`. A mask other than FF watches only those bits of the byte.
+fn parse_data_id(id: &str, size: u32) -> Result<(u32, u32, u8), String> {
+    let bad = || "unknown dataId".to_string();
+    let mut it = id.split(':');
+    let addr = u32::from_str_radix(it.next().ok_or_else(bad)?, 16).map_err(|_| bad())?;
+    let len: u32 = it.next().ok_or_else(bad)?.parse().map_err(|_| bad())?;
+    let mask = u8::from_str_radix(it.next().ok_or_else(bad)?, 16).map_err(|_| bad())?;
+    if it.next().is_some() || len == 0 || mask == 0 || (mask != 0xFF && len != 1) || addr.checked_add(len).is_none_or(|e| e > size) {
+        return Err(bad());
+    }
+    Ok((addr, len, mask))
 }
 fn address(v: &Value) -> Result<u32, String> {
     if let Some(n) = v.as_u64() {
@@ -321,7 +377,8 @@ impl Adapter {
                 Ok(
                     json!({"supportsConfigurationDoneRequest":true, "supportsSteppingGranularity":true,
                           "supportsInstructionBreakpoints":true, "supportsEvaluateForHovers":true,
-                          "supportsRestartRequest":true, "supportsTerminateRequest":true, "supportsLoadedSourcesRequest":true}),
+                          "supportsRestartRequest":true, "supportsTerminateRequest":true, "supportsLoadedSourcesRequest":true,
+                          "supportsSetVariable":true, "supportsDataBreakpoints":true}),
                 )
             }
             "launch" => self.launch(a),
@@ -449,6 +506,70 @@ impl Adapter {
                     json!({"name":d.var_label(v), "value":v.show_framed(&mem, &rom, d, f.and_then(|f| f.base)), "type":v.ty, "variablesReference":0})
                 }).collect();
                 Ok(json!({"variables":variables}))
+            }
+            "setVariable" => {
+                let t = self.stopped()?;
+                let reference = a["variablesReference"].as_u64().ok_or("variablesReference required")?;
+                let (v, base) = scope_var(t, reference, string(a, "name")?)?;
+                let addr = t.data_place(&v, base)?;
+                let new = v.layout.encode(string(a, "value")?, &t.peek(addr, v.bytes as usize))?;
+                let t = self.target.as_mut().ok_or("launch a program first")?;
+                t.write(addr, &new);
+                let d = t.debug();
+                Ok(json!({"value":v.show_framed(&d.data_view(t.mem()), &d.rom_image(t.prog()), d, base), "type":v.ty, "variablesReference":0}))
+            }
+            "dataBreakpointInfo" => {
+                let t = self.stopped()?;
+                let name = string(a, "name")?;
+                let found = match a["variablesReference"].as_u64().filter(|r| *r > 0) {
+                    Some(r) => scope_var(t, r, name),
+                    None => t.debug().global(name, None).cloned().map(|v| (v, None)).ok_or_else(|| "unknown variable".to_string()),
+                };
+                let (v, base) = match found {
+                    Ok(x) => x,
+                    Err(e) => return Ok(json!({"dataId":Value::Null, "description":e})),
+                };
+                match t.data_place(&v, base) {
+                    Ok(addr) => {
+                        let mask = if let Form::Bit { bit } = v.layout.form { 1u32 << (bit & 7) } else { 0xFF };
+                        Ok(json!({"dataId":format!("{addr:x}:{}:{mask:x}", v.bytes), "description":v.name, "accessTypes":["write"], "canPersist":false}))
+                    }
+                    Err(e) => Ok(json!({"dataId":Value::Null, "description":e})),
+                }
+            }
+            "setDataBreakpoints" => {
+                let t = self.stopped()?;
+                let size = t.mem().len() as u32;
+                let mut bytes: Vec<u32> = Vec::new();
+                let mut bits: Vec<(u32, u8)> = Vec::new();
+                let mut out = Vec::new();
+                for b in a["breakpoints"].as_array().ok_or("breakpoints required")? {
+                    let parsed = if b["accessType"].as_str().is_some_and(|t| t != "write") {
+                        Err("only write access can be watched".to_string())
+                    } else {
+                        parse_data_id(b["dataId"].as_str().unwrap_or(""), size)
+                    };
+                    match parsed {
+                        Ok((addr, len, mask)) => {
+                            if mask == 0xFF {
+                                for x in addr..addr + len {
+                                    if !bytes.contains(&x) {
+                                        bytes.push(x);
+                                    }
+                                }
+                            } else if !bits.contains(&(addr, mask)) {
+                                bits.push((addr, mask));
+                            }
+                            out.push(json!({"verified":true}));
+                        }
+                        Err(e) => out.push(json!({"verified":false, "message":e})),
+                    }
+                }
+                let t = self.target.as_mut().ok_or("launch a program first")?;
+                let d = t.debugger();
+                d.watchpoints = bytes;
+                d.bit_watch = bits;
+                Ok(json!({"breakpoints":out}))
             }
             "evaluate" => {
                 let t = self.stopped()?;

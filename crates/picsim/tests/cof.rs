@@ -145,3 +145,47 @@ fn a_running_pic16_program_stops_in_its_routine() {
     }
     assert_eq!(hits, [("0 (0x0000)", "1 (0x01)"), ("1 (0x0001)", "2 (0x02)"), ("3 (0x0003)", "3 (0x03)")].map(|(a, b)| (a.to_string(), b.to_string())));
 }
+
+#[test]
+fn values_are_encoded_for_writing_a_variable() {
+    let d = info("pic18", "v", false);
+    let g = |n: &str| d.global(n, None).unwrap_or_else(|| panic!("global {n}"));
+    let enc = |n: &str, text: &str, cur: &[u8]| g(n).layout.encode(text, cur);
+    assert_eq!(enc("vw", "1000", &[0, 0]), Ok(vec![0xE8, 0x03]));
+    assert_eq!(enc("vw", "0xFFFF", &[0, 0]), Ok(vec![0xFF, 0xFF]));
+    assert!(enc("vw", "65536", &[0, 0]).is_err());
+    assert!(enc("vw", "-1", &[0, 0]).is_err());
+    assert_eq!(enc("vsb", "-5", &[0]), Ok(vec![0xFB]));
+    assert!(enc("vsb", "200", &[0]).is_err(), "decimal must be in the signed range");
+    assert_eq!(enc("vsb", "0xC8", &[0]), Ok(vec![0xC8]), "hex may use the whole width");
+    assert_eq!(enc("vsd", "-70000", &[0; 4]), Ok((-70000i32).to_le_bytes().to_vec()));
+    assert!(enc("vb", "abc", &[0]).is_err());
+    assert!(enc("vb", "1", &[0, 0]).is_err(), "wrong size: outside data memory");
+    // A Bit changes only its bit.
+    assert_eq!(enc("flag", "1", &[0b1010_0000]), Ok(vec![0b1010_0001]));
+    assert_eq!(enc("flag", "0", &[0xFF]), Ok(vec![0xFE]));
+    assert!(enc("flag", "2", &[0]).is_err());
+    // Microchip float: what is written reads back the same.
+    let f = enc("vf", "1.5", &[0; 4]).unwrap();
+    assert_eq!(g("vf").layout.show_at(&f, 0, 1), "1.5 (0x0000407F)");
+    // Strings and arrays are not scalars.
+    assert!(enc("vs", "x", &[0; 11]).is_err());
+    assert!(enc("arr", "1", &[0; 5]).is_err());
+}
+
+#[test]
+fn a_bit_watch_ignores_the_other_bits_of_its_byte() {
+    let run = |mask: u8| {
+        let dev = Device::load(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../../devices/18F27Q10.toml")).unwrap();
+        let mut m = Machine::new(dev).unwrap();
+        m.load_hex(&std::fs::read_to_string(dir("pic18").join("v.hex")).unwrap()).unwrap();
+        m.load_cof(&dir("pic18").join("v.cof")).unwrap();
+        m.debugger.bit_watch.push((0x00, mask)); // `flag` is bit 0 of the byte at 0
+        (0..200_000).find_map(|_| m.step()).filter(|s| matches!(s, picsim::Stop::Watchpoint(_)))
+    };
+    match run(0x01) {
+        Some(picsim::Stop::Watchpoint(c)) => assert_eq!((c.addr, c.before, c.after), (0, 0, 1)),
+        other => panic!("expected the write to flag to stop: {other:?}"),
+    }
+    assert!(run(0x08).is_none(), "bit 3 never changes");
+}

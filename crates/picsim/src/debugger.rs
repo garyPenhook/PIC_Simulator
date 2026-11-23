@@ -103,6 +103,8 @@ impl Condition {
 #[derive(Default)]
 pub struct Debugger {
     pub watchpoints: Vec<u32>,
+    /// Watches on some bits of a byte (`mask` has them set): a change in the other bits does not stop.
+    pub bit_watch: Vec<(u32, u8)>,
     pub conditions: Vec<Condition>,
     pub signals: Vec<Signal>,
     pub samples: Vec<Sample>,
@@ -128,7 +130,7 @@ impl Debugger {
     }
 
     pub fn active(&self) -> bool {
-        !self.watchpoints.is_empty() || !self.conditions.is_empty() || self.recording
+        !self.watchpoints.is_empty() || !self.bit_watch.is_empty() || !self.conditions.is_empty() || self.recording
     }
 
     /// Whether each data condition (those without `at`) holds now: taken before an instruction, so that the stop is on the
@@ -167,21 +169,17 @@ impl Debugger {
     }
 
     pub fn snapshot(&self, peek: impl Fn(u32) -> u8) -> Vec<u8> {
-        self.watchpoints.iter().map(|&a| peek(a)).collect()
+        self.watchpoints.iter().map(|&a| peek(a)).chain(self.bit_watch.iter().map(|&(a, m)| peek(a) & m)).collect()
     }
 
+    /// The first watched byte, or watched bits of a byte, that differs from `before` (as `snapshot` took it). For a bit watch
+    /// `before` and `after` are the byte with only the watched bits kept.
     pub fn changed(&self, before: &[u8], peek: impl Fn(u32) -> u8) -> Option<DataChange> {
-        self.watchpoints
-            .iter()
-            .zip(before)
-            .find_map(|(&addr, &before)| {
-                let after = peek(addr);
-                (before != after).then_some(DataChange {
-                    addr,
-                    before,
-                    after,
-                })
-            })
+        let bytes = self.watchpoints.iter().map(|&a| (a, 0xFF));
+        bytes.chain(self.bit_watch.iter().copied()).zip(before).find_map(|((addr, mask), &before)| {
+            let after = peek(addr) & mask;
+            (before != after).then_some(DataChange { addr, before, after })
+        })
     }
 
     pub fn sample(&mut self, ns: u64, peek: impl Fn(u32) -> u8) {
