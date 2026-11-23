@@ -60,11 +60,13 @@ Disconnect remain responsive even for endless firmware loops.
 * setVariable on a scalar, enumeration, pointer or `Bit` variable while stopped: a number (decimal, or `0x` hex that may
   use the whole width, so `0xFB` is an `SByte` -5), `true`/`false` for a Boolean or Bit, a `'c'` character, an enumerator
   name, or a decimal for a `Float`. A value that does not fit is refused. A `Bit` changes only its bit of the byte.
-  Arrays, strings and structures cannot be set; a `const` in program memory cannot either.
+  Arrays, strings and structures cannot be set; a `const` in program memory cannot either. A `Bit` is written as its whole
+  byte with the one bit changed, so on a port register it writes back what the byte reads, not what the latch holds.
 * Data breakpoints (dataBreakpointInfo, setDataBreakpoints; write access, replaced as a set): the program stops after the
   instruction that changes the variable, whoever changes it (the CPU or a peripheral). A `Bit` variable watches only its
   own bit, so another bit of the byte changing does not stop. The watch is on the address the variable has now, so it is
-  not offered for a variable that has no live frame.
+  not offered for a variable that has no live frame or that crosses a PIC16 memory bank. The adapter owns the watch set:
+  each setDataBreakpoints replaces it.
 
 Addresses use native PC units: bytes on PIC18, words on PIC16. Lines and columns
 are one-based and source paths are native filesystem paths. Optimized code can

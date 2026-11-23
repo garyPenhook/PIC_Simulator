@@ -160,6 +160,9 @@ fn values_are_encoded_for_writing_a_variable() {
     assert_eq!(enc("vsb", "0xC8", &[0]), Ok(vec![0xC8]), "hex may use the whole width");
     assert_eq!(enc("vsd", "-70000", &[0; 4]), Ok((-70000i32).to_le_bytes().to_vec()));
     assert!(enc("vb", "abc", &[0]).is_err());
+    for bad in ["--1", "0x-5", "0x", "- 1", "1 2", ""] {
+        assert!(enc("vsb", bad, &[0]).is_err(), "{bad:?}");
+    }
     assert!(enc("vb", "1", &[0, 0]).is_err(), "wrong size: outside data memory");
     // A Bit changes only its bit.
     assert_eq!(enc("flag", "1", &[0b1010_0000]), Ok(vec![0b1010_0001]));

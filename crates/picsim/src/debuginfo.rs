@@ -777,12 +777,15 @@ impl Var {
 fn parse_int(text: &str) -> Option<(i128, bool)> {
     let t = text.trim();
     let (neg, t) = match t.strip_prefix('-') {
-        Some(r) => (true, r.trim_start()),
+        Some(r) => (true, r),
         None => (false, t.strip_prefix('+').unwrap_or(t)),
     };
+    // After the one sign only digits: no second sign, no space, nothing after `0x` but hex digits.
     let (v, hex) = match t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
-        Some(h) => (i128::from_str_radix(h, 16).ok()?, true),
-        None => (t.parse::<i128>().ok()?, false),
+        Some(h) if h.bytes().all(|c| c.is_ascii_hexdigit()) => (i128::from_str_radix(h, 16).ok()?, true),
+        Some(_) => return None,
+        None if t.bytes().all(|c| c.is_ascii_digit()) => (t.parse::<i128>().ok()?, false),
+        None => return None,
     };
     Some((if neg { -v } else { v }, hex))
 }
@@ -828,6 +831,7 @@ impl Ty {
             let bits = 8 * size as u32;
             // A hex literal may use the whole width (0xFB for an SByte); a decimal one must be in the signed range.
             let (lo, hi) = if self.kind == Kind::Signed { (-(1i128 << (bits - 1)), if hex { (1i128 << bits) - 1 } else { (1i128 << (bits - 1)) - 1 }) } else { (0, (1i128 << bits) - 1) };
+            let (lo, hi) = if self.kind == Kind::Bool { (0, 1) } else { (lo, hi) };
             if v < lo || v > hi {
                 return Err(format!("{v} does not fit {} byte{} ({name})", size, if size == 1 { "" } else { "s" }));
             }

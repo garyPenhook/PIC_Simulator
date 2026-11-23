@@ -47,30 +47,35 @@ impl Target {
     fn peek(&self, addr: u32, len: usize) -> Vec<u8> {
         target!(self, m, m.peek(addr, len))
     }
-    fn write(&mut self, addr: u32, bytes: &[u8]) {
-        target!(self, m, {
-            for (i, b) in bytes.iter().enumerate() {
-                m.cpu.write(addr + i as u32, *b);
-            }
-            m.cpu.settle();
-        })
-    }
     fn debugger(&mut self) -> &mut picsim::debugger::Debugger {
         target!(self, m, &mut m.debugger)
     }
-    /// The data address of `v` in the frame whose base is `base`, as the CPU's memory has it, checked to lie inside data memory.
-    /// A PIC16 frame on XC8's software stack is at a linear address (from 2000h), which is translated to its banked one.
-    fn data_place(&self, v: &Var, base: Option<u32>) -> Result<u32, String> {
+    /// The data address of each byte of `v` in the frame whose base is `base`, as the CPU's memory has it, checked to lie inside
+    /// data memory. A PIC16 frame on XC8's software stack is at linear addresses (from 2000h), translated byte by byte to banked
+    /// ones: the bytes of a variable that crosses from one bank to the next are not at consecutive banked addresses.
+    fn data_places(&self, v: &Var, base: Option<u32>) -> Result<Vec<u32>, String> {
         if v.rom {
             return Err("a constant in program memory cannot be changed".into());
         }
         let a = v.place(base).ok_or("the variable is not in a live frame")?;
         let mem = self.mem().len() as u32;
-        let a = if self.debug().word_addressed && mem <= 0x2000 && a >= 0x2000 { picsim::pic16::linear_to_data(a - 0x2000) as u32 } else { a };
-        if a.checked_add(v.bytes).is_none_or(|end| end > mem) {
+        let linear = self.debug().word_addressed && mem <= 0x2000 && a >= 0x2000;
+        let places: Vec<u32> = (0..v.bytes).map(|i| if linear { picsim::pic16::linear_to_data(a - 0x2000 + i) as u32 } else { a.saturating_add(i) }).collect();
+        if v.bytes == 0 || places.iter().any(|&p| p >= mem) {
             return Err("the variable is outside data memory".into());
         }
-        Ok(a)
+        Ok(places)
+    }
+    fn read_bytes(&self, places: &[u32]) -> Vec<u8> {
+        places.iter().flat_map(|&a| self.peek(a, 1)).collect()
+    }
+    fn write_bytes(&mut self, places: &[u32], bytes: &[u8]) {
+        target!(self, m, {
+            for (&a, &b) in places.iter().zip(bytes) {
+                m.cpu.write(a, b);
+            }
+            m.cpu.settle();
+        })
     }
     fn sites(&self) -> Vec<u32> {
         target!(self, m, m.call_sites())
@@ -511,10 +516,10 @@ impl Adapter {
                 let t = self.stopped()?;
                 let reference = a["variablesReference"].as_u64().ok_or("variablesReference required")?;
                 let (v, base) = scope_var(t, reference, string(a, "name")?)?;
-                let addr = t.data_place(&v, base)?;
-                let new = v.layout.encode(string(a, "value")?, &t.peek(addr, v.bytes as usize))?;
+                let places = t.data_places(&v, base)?;
+                let new = v.layout.encode(string(a, "value")?, &t.read_bytes(&places))?;
                 let t = self.target.as_mut().ok_or("launch a program first")?;
-                t.write(addr, &new);
+                t.write_bytes(&places, &new);
                 let d = t.debug();
                 Ok(json!({"value":v.show_framed(&d.data_view(t.mem()), &d.rom_image(t.prog()), d, base), "type":v.ty, "variablesReference":0}))
             }
@@ -529,7 +534,7 @@ impl Adapter {
                     Ok(x) => x,
                     Err(e) => return Ok(json!({"dataId":Value::Null, "description":e})),
                 };
-                match t.data_place(&v, base) {
+                match t.data_places(&v, base).and_then(|p| if p.windows(2).all(|w| w[1] == w[0] + 1) { Ok(p[0]) } else { Err("the variable crosses a memory bank".to_string()) }) {
                     Ok(addr) => {
                         let mask = if let Form::Bit { bit } = v.layout.form { 1u32 << (bit & 7) } else { 0xFF };
                         Ok(json!({"dataId":format!("{addr:x}:{}:{mask:x}", v.bytes), "description":v.name, "accessTypes":["write"], "canPersist":false}))
