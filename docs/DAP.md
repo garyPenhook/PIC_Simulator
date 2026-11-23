@@ -36,6 +36,10 @@ symbols; otherwise `<hex-stem>.S` is read when present. `stimulus` names a TOML
 stimulus file. `devices` overrides the device-description directory, and `cwd`
 resolves relative launch paths. Without `device`, a device-tagged ELF is required.
 
+A program from a compiler that writes a COFF file (`prog.cof` beside the HEX) launches the same way: `program` names the HEX, `device`
+may be left out when `prog.pbe` or the `LIST P =` line of `prog.asm` names the part, and the BASIC source is found where the COFF file
+records it or by name beside it. See the manual, "Programs from another PIC BASIC compiler".
+
 Launch stops at reset after configuration by default. Continue runs to a source
 or instruction breakpoint, `__halt`, or a Sleep with no wake source. At `__halt`
 the session stays stopped so you can inspect variables or restart. A firmware

@@ -16,6 +16,9 @@ pub enum Kind {
     Bool,
     Char,
     Float,
+    /// The Microchip variation of IEEE 754 single precision (AN575) that another PIC BASIC compiler uses: the exponent byte
+    /// is at the lowest address, then the sign bit with the top of the fraction, then the rest of the 23-bit fraction.
+    FloatMchp,
 }
 
 /// A variable at a fixed data-memory address, or (`frame`) at an offset in its routine's frame on XC8's software stack.
@@ -111,6 +114,8 @@ pub struct DebugInfo {
     /// The part's FSR1L (from the device description, set by the machines' `load_debug`): `frames` gives a frame base only
     /// to a routine whose `DW_AT_frame_base` names it.
     pub fsr1l: Option<u32>,
+    /// Names are looked up without regard to case (a BASIC compiler whose programs are case-insensitive).
+    pub ignore_case: bool,
 }
 
 impl DebugInfo {
@@ -221,6 +226,11 @@ impl DebugInfo {
         Ok(info)
     }
 
+    /// Whether two names are the same: equal, or equal in any case for a case-insensitive language (`ignore_case`).
+    pub fn same_name(&self, a: &str, b: &str) -> bool {
+        a == b || (self.ignore_case && a.eq_ignore_ascii_case(b))
+    }
+
     /// The routine containing the program byte address `pc`.
     pub fn func_at(&self, pc: u32) -> Option<usize> {
         self.funcs.iter().position(|f| f.low <= pc && pc < f.high)
@@ -286,7 +296,7 @@ impl DebugInfo {
     }
 
     fn global_where(&self, name: &str, file: Option<&str>, pc: Option<u32>, keep: &dyn Fn(&Var) -> bool) -> Option<&Var> {
-        let all = || self.vars.iter().filter(|v| v.scope.is_none() && v.name == name && keep(v));
+        let all = || self.vars.iter().filter(|v| v.scope.is_none() && self.same_name(&v.name, name) && keep(v));
         if let Some(file) = file {
             return all().find(|v| self.unit_file(v.unit) == file);
         }
@@ -297,7 +307,7 @@ impl DebugInfo {
     /// The routine `name`, or `name@file.c` for the one of that file: the first of that name.
     pub fn routine(&self, name: &str) -> Option<usize> {
         let (name, file) = split_file(name);
-        self.funcs.iter().position(|f| f.name == name && file.is_none_or(|file| self.unit_file(f.unit) == file))
+        self.funcs.iter().position(|f| self.same_name(&f.name, name) && file.is_none_or(|file| self.unit_file(f.unit) == file))
     }
 
     /// The source file of compile unit `u`, without its folder.
@@ -884,6 +894,12 @@ fn scalar(kind: &Kind, b: &[u8]) -> String {
         Kind::Bool => (u != 0).to_string(),
         Kind::Char => format!("'{}' ({u})", if (32..127).contains(&(u as u8)) { u as u8 as char } else { '.' }),
         Kind::Float if b.len() == 4 => format!("{} (0x{u:08X})", f32::from_bits(u as u32)),
+        Kind::FloatMchp if b.len() == 4 => {
+            // In memory: exponent, then the sign bit with the top 7 fraction bits, then two more fraction bytes (AN575 order, lowest
+            // address first). IEEE 754 has the sign first and the exponent's last bit in front of the fraction.
+            let ieee = (((u >> 15) & 1) as u32) << 31 | ((u & 0xFF) as u32) << 23 | ((((u >> 8) & 0x7F) as u32) << 16) | ((((u >> 16) & 0xFF) as u32) << 8) | ((u >> 24) & 0xFF) as u32;
+            format!("{} (0x{u:08X})", f32::from_bits(ieee))
+        }
         Kind::Signed if bits == 64 => format!("{} (0x{u:016X})", u as i64),
         Kind::Signed if bits < 64 => format!("{} (0x{u:0w$X})", ((u << (64 - bits)) as i64) >> (64 - bits), w = b.len() * 2),
         _ => format!("{u} (0x{u:0w$X})", w = b.len() * 2),

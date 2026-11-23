@@ -58,18 +58,28 @@ impl LineMap {
             }
             off = next;
         }
-        map.rows.sort_by_key(|r| r.0); // stable: rows at one address stay in program order
+        Ok(map.sorted())
+    }
+
+    /// A line table from rows `(address, index into files, line)` that a compiler wrote some other way (the
+    /// COFF file of a PIC BASIC compiler). `ends` are program addresses where code stops. Rows for line 0 (generated code) are left out.
+    pub fn from_rows(files: Vec<PathBuf>, rows: Vec<(u32, u32, u32)>, ends: Vec<u32>) -> Self {
+        LineMap { files, rows: rows.into_iter().filter(|r| r.2 != 0).collect(), ends }.sorted()
+    }
+
+    fn sorted(mut self) -> Self {
+        self.rows.sort_by_key(|r| r.0); // stable: rows at one address stay in program order
         // Several rows at one address (XC8 writes `{` and the first statement there) have no code between them: the last one is the
         // line a debugger shows, so keep it.
         let mut kept: Vec<(u32, u32, u32)> = Vec::new();
-        for r in map.rows.drain(..) {
+        for r in self.rows.drain(..) {
             match kept.last_mut() {
                 Some(k) if k.0 == r.0 => *k = r,
                 _ => kept.push(r),
             }
         }
-        map.rows = kept;
-        Ok(map)
+        self.rows = kept;
+        self
     }
 
     /// The BASIC source position of the instruction at `addr`; None for generated code.

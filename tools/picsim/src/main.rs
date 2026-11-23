@@ -56,6 +56,7 @@ fn run() -> Result<ExitCode, String> {
     let (mut bps, mut bp_max) = (Vec::<String>::new(), 20usize);
     let mut show_cfg = false;
     let mut strict = false;
+    let mut device_given = false;
     let (mut speed, mut fosc) = (0.0f64, None::<f64>);
     let mut stim = None::<PathBuf>;
     let mut until_given = false;
@@ -73,7 +74,10 @@ fn run() -> Result<ExitCode, String> {
                 print!("{HELP}");
                 return Ok(ExitCode::SUCCESS);
             }
-            "--device" => device = val("--device")?,
+            "--device" => {
+                device = val("--device")?;
+                device_given = true;
+            }
             "--devices" => root = PathBuf::from(val("--devices")?),
             "--asm" => asm = Some(PathBuf::from(val("--asm")?)),
             "--until" => {
@@ -113,6 +117,9 @@ fn run() -> Result<ExitCode, String> {
         }
     }
     let hex = hex.ok_or_else(|| HELP.split("\n\n").next().unwrap_or(HELP).to_string() + "\n(see --help)")?;
+    if !device_given && let Some(p) = picsim::cofinfo::device_of_listing(&hex) {
+        device = p; // a program built by a BASIC compiler that writes a COFF file: its build log or listing names the part
+    }
     let path = root.join(format!("{device}.toml"));
     let dev = devdesc::Device::load(&path).map_err(|e| format!("{}: {e}", path.display()))?;
     // Explicit clocks are limited to the device maximum; otherwise follow firmware.
@@ -151,6 +158,10 @@ fn run() -> Result<ExitCode, String> {
     // Routines, variables and `__halt` from the ELF when there is one (basil -g); the listing's symbols win.
     if let Some(e) = picsim::debuginfo::elf_for(&given) {
         if let Err(e) = m.load_elf(&e) {
+            eprintln!("note: {e}");
+        }
+    } else if let Some(c) = picsim::cofinfo::cof_for(&given) {
+        if let Err(e) = m.load_cof(&c) {
             eprintln!("note: {e}");
         }
     }
@@ -329,6 +340,10 @@ fn run16(
     // Routines, variables and `__halt` from the ELF when there is one (basil -g, xc8-cc -g); the listing's symbols win.
     if let Some(e) = picsim::debuginfo::elf_for(&given) {
         if let Err(e) = m.load_elf(&e) {
+            eprintln!("note: {e}");
+        }
+    } else if let Some(c) = picsim::cofinfo::cof_for(&given) {
+        if let Err(e) = m.load_cof(&c) {
             eprintln!("note: {e}");
         }
     }

@@ -256,9 +256,11 @@ impl Adapter {
             .as_ref()
             .and_then(|p| std::fs::read(p).ok())
             .and_then(|b| picsim::debuginfo::device_of(&b));
+        let listed = picsim::cofinfo::device_of_listing(&program);
         let part = a["device"]
             .as_str()
             .or(detected.as_deref())
+            .or(listed.as_deref())
             .ok_or("device is required without a device-tagged ELF")?;
         if part.contains(['/', '\\']) || part.contains("..") {
             return Err("invalid device name".into());
@@ -288,6 +290,8 @@ impl Adapter {
         }
         if let Some(elf) = elf {
             target!(&mut t, m, m.load_elf(&elf))?;
+        } else if let Some(cof) = picsim::cofinfo::cof_for(&hex) {
+            target!(&mut t, m, m.load_cof(&cof))?;
         }
         if let Some(stim) = a["stimulus"].as_str() {
             let text = std::fs::read_to_string(path(stim, &cwd)).map_err(|e| e.to_string())?;

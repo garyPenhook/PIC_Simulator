@@ -3,6 +3,7 @@
 mod dma;
 pub mod config;
 mod oscillator;
+pub mod cofinfo;
 pub mod debuginfo;
 pub mod debugger;
 pub mod disasm;

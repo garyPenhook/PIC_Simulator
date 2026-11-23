@@ -117,6 +117,14 @@ impl Machine {
         Ok(())
     }
 
+    /// Reads the debug information from the COFF file (`prog.cof`) of a PIC BASIC compiler that writes one, with the source it names.
+    pub fn load_cof(&mut self, path: &std::path::Path) -> Result<(), String> {
+        let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let dir = path.parent().unwrap_or(std::path::Path::new("."));
+        self.load_debug(DebugInfo::from_cof(&bytes, false, dir).map_err(|e| format!("{}: {e}", path.display()))?);
+        Ok(())
+    }
+
     /// Takes the debug information of an ELF: routines (and `__halt`) and global variables become symbols too,
     /// without replacing any that the assembly listing already gave.
     pub fn load_debug(&mut self, mut d: DebugInfo) {
