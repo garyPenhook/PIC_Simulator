@@ -10,11 +10,11 @@ fn dev(part: &str) -> Device {
 }
 
 fn sim(f: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/sim").join(f)
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data").join(f)
 }
 
 fn hex() -> String {
-    std::fs::read_to_string(sim("blink_q10.hex")).unwrap()
+    std::fs::read_to_string(sim("xc8_q10.hex")).unwrap()
 }
 
 #[test]
@@ -23,7 +23,7 @@ fn a_pic18_hex_on_a_pic16_part_gives_a_note_that_survives_a_reset() {
     m.load_hex(&hex()).unwrap();
     let stray = |m: &Machine16| m.cpu.notes.iter().any(|n| n.contains("outside every memory region of the PIC16F15244"));
     assert!(stray(&m), "{:?}", m.cpu.notes);
-    m.load_elf(&sim("blink_q10.elf")).unwrap();
+    m.load_elf(&sim("xc8_q10.elf")).unwrap();
     assert!(m.cpu.notes.iter().any(|n| n.contains("the ELF was built for 18F27Q10")), "{:?}", m.cpu.notes);
     m.reset().unwrap();
     assert!(stray(&m) && m.cpu.notes.iter().any(|n| n.contains("ELF")), "kept after a reset: {:?}", m.cpu.notes);
@@ -33,11 +33,11 @@ fn a_pic18_hex_on_a_pic16_part_gives_a_note_that_survives_a_reset() {
 fn the_right_part_gives_no_file_note_and_another_pic18_part_names_the_elf() {
     let mut m = Machine::new(dev("18F27Q10")).unwrap();
     m.load_hex(&hex()).unwrap();
-    m.load_elf(&sim("blink_q10.elf")).unwrap();
+    m.load_elf(&sim("xc8_q10.elf")).unwrap();
     assert!(m.cpu.notes.iter().all(|n| n.starts_with("Fosc:")), "no file mismatch notes: {:?}", m.cpu.notes);
     let mut q = Machine::new(dev("18F16Q41")).unwrap();
     q.load_hex(&hex()).unwrap();
-    q.load_elf(&sim("blink_q10.elf")).unwrap();
+    q.load_elf(&sim("xc8_q10.elf")).unwrap();
     assert!(q.cpu.notes.iter().any(|n| n.contains("the ELF was built for 18F27Q10 but the part is the PIC18F16Q41")), "{:?}", q.cpu.notes);
     q.reset();
     assert!(q.cpu.notes.iter().any(|n| n.contains("ELF")), "{:?}", q.cpu.notes);
