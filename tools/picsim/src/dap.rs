@@ -293,26 +293,12 @@ impl Adapter {
             .map(PathBuf::from)
             .unwrap_or(std::env::current_dir().map_err(|e| e.to_string())?);
         let program = path(string(a, "program")?, &cwd);
-        let elf = if program.extension().is_some_and(|e| e == "elf") {
+        let elf = if program.extension().is_some_and(|e| e.eq_ignore_ascii_case("elf")) {
             Some(program.clone())
         } else {
             picsim::debuginfo::elf_for(&program)
         };
-        let hex = if program.extension().is_some_and(|e| e == "elf") {
-            let p = program.with_extension("hex");
-            if p.exists() {
-                p
-            } else {
-                program
-                    .parent()
-                    .unwrap_or(Path::new("."))
-                    .join("dist")
-                    .join(program.file_stem().unwrap())
-                    .with_extension("hex")
-            }
-        } else {
-            program.clone()
-        };
+        let hex = picsim::lines::program_hex(&program)?;
         let detected = elf
             .as_ref()
             .and_then(|p| std::fs::read(p).ok())

@@ -225,7 +225,7 @@ impl App {
         a
     }
 
-    /// Opens a program given as a .hex, or as a .elf (the .hex built with it is loaded; the ELF gives the source lines).
+    /// Opens a program given as a .hex, or as a .elf or .cof (the .hex built with it is loaded; the ELF or COFF gives the source lines).
     fn open_program(&mut self, f: &std::path::Path) {
         self.hex_path = f.display().to_string();
         self.load();
@@ -269,7 +269,7 @@ impl App {
         let res = (|| -> Result<(Machine, String), String> {
             let dev = devdesc::Device::load(&self.devices_dir.join(format!("{}.toml", self.device))).map_err(|e| e.to_string())?;
             let mut m = Machine::new(dev)?;
-            let p = picsim::lines::program_hex(std::path::Path::new(self.hex_path.trim()))?; // a .elf loads its .hex
+            let p = picsim::lines::program_hex(std::path::Path::new(self.hex_path.trim()))?; // a .elf or .cof loads its .hex
             m.load_hex(&std::fs::read_to_string(&p).map_err(|e| format!("{}: {e}", p.display()))?)?;
             for ext in ["S", "_basil.S"] {
                 let asm = if ext == "S" { p.with_extension("S") } else { p.with_file_name(format!("{}_basil.S", p.file_stem().unwrap_or_default().to_string_lossy())) };
@@ -581,7 +581,7 @@ impl eframe::App for App {
         let dropped: Vec<PathBuf> = ui.ctx().input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).collect());
         for f in dropped {
             match f.extension().and_then(|e| e.to_str()).map(str::to_lowercase).as_deref() {
-                Some("hex" | "elf") => {
+                Some("hex" | "elf" | "cof") => {
                     if !self.running {
                         self.open_program(&f);
                     }
@@ -603,14 +603,14 @@ impl eframe::App for App {
                 if picked && (self.m.is_some() || self.m16.is_some()) {
                     self.load();
                 }
-                ui.add(egui::TextEdit::singleline(&mut self.hex_path).hint_text("path to .hex or .elf").desired_width(320.0));
+                ui.add(egui::TextEdit::singleline(&mut self.hex_path).hint_text("path to .hex, .elf or .cof").desired_width(320.0));
                 ui.add(egui::TextEdit::singleline(&mut self.stim_path).hint_text("stimulus .toml (optional)").desired_width(180.0))
                     .on_hover_text("Optional. A stimulus file you write to feed the program serial input, ADC values, pin levels, LEDs or an OLED. Leave empty to run without one.");
                 // Start the dialogs in the program's folder, not wherever the desktop last was.
                 let dir_of = |p: &str| std::path::Path::new(p.trim()).parent().filter(|d| d.is_dir()).map(PathBuf::from);
                 let prog_dir = dir_of(&self.hex_path);
-                if ui.button("Browse hex/elf…").clicked() {
-                    let mut d = rfd::FileDialog::new().add_filter("hex or ELF", &["hex", "elf"]);
+                if ui.button("Browse hex/elf/cof…").clicked() {
+                    let mut d = rfd::FileDialog::new().add_filter("hex, ELF or COFF", &["hex", "elf", "cof"]);
                     if let Some(dir) = &prog_dir {
                         d = d.set_directory(dir);
                     }

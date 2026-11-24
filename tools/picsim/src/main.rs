@@ -1,4 +1,4 @@
-//! `basil-sim prog.hex|prog.elf --device 18F16Q41 [--asm prog.S] [--until __halt] [--dump T_R1:2,T_R2] [--bp SYM,SYM] [--bp-max N] [--config] [--stim FILE]`
+//! `basil-sim prog.hex|prog.elf|prog.cof --device 18F16Q41 [--asm prog.S] [--until __halt] [--dump T_R1:2,T_R2] [--bp SYM,SYM] [--bp-max N] [--config] [--stim FILE]`
 //! `--speed max|R` limits the run to a fraction R of real time (`1` = real time, `0.5`, `1/10`...) at `--fosc MHZ` (default derived from firmware oscillator settings); the default is `max`.
 //! `--bp` prints the cycle count each time one of the symbols is reached (at most `--bp-max`, default 20).
 
@@ -10,7 +10,7 @@ use std::process::ExitCode;
 
 /// The text `--help` prints; the usage error on a missing program prints its synopsis lines.
 const HELP: &str = "\
-usage: basil-sim prog.hex|prog.elf [--device PART] [--devices DIR]
+usage: basil-sim prog.hex|prog.elf|prog.cof [--device PART] [--devices DIR]
                  [--asm prog.S] [--until SYMBOL] [--max-cycles N]
                  [--stim FILE] [--dump NAME[:BYTES],...]
                  [--bp SYMBOL,...] [--bp-max N]

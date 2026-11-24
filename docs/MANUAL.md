@@ -1,6 +1,6 @@
 # pic-sim Manual
 
-Revision for **pic-sim 0.2.16** and **basil-sim 0.2.16** (one workspace version). Simulated families: **PIC18** (PIC18F27Q10, the PIC18F04/05/06/14/15/16Q41 and the PIC18(L)F23/24/25/26/43/44/45/46K22) and **PIC16 enhanced mid-range** (PIC16F131xx, 132xx, 152xx, 171xx, 180x6 and 183xx).
+Revision for **pic-sim 0.2.17** and **basil-sim 0.2.17** (one workspace version). Simulated families: **PIC18** (PIC18F27Q10, the PIC18F04/05/06/14/15/16Q41 and the PIC18(L)F23/24/25/26/43/44/45/46K22) and **PIC16 enhanced mid-range** (PIC16F131xx, 132xx, 152xx, 171xx, 180x6 and 183xx).
 
 This manual describes what the simulator does today. It is organised in the order you meet the tools: what the simulator is, how to build and start it, how to prepare a program for it, the graphical front end `pic-sim`, the command-line front end `basil-sim`, the stimulus file that describes the outside world, the simulated board (LEDs and OLED), and finally what is and is not modelled. Anything not listed here is not supported.
 
@@ -95,7 +95,7 @@ pic-sim [prog.hex | prog.elf] [--device PART]
 basil-sim prog.hex|prog.elf [--device PART] [options]
 ```
 
-With no argument `pic-sim` opens empty; type a path or use *Browse hex/elf…*. `basil-sim` needs a program. The default part is `18F27Q10` for `basil-sim`; `pic-sim` starts with the first PIC18 part in its list. Because a program built with `basil -g` records the part it was built for, you normally do not need `--device` in the window (section 5).
+With no argument `pic-sim` opens empty; type a path or use *Browse hex/elf/cof…*. `basil-sim` needs a program. The default part is `18F27Q10` for `basil-sim`; `pic-sim` starts with the first PIC18 part in its list. Because a program built with `basil -g` records the part it was built for, you normally do not need `--device` in the window (section 5).
 
 ---
 
@@ -193,7 +193,7 @@ Device files are generated from Microchip's device packs by `tools/devgen` and c
 
 ```
 +--------------------------------------------------------------+
-| TOOLBAR: device | hex/elf path | stimulus | Browse | Stim |
+| TOOLBAR: device | hex/elf/cof path | stimulus | Browse | Stim |
 |   Load | Run Pause Step ... Reset | Speed | Fosc MHz         |
 | status line                                                  |
 +----------+----------------------------+----------------------+
@@ -214,8 +214,8 @@ The window title shows `pic-sim <version>`. The window is divided into the **too
 ## Loading a program
 
 1. Pick the part in the device box, or leave it: when the ELF names the part it was built for, that part is selected automatically and the status line says `device set to … from the ELF`. The wrong part would have the wrong registers and pins, so the ELF wins over the box. Choosing another part while a program is loaded loads it again on that part straight away (a run stops), so the box always names the part that is running. (This works only for parts the box lists, so not for the `16LF…` parts: choose those by hand.)
-2. Enter a path in the first text field, or press **Browse hex/elf…**, or drag a file onto the window. A `.hex` or `.elf` dropped on the window loads at once (ignored while the program is running). A `.toml` dropped on the window becomes the stimulus file.
-3. Optionally enter a stimulus file in the second field, or press **Stim…**. A stimulus file is a TOML file that **you write** (section 7) to feed the program serial input, ADC values, pin levels and so on; none is supplied with your program, and you can leave the field empty to run without one. The **Stim…** dialog opens in the folder of the stimulus file already named, else in the program's folder, else in the repository's `tests/sim` folder, which holds working examples. The small **x** beside the field clears it. **Browse hex/elf…** likewise opens in the program's folder. The stimulus is read when you press **Load**, so choosing one after loading needs another **Load**.
+2. Enter a path in the first text field, or press **Browse hex/elf/cof…**, or drag a file onto the window. A `.hex`, `.elf` or `.cof` dropped on the window loads at once (ignored while the program is running). A `.toml` dropped on the window becomes the stimulus file.
+3. Optionally enter a stimulus file in the second field, or press **Stim…**. A stimulus file is a TOML file that **you write** (section 7) to feed the program serial input, ADC values, pin levels and so on; none is supplied with your program, and you can leave the field empty to run without one. The **Stim…** dialog opens in the folder of the stimulus file already named, else in the program's folder, else in the repository's `tests/sim` folder, which holds working examples. The small **x** beside the field clears it. **Browse hex/elf/cof…** likewise opens in the program's folder. The stimulus is read when you press **Load**, so choosing one after loading needs another **Load**.
 4. Press **Load**.
 
 The status line then reads `loaded <path> (N symbols, M variables)` followed by a note when something is missing: `no .elf beside the hex: no source view or variables`, or `ELF has no source lines (build with basil -g or xc8-cc -g)`. An error (for example a bad stimulus file) is shown there and nothing is loaded.
