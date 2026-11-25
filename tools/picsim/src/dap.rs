@@ -3,6 +3,7 @@ use picsim::{
     LineStep, Machine, Stop,
     debuginfo::{DebugInfo, Form, Frame, Var},
     machine16::Machine16,
+    machine_ds::MachineDs,
 };
 use serde_json::{Value, json};
 use std::{
@@ -16,12 +17,14 @@ use std::{
 enum Target {
     P18(Machine),
     P16(Machine16),
+    Ds(MachineDs),
 }
 macro_rules! target {
     ($s:expr, $m:ident, $e:expr) => {
         match $s {
             Target::P18($m) => $e,
             Target::P16($m) => $e,
+            Target::Ds($m) => $e,
         }
     };
 }
@@ -36,12 +39,17 @@ impl Target {
         target!(self, m, m.cpu.cycles)
     }
     fn prog(&self) -> &[u8] {
-        target!(self, m, &m.cpu.prog)
+        match self {
+            Self::Ds(m) => &m.cpu.prog_b,
+            Self::P18(m) => &m.cpu.prog,
+            Self::P16(m) => &m.cpu.prog,
+        }
     }
     fn mem(&self) -> &[u8] {
         match self {
             Self::P18(m) => &m.cpu.m.mem,
             Self::P16(m) => &m.cpu.mem,
+            Self::Ds(m) => &m.cpu.mem,
         }
     }
     fn peek(&self, addr: u32, len: usize) -> Vec<u8> {
@@ -96,6 +104,7 @@ impl Target {
         match self {
             Self::P18(m) => m.stack_depth(),
             Self::P16(m) => m.cpu.depth() as u8,
+            Self::Ds(m) => m.cpu.call_depth.clamp(0, 255) as u8,
         }
     }
     fn bps(&mut self) -> &mut Vec<u32> {
@@ -114,6 +123,7 @@ impl Target {
                 Ok(())
             }
             Self::P16(m) => m.reset(),
+            Self::Ds(m) => m.reset(),
         }
     }
 }
@@ -323,6 +333,8 @@ impl Adapter {
                 .map_err(|e| e.to_string())?;
         let mut t = if dev.device.family == "pic18" {
             Target::P18(Machine::new(dev)?)
+        } else if dev.device.family == "dspic33" {
+            Target::Ds(MachineDs::new(dev)?)
         } else {
             Target::P16(Machine16::new(dev)?)
         };
@@ -416,7 +428,7 @@ impl Adapter {
             }
             "setInstructionBreakpoints" => {
                 let t = self.target()?;
-                let limit = t.prog().len() as u64 / if matches!(t, Target::P16(_)) { 2 } else { 1 };
+                let limit = t.prog().len() as u64 / if matches!(t, Target::P16(_)) { 2 } else if matches!(t, Target::Ds(_)) { 2 } else { 1 };
                 let mut addresses = Vec::new();
                 let mut replies = Vec::new();
                 for bp in a["breakpoints"]

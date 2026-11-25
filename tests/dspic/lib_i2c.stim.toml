@@ -1,0 +1,9 @@
+# The software I2C host's lines RB8 (SDA) and RB9 (SCL) are pulled high (the part's low wins), no client on the bus.
+[[pin]]
+port = "B"
+bit = 8
+level = 1
+[[pin]]
+port = "B"
+bit = 9
+level = 1

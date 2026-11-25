@@ -9,6 +9,7 @@ use eframe::egui;
 use picsim::lines::LineMap;
 use picsim::periph::{Board, Bus, Led, Oled, Pin, pin_name};
 use picsim::machine16::Machine16;
+use picsim::machine_ds::MachineDs;
 use picsim::{Machine, Stop, disasm::disasm};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -104,6 +105,8 @@ struct App {
     m: Option<Machine>,
     /// The loaded program when the part is a PIC16 (`m` and `m16` are never both set).
     m16: Option<Machine16>,
+    /// The loaded program when the part is a dsPIC33 (`m`, `m16` and `mds` are never two of them set).
+    mds: Option<MachineDs>,
     msg: String,
     running: bool,
     speed: f32, // log10 of cycles per frame (used at "Max" run speed)
@@ -181,6 +184,7 @@ impl App {
             hex_path: hex.clone().unwrap_or_default(),
             m: None,
             m16: None,
+            mds: None,
             msg: String::new(),
             running: false,
             speed: 6.0,
@@ -260,6 +264,11 @@ impl App {
             self.device = x.clone();
         }
         self.m16 = None;
+        self.mds = None;
+        if devdesc::Device::load(&self.devices_dir.join(format!("{}.toml", self.device))).is_ok_and(|d| d.device.family == "dspic33") {
+            self.load_ds(dev_note);
+            return;
+        }
         let is16 = devdesc::Device::load(&self.devices_dir.join(format!("{}.toml", self.device))).is_ok_and(|d| d.device.family == "pic16e");
         if is16 {
             self.load16(dev_note);
@@ -429,24 +438,87 @@ impl App {
         }
     }
 
+    /// Loads a program for a dsPIC33 part: the hex, the symbols of the listing and map, the stimulus file and the ELF beside the hex.
+    fn load_ds(&mut self, dev_note: String) {
+        let res = (|| -> Result<(MachineDs, String), String> {
+            let dev = devdesc::Device::load(&self.devices_dir.join(format!("{}.toml", self.device))).map_err(|e| e.to_string())?;
+            let mut m = MachineDs::new(dev)?;
+            let p = picsim::lines::program_hex(std::path::Path::new(self.hex_path.trim()))?;
+            m.load_hex(&std::fs::read_to_string(&p).map_err(|e| format!("{}: {e}", p.display()))?)?;
+            if let Ok(t) = std::fs::read_to_string(p.with_extension("S")) {
+                m.load_symbols_from_asm(&t);
+            }
+            if let Ok(t) = std::fs::read_to_string(p.with_extension("map")) {
+                m.load_symbols_from_map(&t);
+            }
+            if !self.stim_path.trim().is_empty() {
+                let f = PathBuf::from(self.stim_path.trim());
+                let text = std::fs::read_to_string(&f).map_err(|e| format!("{}: {e}", f.display()))?;
+                m.load_stimulus(&text).map_err(|e| format!("{}: {e}", f.display()))?;
+            }
+            let note = match picsim::debuginfo::elf_for(std::path::Path::new(self.hex_path.trim())) {
+                Some(e) => match m.load_elf(&e) {
+                    Ok(()) => {
+                        self.elf_dir = e.parent().map(PathBuf::from).unwrap_or_default();
+                        if m.debug.lines.source_files().is_empty() { " - ELF has no source lines (build with basil -g)".to_string() } else { String::new() }
+                    }
+                    Err(er) => format!(" - {er}"),
+                },
+                None => " - no .elf beside the hex: no source view or variables".to_string(),
+            };
+            Ok((m, note))
+        })();
+        self.m = None;
+        self.sources.clear();
+        self.last_src = None;
+        self.snap = None;
+        self.view_snap = None;
+        self.pin_snap.clear();
+        self.lines = LineMap::default();
+        match res {
+            Ok((m, note)) => {
+                let mut labels = BTreeMap::new();
+                for (n, a) in &m.syms {
+                    if m.debug.func_at(*a).is_some() || n.starts_with("__") || n.chars().next().is_some_and(char::is_lowercase) {
+                        labels.entry(*a).or_insert_with(|| n.clone());
+                    }
+                }
+                self.lines = if m.debug.lines.source_files().is_empty() { LineMap::default() } else { m.debug.lines.clone() };
+                self.src_view = !self.lines.is_empty();
+                self.tab = if m.debug.vars.is_empty() { 0 } else { 4 };
+                self.msg = format!("loaded {} ({} symbols, {} variables){dev_note}{note}", self.hex_path, m.syms.len(), m.debug.vars.len());
+                self.labels = labels;
+                self.fosc_mhz = self.fosc_mhz.min(m.dev.fosc_max_mhz() as f32);
+                self.mds = Some(m);
+            }
+            Err(e) => {
+                self.msg = format!("{e}{dev_note}");
+                self.labels.clear();
+            }
+        }
+    }
+
     /// Effective firmware or overridden clock of the loaded part.
     fn effective_fosc_mhz(&self) -> f64 {
         self.m.as_ref().map(|m| m.cpu.p.board.effective_fosc_mhz())
             .or_else(|| self.m16.as_ref().map(|m| m.cpu.board.effective_fosc_mhz()))
+            .or_else(|| self.mds.as_ref().map(|m| m.cpu.fosc_mhz()))
             .unwrap_or(64.0)
     }
 
     /// Instruction cycles executed so far by whichever part is loaded.
     fn cycles(&self) -> u64 {
-        self.m.as_ref().map(|m| m.cpu.cycles).or_else(|| self.m16.as_ref().map(|m| m.cpu.cycles)).unwrap_or(0)
+        self.m.as_ref().map(|m| m.cpu.cycles).or_else(|| self.m16.as_ref().map(|m| m.cpu.cycles)).or_else(|| self.mds.as_ref().map(|m| m.cpu.cycles)).unwrap_or(0)
     }
 
     fn snapshot(&mut self) {
-        self.snap = self.m.as_ref().map(|m| m.cpu.m.mem.clone()).or_else(|| self.m16.as_ref().map(|m| m.cpu.mem.clone()));
-        self.snap_frames = self.m.as_ref().map(|m| m.frames()).or_else(|| self.m16.as_ref().map(|m| m.frames())).unwrap_or_default();
+        self.snap = self.m.as_ref().map(|m| m.cpu.m.mem.clone()).or_else(|| self.m16.as_ref().map(|m| m.cpu.mem.clone())).or_else(|| self.mds.as_ref().map(|m| m.cpu.mem.clone()));
+        self.snap_frames = self.m.as_ref().map(|m| m.frames()).or_else(|| self.m16.as_ref().map(|m| m.frames())).or_else(|| self.mds.as_ref().map(|m| m.frames())).unwrap_or_default();
         if let Some(m) = &self.m {
             self.view_snap = Some((0..m.cpu.m.size).map(|a| m.cpu.peek(a)).collect());
             self.pin_snap = m.cpu.p.pin_overview(&m.cpu.m, m.cpu.cycles).iter().map(|p| (p.pin, p.high)).collect();
+        } else if let Some(m) = &self.mds {
+            self.view_snap = Some(m.cpu.mem.clone());
         } else if let Some(m) = &self.m16 {
             self.view_snap = Some((0..m.cpu.implemented.len() as u32).map(|a| m.cpu.peek(a)).collect());
             self.pin_snap = m.cpu.pin_overview().iter().map(|p| (p.pin, p.high)).collect();
@@ -461,10 +533,22 @@ impl App {
             self.job = Some(Job::Line(m.begin_line_step(over, out)));
         } else if let Some(m) = &self.m16 {
             self.job = Some(Job::Line(m.begin_line_step(over, out)));
+        } else if let Some(m) = &self.mds {
+            self.job = Some(Job::Line(m.begin_line_step(over, out)));
         }
     }
 
     fn advance(&mut self, cycles: u64) {
+        if let Some(m) = &mut self.mds {
+            let halt = m.syms.get("__halt").copied();
+            match m.run(halt, cycles) {
+                Stop::Cycles => {}
+                s => {
+                    self.running = false;
+                    self.last_stop = Some(s);
+                }
+            }
+        }
         if let Some(m) = &mut self.m16 {
             let halt = m.syms.get("__halt").copied();
             match m.run(halt, cycles) {
@@ -501,7 +585,24 @@ impl eframe::App for App {
         let slice = std::time::Duration::from_millis(30);
         if let Some(job) = self.job.take() {
             let mut keep = Some(job);
-            if let Some(m) = self.m16.as_mut() {
+            if let Some(m) = self.mds.as_mut() {
+                while let Some(j) = keep.as_ref() {
+                    let finished: Option<Option<Stop>> = match j {
+                        Job::Line(s) => m.line_step(s, 20_000),
+                        Job::Until(t) => match m.run(Some(*t), 20_000) {
+                            Stop::Cycles => None,
+                            Stop::Halt => Some(None),
+                            s => Some(Some(s)),
+                        },
+                    };
+                    if let Some(r) = finished {
+                        self.last_stop = r;
+                        keep = None;
+                    } else if t0.elapsed() > slice {
+                        break;
+                    }
+                }
+            } else if let Some(m) = self.m16.as_mut() {
                 while let Some(j) = keep.as_ref() {
                     // None: not finished. Some(None): arrived. Some(Some(stop)): a breakpoint or the halt came first.
                     let finished: Option<Option<Stop>> = match j {
@@ -600,7 +701,7 @@ impl eframe::App for App {
                 });
                 // G3: the box names the part that runs. Another part chosen with a program loaded loads it again on that
                 // part (load stops a run and drops a step job first); with nothing loaded the choice waits for Load.
-                if picked && (self.m.is_some() || self.m16.is_some()) {
+                if picked && (self.m.is_some() || self.m16.is_some() || self.mds.is_some()) {
                     self.load();
                 }
                 ui.add(egui::TextEdit::singleline(&mut self.hex_path).hint_text("path to .hex, .elf or .cof").desired_width(320.0));
@@ -635,7 +736,7 @@ impl eframe::App for App {
                     self.load();
                 }
                 ui.separator();
-                let loaded = self.m.is_some() || self.m16.is_some();
+                let loaded = self.m.is_some() || self.m16.is_some() || self.mds.is_some();
                 let idle = !self.running && self.job.is_none();
                 if ui.add_enabled(loaded && idle, egui::Button::new("Run")).clicked() {
                     self.snapshot();
@@ -659,9 +760,25 @@ impl eframe::App for App {
                     if let Some(m) = &mut self.m16 {
                         self.last_stop = m.step();
                     }
+                    if let Some(m) = &mut self.mds {
+                        self.last_stop = m.step();
+                    }
                 }
                 if ui.add_enabled(loaded && idle, egui::Button::new("Step over")).clicked() {
                     self.snapshot();
+                    if let Some(m) = &mut self.mds {
+                        // CALL (two words) and RCALL step over; everything else is one step
+                        let pc = m.cpu.pc;
+                        let next = match picsim::dspic_isa::decode(m.cpu.fetch(pc), m.cpu.fetch(pc + 2)).map(|d| d.inst) {
+                            Some(picsim::dspic_isa::Inst::Call { .. }) => Some(pc + 4),
+                            Some(picsim::dspic_isa::Inst::Rcall { .. } | picsim::dspic_isa::Inst::CallW { .. } | picsim::dspic_isa::Inst::RcallW { .. }) => Some(pc + 2),
+                            _ => None,
+                        };
+                        match next {
+                            Some(t) => self.job = Some(Job::Until(t)),
+                            None => self.last_stop = m.step(),
+                        }
+                    }
                     if let Some(m) = &mut self.m16 {
                         // CALL and CALLW step over (one word each); everything else is one step.
                         let w = m.cpu.fetch(m.cpu.pc);
@@ -715,6 +832,11 @@ impl eframe::App for App {
                     {
                         self.msg = e;
                     }
+                    if let Some(m) = &mut self.mds
+                        && let Err(e) = m.reset()
+                    {
+                        self.msg = e;
+                    }
                 }
                 egui::ComboBox::from_id_salt("speed").selected_text(format!("Speed: {}", picsim::pace::SPEEDS[self.speed_idx].0)).show_ui(ui, |ui| {
                     for (i, (name, _)) in picsim::pace::SPEEDS.iter().enumerate() {
@@ -726,7 +848,7 @@ impl eframe::App for App {
                 }
                 ui.label("Fosc override MHz (0 = firmware)");
                 // the family's highest clock (G2): 32 MHz on a PIC16, 64 on a PIC18
-                let fmax = self.m16.as_ref().map(|m| m.dev.fosc_max_mhz()).or(self.m.as_ref().map(|m| m.dev.fosc_max_mhz())).unwrap_or(64.0);
+                let fmax = self.mds.as_ref().map(|m| m.dev.fosc_max_mhz()).or(self.m16.as_ref().map(|m| m.dev.fosc_max_mhz())).or(self.m.as_ref().map(|m| m.dev.fosc_max_mhz())).unwrap_or(64.0);
                 ui.add(egui::DragValue::new(&mut self.fosc_mhz).range(0.0..=fmax as f32));
             });
             // Simulated cycles per second while running, against what the part does at the chosen Fosc.
@@ -743,13 +865,17 @@ impl eframe::App for App {
                 _ if self.job.is_some() => "stepping... (Pause cancels)".to_string(),
                 (Some(Stop::Watchpoint(c)), _) => format!("{} — data watchpoint at 0x{:04X}: {:02X} → {:02X}", self.msg, c.addr, c.before, c.after),
                 (Some(Stop::Condition { index, value }), _) => {
-                    let what = self.m.as_ref().and_then(|m| m.debugger.conditions.get(*index).map(|c| c.describe())).or_else(|| self.m16.as_ref().and_then(|m| m.debugger.conditions.get(*index).map(|c| c.describe()))).unwrap_or_default();
+                    let what = self.m.as_ref().and_then(|m| m.debugger.conditions.get(*index).map(|c| c.describe())).or_else(|| self.mds.as_ref().and_then(|m| m.debugger.conditions.get(*index).map(|c| c.describe()))).or_else(|| self.m16.as_ref().and_then(|m| m.debugger.conditions.get(*index).map(|c| c.describe()))).unwrap_or_default();
                     format!("{} — condition met: {what} (value 0x{value:X})", self.msg)
                 }
                 (Some(s), _) => format!("{} — stopped: {s:?}", self.msg),
                 _ => self.msg.clone(),
             });
         });
+        if self.mds.is_some() {
+            self.ui_ds(ui);
+            return;
+        }
         if self.m16.is_some() {
             self.ui16(ui);
             return;
@@ -1185,6 +1311,166 @@ fn watch_ui(ui: &mut egui::Ui, watch: &mut Vec<(String, usize)>, input: &mut Str
 }
 
 impl App {
+    /// The window body for a dsPIC33 part: CPU registers and call stack, Memory / SFRs / Variables / Terminal, the program.
+    fn ui_ds(&mut self, ui: &mut egui::Ui) {
+        let Some(m) = self.mds.as_mut() else { return };
+        let pc = m.cpu.pc;
+        if self.fosc_mhz > 0.0 {
+            m.cpu.p.set_fosc_override(f64::from(self.fosc_mhz));
+        }
+        egui::Panel::left("regs").default_size(260.0).show(ui, |ui| {
+            ui.heading("CPU");
+            let sr = m.cpu.sr_read();
+            egui::Grid::new("regsds").num_columns(2).show(ui, |ui| {
+                let row = |ui: &mut egui::Ui, n: &str, v: String| {
+                    ui.label(n);
+                    ui.monospace(v);
+                    ui.end_row();
+                };
+                row(ui, "PC", format!("{pc:06X}"));
+                for i in 0..16 {
+                    row(ui, &format!("W{i}"), format!("{:04X}  ({})", m.cpu.w[i], m.cpu.w[i] as i16));
+                }
+                let flags = [("OA", picsim::dspic::OA), ("OB", picsim::dspic::OB), ("SA", picsim::dspic::SA), ("SB", picsim::dspic::SB), ("DA", picsim::dspic::DA), ("DC", picsim::dspic::DC), ("RA", picsim::dspic::RA), ("N", picsim::dspic::N), ("OV", picsim::dspic::OV), ("Z", picsim::dspic::Z), ("C", picsim::dspic::C)];
+                row(ui, "SR", format!("{sr:04X}  IPL {}", m.cpu.ipl()));
+                row(ui, "", flags.iter().map(|(n, b)| if sr & b != 0 { (*n).to_string() } else { "-".repeat(n.len()) }).collect::<Vec<_>>().join(" "));
+                row(ui, "ACCA", format!("{:010X}", m.cpu.acc[0] as u64 & 0xFF_FFFF_FFFF));
+                row(ui, "ACCB", format!("{:010X}", m.cpu.acc[1] as u64 & 0xFF_FFFF_FFFF));
+                row(ui, "CORCON", format!("{:04X}", m.cpu.peek(0x44) as u16 | u16::from(m.cpu.peek(0x45)) << 8));
+                row(ui, "Cycles", m.cpu.cycles.to_string());
+                row(ui, "Instr", m.cpu.icount.to_string());
+                row(ui, "Fosc", format!("{} MHz", m.cpu.fosc_mhz()));
+                row(ui, "Time", format!("{:.3} ms", m.cpu.time_ns() / 1e6));
+            });
+            stopwatch_ui(ui, &mut self.sw, &mut self.sw_time, m.cpu.cycles, m.cpu.time_ns() as u64);
+            ui.separator();
+            ui.heading("Call stack");
+            let dbg = &m.debug;
+            let loc = |a: u32| -> String {
+                let f = dbg.func_at(a).map_or("?".to_string(), |i| dbg.func_label(i));
+                match dbg.lines.lookup(a) {
+                    Some((p, l)) => format!("{f}  {}:{l}", p.file_name().unwrap_or_default().to_string_lossy()),
+                    None => f,
+                }
+            };
+            ui.monospace(format!("> {}", if dbg.funcs.is_empty() { format!("{pc:06X}") } else { loc(pc) }));
+            for (i, site) in m.call_sites().iter().enumerate() {
+                let near = self.labels.range(..=*site).next_back().map_or(String::new(), |(a, n)| format!("  {n}+{}", site - a));
+                ui.monospace(format!("{:>3}  {}", i + 1, if dbg.funcs.is_empty() { format!("{site:06X}{near}") } else { loc(*site) }));
+            }
+            if !m.cpu.unmodelled.is_empty() || !m.cpu.notes.is_empty() {
+                ui.separator();
+                ui.heading("Notes");
+                for n in &m.cpu.notes {
+                    ui.label(n);
+                }
+                if !m.cpu.unmodelled.is_empty() {
+                    ui.label(format!("unmodelled SFRs touched: {}", m.cpu.unmodelled.iter().cloned().collect::<Vec<_>>().join(" ")));
+                }
+            }
+        });
+        egui::Panel::right("data").default_size(360.0).show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                for (i, t) in [(0, "Memory"), (1, "SFRs"), (4, "Variables"), (5, "Terminal")] {
+                    ui.selectable_value(&mut self.tab, i, t);
+                }
+            });
+            ui.separator();
+            match self.tab {
+                1 => {
+                    ui.horizontal(|ui| {
+                        ui.add(egui::TextEdit::singleline(&mut self.mem_filter).hint_text("filter"));
+                        ui.checkbox(&mut self.only_changed, "changed only");
+                    });
+                    let f = self.mem_filter.to_uppercase();
+                    let word = |a: u32| u16::from(m.cpu.peek(a)) | u16::from(m.cpu.peek(a + 1)) << 8;
+                    let prev = self.view_snap.as_deref();
+                    let pw = |a: u32| prev.map(|p| u16::from(p[a as usize]) | u16::from(p[a as usize + 1]) << 8);
+                    let mut list: Vec<(String, u32)> = m.dev.sfr.iter().filter(|s| f.is_empty() || s.name.to_uppercase().contains(&f)).filter(|s| !self.only_changed || pw(s.addr).is_some_and(|p| p != word(s.addr))).map(|s| (s.name.clone(), s.addr)).collect();
+                    list.sort_by_key(|x| x.1);
+                    egui::ScrollArea::vertical().show_rows(ui, 20.0, list.len(), |ui, range| {
+                        for (n, a) in &list[range] {
+                            let v = word(*a);
+                            let col = if pw(*a).is_some_and(|p| p != v) { monitor::CHANGED } else { ui.visuals().text_color() };
+                            ui.horizontal(|ui| {
+                                ui.label(egui::RichText::new(format!("{a:03X} {n:<12} {v:04X}  {v:016b}")).monospace().color(col));
+                            });
+                        }
+                    });
+                }
+                4 => variables_ui(ui, &m.debug, pc, &m.frames(), &m.cpu.mem, &m.cpu.prog_b, self.snap.as_ref().map(|s| (s, self.snap_frames.as_slice()))),
+                5 => {
+                    let ports: Vec<u8> = (1..=3).filter(|&n| m.cpu.p.has_uart[usize::from(n) - 1]).collect();
+                    if let Some((port, stream)) = self.terminal.ui(ui, &m.cpu.p.tx, &ports, m.cpu.cycles) {
+                        m.cpu.uart_feed(port, stream);
+                    }
+                }
+                _ => {
+                    egui::ScrollArea::vertical().show_rows(ui, 14.0, 0x3000 / 16, |ui, range| {
+                        for row in range {
+                            let a = row * 16;
+                            let cells: [Option<u8>; 16] = std::array::from_fn(|i| Some(m.cpu.peek((a + i) as u32)));
+                            monitor::memory_row(ui, a, &cells, self.view_snap.as_deref());
+                        }
+                    });
+                }
+            }
+        });
+        egui::CentralPanel::default().show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.heading("Program");
+                if !self.lines.is_empty() {
+                    ui.selectable_value(&mut self.src_view, true, "Source");
+                    ui.selectable_value(&mut self.src_view, false, "Disassembly");
+                }
+                ui.checkbox(&mut self.follow, "follow PC");
+                ui.add(egui::TextEdit::singleline(&mut self.goto_in).hint_text("goto 0x…").desired_width(100.0));
+                if ui.button("Go").clicked()
+                    && let Some(a) = hex_u32(&self.goto_in)
+                {
+                    self.view_addr = a & 0x7F_FFFE;
+                    self.follow = false;
+                }
+            });
+            if self.src_view && !self.lines.is_empty() {
+                let callers = m.call_sites();
+                source_pane(ui, &self.lines, &self.elf_dir, &mut self.sources, &mut self.last_src, &mut m.breakpoints, &callers, pc, self.follow, None);
+                return;
+            }
+            let start = if self.follow { pc.saturating_sub(8) & !1 } else { self.view_addr & !1 };
+            let lines = ((ui.available_height() / 15.0) as usize).clamp(8, 80);
+            let mut bp_toggle = None;
+            let mut a = start;
+            for _ in 0..lines {
+                let (w, w2) = (m.cpu.fetch(a), m.cpu.fetch(a + 2));
+                if let Some(l) = self.labels.get(&a) {
+                    ui.colored_label(egui::Color32::from_rgb(120, 170, 255), format!("{l}:"));
+                }
+                let d = picsim::dspic_isa::decode(w, w2);
+                let text = d.map_or("?".to_string(), |d| picsim::dspic_isa::format(&d.inst, a, false));
+                let has_bp = m.breakpoints.contains(&a);
+                let mut rt = egui::RichText::new(format!("{} {a:06X}  {w:06X}  {text}", if has_bp { "●" } else { " " })).monospace();
+                if a == pc {
+                    rt = rt.background_color(egui::Color32::from_rgb(70, 90, 20)).color(egui::Color32::WHITE);
+                } else if has_bp {
+                    rt = rt.color(egui::Color32::from_rgb(255, 110, 110));
+                }
+                if ui.add(egui::Label::new(rt).sense(egui::Sense::click())).clicked() {
+                    bp_toggle = Some(a);
+                }
+                a += 2 * u32::from(d.map_or(1, |d| d.words));
+            }
+            if let Some(b) = bp_toggle {
+                if let Some(p) = m.breakpoints.iter().position(|x| *x == b) {
+                    m.breakpoints.remove(p);
+                } else {
+                    m.breakpoints.push(b);
+                }
+            }
+            ui.label("click an instruction to toggle a breakpoint");
+        });
+    }
+
     /// The window body for a PIC16 part: core registers and return stack, Memory / SFRs / Watch, and the disassembly.
     fn ui16(&mut self, ui: &mut egui::Ui) {
         let Some(m) = self.m16.as_mut() else { return };

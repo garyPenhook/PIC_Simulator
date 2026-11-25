@@ -133,6 +133,12 @@ fn run() -> Result<ExitCode, String> {
         }
         return run16(dev, &hex, asm, stim, until, until_given, &dump, max, trace, trace_regs, &bps, bp_max, &mut pace, strict, fosc);
     }
+    if dev.device.family == "dspic33" {
+        if show_cfg {
+            return Err("--config is not supported for dsPIC33 parts yet".into());
+        }
+        return run_ds(dev, &hex, asm, stim, until, until_given, &dump, max, trace, trace_regs, &bps, bp_max, &mut pace, strict, fosc);
+    }
     let mut m = Machine::new(dev)?;
     m.strict = strict;
     let given = hex.clone();
@@ -408,6 +414,119 @@ fn run16(
             println!("tx{n}: {}", String::from_utf8_lossy(&bytes).escape_debug());
         }
     }
+    for n in &m.cpu.notes {
+        eprintln!("note: {n}");
+    }
+    if !m.cpu.unmodelled.is_empty() {
+        eprintln!("note: unmodelled SFRs touched: {}", m.cpu.unmodelled.iter().cloned().collect::<Vec<_>>().join(" "));
+    }
+    if stop == Stop::Unmodelled {
+        return Ok(ExitCode::from(3));
+    }
+    Ok(if stop == Stop::Halt || until.is_none() { ExitCode::SUCCESS } else { ExitCode::from(1) })
+}
+
+/// The dsPIC33 path: the 16-bit core with its DSP engine and the peripherals of the dsPIC33CK.
+#[allow(clippy::too_many_arguments)]
+fn run_ds(
+    dev: devdesc::Device,
+    hex: &std::path::Path,
+    asm: Option<PathBuf>,
+    stim: Option<PathBuf>,
+    until: Option<String>,
+    until_given: bool,
+    dump: &[String],
+    max: u64,
+    trace: Option<(u64, u64)>,
+    trace_regs: Option<Vec<String>>,
+    bps: &[String],
+    bp_max: usize,
+    pace: &mut Option<Pace>,
+    strict: bool,
+    fosc: Option<f64>,
+) -> Result<ExitCode, String> {
+    let mut m = picsim::machine_ds::MachineDs::new(dev)?;
+    m.strict = strict;
+    let given = hex.to_path_buf();
+    let hex = picsim::lines::program_hex(hex)?;
+    m.load_hex(&std::fs::read_to_string(&hex).map_err(|e| format!("{}: {e}", hex.display()))?)?;
+    if let Some(f) = &stim {
+        m.load_stimulus(&std::fs::read_to_string(f).map_err(|e| format!("{}: {e}", f.display()))?).map_err(|e| format!("{}: {e}", f.display()))?;
+    }
+    if let Some(f) = fosc {
+        m.cpu.p.set_fosc_override(f);
+    }
+    let asm = asm.unwrap_or_else(|| hex.with_extension("S"));
+    if let Ok(t) = std::fs::read_to_string(&asm) {
+        m.load_symbols_from_asm(&t);
+    }
+    if let Ok(t) = std::fs::read_to_string(hex.with_extension("map")) {
+        m.load_symbols_from_map(&t);
+    }
+    if let Some(e) = picsim::debuginfo::elf_for(&given) {
+        if let Err(e) = m.load_elf(&e) {
+            eprintln!("note: {e}");
+        }
+    }
+    let until = default_until(until, until_given, m.syms.contains_key("__halt"));
+    let stop_at = match &until {
+        Some(s) => Some(sym(&m.syms, &m.debug, s)?.ok_or(format!("symbol {s} not found (no {})", asm.display()))?),
+        None => None,
+    };
+    m.until_routine = until_given && stop_at.is_some_and(|a| m.debug.is_routine_entry(a));
+    if let Some((from, to)) = trace {
+        let regs = trace_columns(&m.dev, trace_regs, &["SR", "CORCON"])?;
+        m.run(None, from);
+        if strict && !m.cpu.unmodelled.is_empty() {
+            return Ok(strict_failure(&m.cpu.unmodelled));
+        }
+        while m.cpu.cycles < to {
+            let pc = m.cpu.pc;
+            let c0 = m.cpu.cycles;
+            let (w0, w1) = (m.cpu.fetch(pc), m.cpu.fetch(pc + 2));
+            let text = picsim::dspic_isa::decode(w0, w1).map_or("?".to_string(), |d| picsim::dspic_isa::format(&d.inst, pc, false));
+            m.cpu.step();
+            let w: Vec<String> = (0..16).map(|i| format!("{:04X}", m.cpu.w[i])).collect();
+            let cols: String = regs.iter().map(|(n, a)| format!(" {n}={:04X}", u16::from_le_bytes([m.peek(*a, 1)[0], m.peek(*a + 1, 1)[0]]))).collect();
+            println!("{:>8} {:06X}  {:<34} +{} W={}{cols}", c0, pc, text, m.cpu.cycles - c0, w.join(" "));
+            if strict && !m.cpu.unmodelled.is_empty() {
+                return Ok(strict_failure(&m.cpu.unmodelled));
+            }
+        }
+        return Ok(ExitCode::SUCCESS);
+    }
+    for b in bps {
+        m.breakpoints.push(sym(&m.syms, &m.debug, b)?.ok_or(format!("symbol {b} not found"))?);
+    }
+    check_dump(&m.debug, dump)?;
+    if let Some(p) = pace.as_mut() {
+        p.restart(m.cpu.cycles);
+    }
+    let fosc_of = |m: &picsim::machine_ds::MachineDs| (m.cpu.cycles, m.cpu.fosc_mhz() / 2.0);
+    let mut stop = paced_run(pace, max, &mut m, fosc_of, |m, n| m.run(stop_at, n));
+    let mut n = 0;
+    while let Stop::Breakpoint(pc) = stop {
+        n += 1;
+        let name = m.syms.iter().find(|(_, v)| **v == pc).map_or("?", |(k, _)| k.as_str());
+        println!("bp {n} {name} cycles {} sp {:#06X}", m.cpu.cycles, m.cpu.w[15]);
+        if n >= bp_max {
+            break;
+        }
+        let left = max.saturating_sub(m.cpu.cycles);
+        stop = paced_run(pace, left, &mut m, fosc_of, |m, n| m.run(stop_at, n));
+    }
+    println!("stop: {stop:?}  cycles: {}  instructions: {}", m.cpu.cycles, m.cpu.icount);
+    for d in dump {
+        let (name, len) = dump_spec(d)?;
+        let addr = match num_addr(name) {
+            Some(a) => a,
+            None => sym(&m.syms, &m.debug, name)?.or_else(|| m.dev.find_sfr(name).map(|s| s.addr)).ok_or(format!("unknown symbol {name}"))?,
+        };
+        let b = m.peek(addr, len);
+        let v: u64 = b.iter().take(8).rev().fold(0, |a, x| a << 8 | u64::from(*x));
+        println!("{name} = {v}  ({})", b.iter().map(|x| format!("{x:02X}")).collect::<Vec<_>>().join(" "));
+    }
+    m.cpu.report(&mut std::io::stdout());
     for n in &m.cpu.notes {
         eprintln!("note: {n}");
     }

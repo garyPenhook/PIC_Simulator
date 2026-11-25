@@ -1110,3 +1110,38 @@ Code: `oscillator.rs` (`write_at`, `request`, `poll`, `k22_request`), `pic18.rs`
 * `[A157]` assumptions: the data sheets give no start-up time for HFINTOSC, LFINTOSC or SOSC, so those are ready at once; the external oscillator frequency is unknown, so the OST uses the stimulus/CLI Fosc override, else the family maximum; the 200 us is the typical value. OSCSTAT shows the current source only (EXTOR/HFOR/PLLR of the pending source are not shown while it starts). The oscillator-fail (FSCM) path "PLL fails to lock" is not modelled. 
 * PIC16 parts with OSCCON1/OSCCON3 (PIC16F171xx, F131xx/F132xx, F183xx) follow the same rules: DS40002343F 11.2.3-11.2.5 p.93 and DS40001839E 7.3 p.85-87 give the NOSCR/ORDY/CSWIF/CSWHOLD sequence, the Sleep rule and abandoning a switch; the OST is 1024 oscillations (DS40002343F 11.1.1.3 p.87, DS40001839E 7.2.1.3 p.82) and PLL03 gives 200 us (DS40002343F p.631, DS40002686B p.606, DS40001839E Table 35-9 p.425). NOSC codes: EXTOSC 111, EXTOSC with the 4x PLL 010 (001 on the F183xx); the F183xx also has HFINTOSC with the 2x PLL (000), given the same 200 us (`[A157]` assumption: the data sheet lists one PLL lock time). The PIC16F131xx data sheet (DS40002519D 11.1.3 p.89) states the OST rule but its electrical table was not found with a PLL03 row: the 200 us is taken from the same module in DS40002686B. A PIC16 switch is held, not completed, while the part sleeps (DS40002343F 11.2.5 p.93); CSWIF rises through the ordinary interrupt-flag path.
 * K22 (no NOSC/ORDY): a write that changes SCS, the INTOSC enable (IRCF/INTSRC/MFIOSEL) or the PLL keeps the old clock and the old OSTS/HFIOFS/PLLRDY until the new clock is ready (DS40001412H 2.11.3 p.40, Figure 2-9 p.41): LP/XT/HS take TOST = 1024 oscillations (Table 27-11 p.440); the PLL on an external oscillator adds TPLL, about 2 ms (Figure 2-9 note p.41, 2.10 p.38, Table 2-2 p.32); the HFINTOSC/MFINTOSC takes TIOBST = 0.25 ms typical (Table 27-11 p.440) when it was not already running; an IRCF change inside the running INTOSC is immediate (3.2.3 p.45); writing the old selection back abandons the request. `[A157]` assumptions: the secondary oscillator, LFINTOSC, EC and RC have no stated start-up time and are ready at once; PLLEN on an INTOSC has no stated lock time and is immediate; the 2 old + 3-4 new cycle pause of the glitch-free switch (2.11 p.39) and the Sleep/two-speed start-up interaction are not modelled; Fosc of an external crystal is the stimulus/CLI override, else the family maximum.
+
+## dsPIC33CK core (`dspic*.rs`, `machine_ds.rs`; dsPIC33CK64MC105 DS70005399D, CPU FRM DS70005158C, PRM DS70000157G)
+
+What is modelled: the whole dsPIC33C instruction set (`dspic_isa.rs` decodes and disassembles it; `dspic_exec.rs` runs it): the MCU
+group, `BFEXT`/`BFINS`, `MOV.D`, the table instructions, `DO`/`REPEAT`, the divides (done in the first pass of the `REPEAT`; a
+divisor of 0 is the math error trap), `CTXTSWP` (alternate W arrays, no automatic switch on interrupts), and the DSP engine
+(`dspic_dsp.rs`: MAC, MSC, MPY, MPY.N, ED, EDAC, MOVSAC, CLR with X/Y prefetch, modulo and bit-reversed addressing, accumulator
+write-back, LAC/SAC/SFTAC/NORM/MAX/MIN, CORCON rounding, saturation and fractional/integer modes). Exceptions (`dspic_exc.rs`): the six
+traps with their IVT vectors, interrupts by IRQ number (`IFSx`/`IECx`/`IPCx`, vector at `0x14 + 2 * IRQ`), `DISI`, `GIE`, `INTTREG`, Sleep
+and Idle. Peripherals with a model: I/O ports (`PORTx` reads the pins, `LATx`), Timer1, UART1 to UART3, the 12-bit ADC (one shared
+core, software trigger), the oscillator with its unlock sequences, clock switching, FRC divider and PLL (`dspic_clock.rs`: the clock
+a program runs at follows `OSCCON`, `CLKDIV`, `PLLFBD`, `PLLDIV`), RCON, the watchdog, and the NVM controller (double-word write,
+page erase of 1024 instructions). Every other SFR is plain storage and is listed as "unmodelled" when a program touches it.
+
+Addresses: the PC and every program address are the values the hardware shows (two per instruction). A hex file holds four bytes per
+instruction (three of the word and a zero) at twice the PC value.
+
+### Timing (measured against MDB)
+
+* An instruction takes one cycle; a taken branch, `GOTO`, `CALL`, `RCALL` four; `RETURN`/`RETFIE`/`RETLW` six; a compare-and-skip or
+  bit-test skip one plus the words skipped; a taken `CPBxx` five; `DO`, `MOV.D`, `BFEXT`/`BFINS` two; `TBLRD` five (PRM) -- see below.
+* A read of a non-CPU SFR costs one more cycle (PRM 3.2.1 note 3).
+* Read-after-write stall (CPU FRM 11.1): if an instruction wrote W*n* (as a result, or by modifying a destination pointer) and the
+  next one forms a source address from W*n*, that one takes a cycle more. MDB shows no stall after a direct write of W15; picsim copies it.
+  Checked: `arith` 762 cycles and `reentrant` 4090 cycles to `__halt` equal MDB's stopwatch, `lib_serial` is 1 cycle off, and the
+  cycle windows of the compiler's `lib_i2c`, `lib_onewire` and `lib_softserial` tests hold.
+* Differences from MDB that picsim follows the data sheet on: `DC` is the carry out of bit 3 for word operations (MDB agrees); software
+  writes to `OA`, `OB`, `SA`, `SB` and `W15<0>` stick in MDB but not in picsim; `CORCON.SFA` is read only; MDB traps a Y-space
+  prefetch outside `0x2000..0x2FFF` and so does picsim.
+
+### Differential tests
+
+`scripts/dspic_roundtrip.py` (decoder against the XC-DSC assembler on random words, 500,000 clean), `scripts/dspic_diff.py` (random
+instructions run in MDB and picsim from the same random state; registers, accumulators, CORCON, RAM checksums and cycles are compared),
+`scripts/dspic_try.py 'asm; asm'` (one snippet in both) and `scripts/dspic_exec_check.py` (the compiler's `exec_dspic` programs).

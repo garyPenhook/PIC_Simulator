@@ -1,0 +1,28 @@
+# Numbers read BY HAND from the dsPIC33CK64MC105 family data sheet, used by `devgen check` to cross-check the
+# description generated from the Microchip pack. Do not generate this file.
+
+[source]
+datasheet = "DS70005399D"
+reference = "Features (p.1-2), Fig. 4-2 and 4-4 (p.36-37), 4.1.2 (p.37)"
+
+[memory]
+program_bytes = 44800     # program space 0x000000-0x00AEFE (+ configuration 0x00AF00), address units  (Fig. 4-2, p.36)
+sram_bytes    = 8192      # "Eight Kbytes SRAM Memory"                                               (p.1)
+eeprom_bytes  = 0         # no data EEPROM                                                            (p.1)
+config_bytes  = 256       # configuration words 0x00AF00-0x00AFFE in the 0xAF00-0xB000 block          (Fig. 4-2, p.36)
+user_id_bytes = 256       # OTP at 0x801700-0x8017FF; the data sheet's 384 bytes also count the UDID   (p.1, Table 4-1 p.38)
+
+[vectors]
+reset          = 0        # GOTO at 0x000000, start address at 0x000002   (4.1.2, p.37)
+interrupt_high = 4        # interrupt vector table from 0x000004          (4.1.2, p.37; Section 7)
+interrupt_low  = 6
+
+# Peripheral counts from the data sheet features (p.1-2), checked by counting SFRs whose name matches the pattern.
+[counts]
+"U#MODE"      = 3   # three protocol UARTs                       (p.2)
+"SPI#CON1L"   = 2   # two four-wire SPI modules                  (p.2)
+"I2C#CONL"    = 1   # one I2C host and client                    (p.2)
+"CCP#CON1L"   = 4   # four SCCP modules                          (p.2)
+"CLC#CONL"    = 4   # four configurable logic cells              (p.2)
+"PG#CONL"     = 4   # four PWM generators (pairs)                (p.1)
+"QEI#CON"     = 1   # one quadrature encoder interface           (p.2)

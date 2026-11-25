@@ -47,7 +47,7 @@
 //!
 //! [[pin]]             # one input pin of a port
 //! port = "B"          # port letter
-//! bit = 5             # 0-7
+//! bit = 5             # 0-7 (0-15 on a dsPIC33)
 //! level = 1           # 0 or 1 (also true/false); from `at` on, later entries replace earlier ones
 //! at = 0
 //!
@@ -110,7 +110,7 @@ pub struct Stimulus {
     /// (port letter, pin, from cycle, volts)
     pub analog: Vec<(u8, u8, u64, f64)>,
     /// (port letter, from cycle, pin mask, levels): the [[bounce]] changes first, then [[pin]] and [[port]].
-    pub pins: Vec<(u8, u64, u8, u8)>,
+    pub pins: Vec<(u8, u64, u16, u16)>,
     /// The pins [[bounce]] entries name, checked against the part when the stimulus is applied.
     pub bounce_pins: Vec<crate::periph::Pin>,
     /// (from cycle, level) of the MCLR pin, sorted by cycle.
@@ -214,16 +214,16 @@ impl Stimulus {
                     };
                     let at = int("at", MAX_CYCLES)?.unwrap_or(0);
                     if k == "pin" {
-                        let bit = int("bit", 7)?.ok_or("pin needs bit")? as u8;
+                        let bit = int("bit", 15)?.ok_or("pin needs bit")? as u8;
                         let level = match t.get("level") {
                             Some(toml::Value::Boolean(b)) => u8::from(*b),
                             Some(x) if matches!(x.as_integer(), Some(0 | 1)) => x.as_integer().unwrap() as u8,
                             _ => return Err("pin.level must be 0, 1, true or false".into()),
                         };
-                        st.pins.push((letter, at, 1 << bit, level << bit));
+                        st.pins.push((letter, at, 1u16 << bit, u16::from(level) << bit));
                     } else {
-                        let mask = int("mask", 0xFF)?.unwrap_or(0xFF) as u8;
-                        st.pins.push((letter, at, mask, int("value", 0xFF)?.ok_or("port needs value")? as u8));
+                        let mask = int("mask", 0xFFFF)?.unwrap_or(0xFF) as u16;
+                        st.pins.push((letter, at, mask, int("value", 0xFFFF)?.ok_or("port needs value")? as u16));
                     }
                 }
                 continue;
@@ -497,12 +497,38 @@ impl Stimulus {
                 ));
             }
         }
-        st.pins.splice(0..0, bounce);
+        st.pins.splice(0..0, bounce.into_iter().map(|(l, at, m, v)| (l, at, u16::from(m), u16::from(v))));
         Ok(st)
     }
 
     /// The same for a PIC16 core, which models the EUSART receivers, the ADC inputs and the port pins only: any other section is an
     /// error rather than being ignored.
+    /// Applies the stimulus to a dsPIC33 core: pins, UART, ADC and the board's LEDs.
+    pub fn apply_dspic(self, dev: &Device, cpu: &mut crate::dspic::Dspic) -> Result<(), String> {
+        for (what, used) in [("spi", !self.spi.is_empty()), ("i2c", !self.i2c.is_empty()), ("i2c_host", !self.i2c_host.is_empty()), ("analog", !self.analog.is_empty()), ("mclr", !self.mclr.is_empty()), ("clock", !self.clocks.is_empty()), ("bounce", !self.bounce_pins.is_empty())] {
+            if used {
+                return Err(format!("{}: [[{what}]] is not modelled on dsPIC33 parts yet; [[pin]]/[[port]], [[uart]], [[adc]] are", dev.device.name));
+            }
+        }
+        for (letter, at, mask, val) in self.pins {
+            if !cpu.pin_feed(letter, at, mask, val) {
+                return Err(format!("{}: no PORT{} on this part", dev.device.name, letter as char));
+            }
+        }
+        for (port, rx) in self.uart {
+            if !cpu.uart_feed(port, rx) {
+                return Err(format!("{}: no UART{port} on this part", dev.device.name));
+            }
+        }
+        for (ch, at, v) in self.adc {
+            cpu.adc_feed(ch, at, v);
+        }
+        if self.fosc_given {
+            cpu.p.set_fosc_override(self.board.fosc_mhz);
+        }
+        Ok(())
+    }
+
     pub fn apply16(self, dev: &Device, cpu: &mut crate::pic16::Pic16) -> Result<(), String> {
         let other = [
             ("spi", !self.spi.is_empty()),
@@ -554,7 +580,10 @@ impl Stimulus {
             cpu.clb_set(c);
         }
         for (letter, at, mask, val) in self.pins {
-            cpu.pin_feed(letter, at, mask, val);
+            if (mask | val) > 0xFF {
+                return Err(format!("{}: pins above 7 only exist on the 16-bit ports of a dsPIC33", dev.device.name));
+            }
+            cpu.pin_feed(letter, at, mask as u8, val as u8);
         }
         for (ch, at, v) in self.adc {
             cpu.adc_feed(ch, at, v);
@@ -623,7 +652,10 @@ impl Stimulus {
             return Err(format!("{}: [[bounce]] on {}: no such pin on this part", dev.device.name, crate::periph::pin_name(pin)));
         }
         for (letter, at, mask, val) in self.pins {
-            if !p.pin_feed(letter, at, mask, val) {
+            if (mask | val) > 0xFF {
+                return Err(format!("{}: pins above 7 and port values above 0xFF only exist on the 16-bit ports of a dsPIC33", dev.device.name));
+            }
+            if !p.pin_feed(letter, at, mask as u8, val as u8) {
                 return Err(format!("{}: no PORT{} in the simulator", dev.device.name, letter as char));
             }
         }
@@ -835,7 +867,7 @@ mod tests {
     fn changes(text: &str) -> Vec<(u64, u8)> {
         Stimulus::parse(text).unwrap().pins.iter().map(|&(l, at, m, v)| {
             assert_eq!((l, m), (b'B', 1), "RB0");
-            (at, v)
+            (at, v as u8)
         }).collect()
     }
 
@@ -894,7 +926,7 @@ mod tests {
             let st = Stimulus::parse(&text).unwrap();
             let mut d = crate::drive::Drive::default();
             for &(_, at, m, v) in &st.pins {
-                d.push(at, 0, m, v);
+                d.push(at, 0, m as u8, v as u8);
             }
             assert_eq!(d.level(0, 110), 1, "the [[pin]] entry, not the bounce's 0, in either order");
         }

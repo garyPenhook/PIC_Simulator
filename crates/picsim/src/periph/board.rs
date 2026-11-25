@@ -66,6 +66,11 @@ pub fn parse_pin(s: &str) -> Option<Pin> {
     let b = s.as_bytes();
     match b {
         [l @ b'A'..=b'H', d @ b'0'..=b'7'] => Some((*l, d - b'0')),
+        // the 16-bit ports of the dsPIC33 have pins 8 to 15
+        [l @ b'A'..=b'H', d1 @ b'0'..=b'1', d2 @ b'0'..=b'9'] => {
+            let n = (d1 - b'0') * 10 + (d2 - b'0');
+            (8..=15).contains(&n).then_some((*l, n))
+        }
         _ => None,
     }
 }

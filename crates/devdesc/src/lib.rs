@@ -219,7 +219,12 @@ impl Device {
     /// p.629, DS40002519D, DS40002686B p.604, DS40002325C p.523, DS40001799F p.401, DS40001800E p.419, DS40001795K
     /// p.421, DS40001839E p.422) and 64 MHz on the PIC18s (DS40002043F p.699, DS40002214G p.898).
     pub fn fosc_max_mhz(&self) -> f64 {
-        if self.device.family == "pic16e" { 32.0 } else { 64.0 }
+        match self.device.family.as_str() {
+            "pic16e" => 32.0,
+            // dsPIC33CK: up to 100 MIPS at Fcy = Fosc / 2, so a 200 MHz oscillator [DS70005399D p.1]
+            "dspic33" => 200.0,
+            _ => 64.0,
+        }
     }
 
     pub fn load(path: &Path) -> Result<Device, Error> {

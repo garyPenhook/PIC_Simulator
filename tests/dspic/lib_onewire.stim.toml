@@ -1,0 +1,5 @@
+# The 1-Wire line RB0 is pulled high while the part lets go of it.
+[[pin]]
+port = "B"
+bit = 0
+level = 1

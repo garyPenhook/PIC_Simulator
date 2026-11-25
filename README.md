@@ -1,6 +1,6 @@
-# PicSim — cycle-counting PIC16 / PIC18 simulator
+# PicSim — cycle-counting PIC16 / PIC18 / dsPIC33 simulator
 
-PicSim simulates 8-bit Microchip **PIC16 and PIC18** microcontrollers. It runs the `.hex` file your toolchain produces,
+PicSim simulates 8-bit Microchip **PIC16 and PIC18** microcontrollers and the 16-bit **dsPIC33CK64MC105**. It runs the `.hex` file your toolchain produces,
 counts instruction cycles, models the on-chip peripherals, and gives you a graphical debugger, a command-line runner for
 scripted tests and benchmarks, and editor debugging through the **Debug Adapter Protocol** (VS Code).
 
@@ -43,6 +43,7 @@ The same program in the disassembly view, with the special function register lis
 | PIC16F171xx | 16F17126, 16F17146 |
 | PIC16F180x6 | 16F18056, 16F18076 |
 | PIC16F183xx | 16F18313 … 16F18346 and the LF variants |
+| dsPIC33CK | DSPIC33CK64MC105 (the 16-bit core with its DSP engine, interrupt controller, oscillator/PLL, UART1-3, ADC, Timer1, NVM, watchdog) |
 
 Modelled peripherals include timers, interrupts (priority and vectored), UART/EUSART, SPI/I2C (MSSP), ADC/ADCC, CCP and
 PWM, CWG, CLC, comparators, DMA, CRC and scanner, watchdog, NVM/EEPROM, interrupt-on-change and PPS. A register whose
